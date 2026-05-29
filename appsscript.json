@@ -1,0 +1,18 @@
+{
+  "timeZone": "America/Bogota",
+  "exceptionLogging": "STACKDRIVER",
+  "runtimeVersion": "V8",
+  "webapp": {
+    "executeAs": "USER_DEPLOYING",
+    "access": "DOMAIN"
+  },
+  "dependencies": {
+    "libraries": [
+      {
+        "userSymbol": "BibliotecaVertexAI",
+        "version": "3",
+        "libraryId": "1jdNIANrbx43Za9iqqHtuhSEDc0G1AKTGCnpEz_cwKjzct_b0wV6qbHan"
+      }
+    ]
+  }
+}
