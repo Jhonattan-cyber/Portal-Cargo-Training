@@ -1,0 +1,130 @@
+// ===================== V92: PLANIFICACION — Whitelist y Config =====================
+
+/**
+ * V92: Obtiene la URL de la app de planificacion.
+ */
+function getPlanningUrl() {
+  try {
+    return PropertiesService.getScriptProperties().getProperty('PLANNING_URL') || '';
+  } catch(e) { return ''; }
+}
+
+/**
+ * V92: Configura la URL de la app de planificacion (solo Admin).
+ * Registra cambio en log de auditoria.
+ */
+function setPlanningUrl(url) {
+  var usr = getUsuarioActual();
+  if (!usr || (usr.rol || '').toUpperCase() !== 'ADMIN') {
+    return { success: false, error: 'Solo ADMIN' };
+  }
+  var props = PropertiesService.getScriptProperties();
+  var anterior = props.getProperty('PLANNING_URL') || '';
+  props.setProperty('PLANNING_URL', url || '');
+  _logPlanningAudit(usr.email || usr.nombre, 'CAMBIO_URL', anterior, url || '');
+  return { success: true, url: url };
+}
+
+/**
+ * V92: Obtiene la whitelist de usuarios con acceso a Planificacion.
+ * @returns {Array} Lista de emails
+ */
+function getPlanningWhitelist() {
+  try {
+    var raw = PropertiesService.getScriptProperties().getProperty('PLANNING_WHITELIST') || '';
+    return raw ? raw.split(',').map(function(e) { return e.trim().toLowerCase(); }).filter(function(e) { return e; }) : [];
+  } catch(e) { return []; }
+}
+
+/**
+ * V92: Actualiza la whitelist de Planificacion (solo Admin).
+ * Detecta correos agregados/eliminados y registra en auditoria.
+ */
+function setPlanningWhitelist(emails) {
+  var usr = getUsuarioActual();
+  if (!usr || (usr.rol || '').toUpperCase() !== 'ADMIN') {
+    return { success: false, error: 'Solo ADMIN' };
+  }
+  var props = PropertiesService.getScriptProperties();
+  var anteriorRaw = props.getProperty('PLANNING_WHITELIST') || '';
+  var anterior = anteriorRaw ? anteriorRaw.split(',').map(function(e) { return e.trim().toLowerCase(); }).filter(function(e) { return e; }) : [];
+
+  var clean = (emails || []).map(function(e) { return String(e).trim().toLowerCase(); }).filter(function(e) { return e && e.indexOf('@') >= 0; });
+  props.setProperty('PLANNING_WHITELIST', clean.join(','));
+
+  // Detectar agregados y eliminados
+  var actor = usr.email || usr.nombre;
+  for (var i = 0; i < clean.length; i++) {
+    if (anterior.indexOf(clean[i]) < 0) {
+      _logPlanningAudit(actor, 'AGREGAR_CORREO', '', clean[i]);
+    }
+  }
+  for (var j = 0; j < anterior.length; j++) {
+    if (clean.indexOf(anterior[j]) < 0) {
+      _logPlanningAudit(actor, 'ELIMINAR_CORREO', anterior[j], '');
+    }
+  }
+
+  return { success: true, whitelist: clean };
+}
+
+/**
+ * V92: Verifica si un usuario tiene acceso a Planificacion.
+ * Acceso: Admin siempre + emails en whitelist.
+ */
+function tieneAccesoPlanificacion(email) {
+  if (!email) return false;
+  var emailNorm = email.toLowerCase().trim();
+  var usr = getUsuarioActual();
+  if (!usr) return false;
+  var rolUpper = (usr.rol || '').toUpperCase();
+  if (rolUpper === 'ADMIN') return true;
+  // V3: Solo CAPACITY con base CONTROL NORTE tienen acceso a Planificacion
+  if (rolUpper === 'CAPACITY') {
+    var paisUpper = (usr.pais || '').toUpperCase();
+    return paisUpper.indexOf('CONTROL NORTE') >= 0;
+  }
+  var whitelist = getPlanningWhitelist();
+  return whitelist.indexOf(emailNorm) >= 0;
+}
+
+/**
+ * V92: Registra un evento en el log de auditoria de Planificacion.
+ * Almacena en ScriptProperties como JSON array (ultimos 200 registros).
+ */
+function _logPlanningAudit(actor, accion, valorAnterior, valorNuevo) {
+  try {
+    var props = PropertiesService.getScriptProperties();
+    var raw = props.getProperty('PLANNING_AUDIT_LOG') || '[]';
+    var log = JSON.parse(raw);
+    log.push({
+      ts: new Date().toISOString(),
+      actor: actor,
+      accion: accion,
+      anterior: valorAnterior,
+      nuevo: valorNuevo
+    });
+    // Mantener ultimos 200 registros
+    if (log.length > 200) log = log.slice(log.length - 200);
+    props.setProperty('PLANNING_AUDIT_LOG', JSON.stringify(log));
+  } catch(e) {
+    Logger.log('Error en _logPlanningAudit: ' + e.message);
+  }
+}
+
+/**
+ * V92: Obtiene el log de auditoria de Planificacion (solo Admin).
+ * @returns {Array} Ultimos registros de auditoria
+ */
+function getPlanningAuditLog() {
+  var usr = getUsuarioActual();
+  if (!usr || (usr.rol || '').toUpperCase() !== 'ADMIN') return [];
+  try {
+    var raw = PropertiesService.getScriptProperties().getProperty('PLANNING_AUDIT_LOG') || '[]';
+    var log = JSON.parse(raw);
+    log.reverse(); // Mas recientes primero
+    return log;
+  } catch(e) { return []; }
+}
+
+

@@ -1,0 +1,344 @@
+// ===================== FILTRO DE ACTIVOS (WHITELIST/BLACKLIST POR BASE) =====================
+// Reglas de negocio alineadas con Looker Studio:
+// CHILE: SOLO "ACTIVO" cuenta. Excluir todo lo demas (LM, NUEVO INGRESO, INACTIVO, etc.)
+// LATAM/PHH: SOLO "ACTIVO" cuenta.
+// NAM/CONTROL NORTE: Activo = todo lo que NO sea "WC"
+// RAMPA: La col de ACTIVO se descubre dinámicamente (no ALL_ACTIVE).
+//        Col 14 es STATUS HABILITACION (Habilitado/No Habilitado), distinta de Status activo.
+var STATUS_COLUMNS = {
+  NAM:   { col: 15, logic: 'WHITELIST', whitelist: ['ACTIVO', 'NUEVO INGRESO'] },
+  RAMPA: { logic: 'DISCOVER_WHITELIST', whitelist: ['ACTIVO', 'NUEVO INGRESO'], preferredCol: 79, headerKeywords: ['status', 'estatus', 'dotacion', 'estado'], habExclude: ['habilitacion', 'habilitado'] },
+  LATAM: { col: 15, logic: 'WHITELIST', whitelist: ['ACTIVO', 'NUEVO INGRESO'] },
+  CHILE: { col: 15, logic: 'WHITELIST', whitelist: ['ACTIVO', 'NUEVO INGRESO'] }
+};
+
+// FUENTE DE VERDAD PARA HABILITACION GENERAL (alineado con Looker Studio)
+// COLUMN = leer directamente de la hoja (col fija o descubierta por headerKeywords)
+// CALCULATED = fallback: calcular desde cursos individuales (1 vencido aplicable = INHABILITADO)
+// headerKeywords: buscar encabezado que contenga alguno de estos textos (case-insensitive)
+var HABILITACION_SOURCE = {
+  RAMPA: { type: 'COLUMN', col: 14, headerKeywords: ['status habilitacion'] },
+  CHILE: { type: 'COLUMN', headerKeywords: ['estatus funcionario', 'status habilitacion', 'estado funcionario'] },
+  LATAM: { type: 'COLUMN', headerKeywords: ['estatus funcionario', 'status habilitacion', 'estado funcionario'] },
+  NAM:   { type: 'COLUMN', headerKeywords: ['estatus funcionario', 'status habilitacion', 'estado funcionario'] }
+};
+
+/**
+ * Descubre la columna de habilitacion general en los encabezados.
+ * Prioridad: col fija > busqueda por headerKeywords > fallback -1
+ * Evita falsos positivos con columnas de cursos (ej: "MMPP HABILITACION")
+ */
+function descubrirColumnaHabilitacion(headerRow, baseKey) {
+  var src = HABILITACION_SOURCE[baseKey];
+  if (!src || src.type !== 'COLUMN') return -1;
+  if (src.col !== undefined && src.col >= 0) return src.col;
+  if (src.headerKeywords && src.headerKeywords.length > 0) {
+    var idx = buscarColumnaEncabezado(headerRow, src.headerKeywords);
+    if (idx >= 0) {
+      Logger.log('HABILITACION COLUMN DESCUBIERTA: base=' + baseKey + ' col=' + idx + ' header="' + (headerRow[idx] || '') + '"');
+      return idx;
+    }
+    Logger.log('HABILITACION WARNING: No se encontro columna para ' + baseKey + ' con keywords: ' + src.headerKeywords.join(', '));
+  }
+  return -1;
+}
+
+/**
+ * V35: Descubre la columna de Posición/Función escaneando encabezados.
+ * Busca: "funcion", "función", "posicion", "posición", "cargo", "puesto"
+ * Excluye falsos positivos de columnas de cursos.
+ */
+function descubrirColumnaPosicion(headerRow, baseKey) {
+  var keywords = ['funcion', 'posicion', 'cargo', 'puesto'];
+  var excludePatterns = ['habilitacion', 'mmpp', 'avsec', 'sms ', 'dg ', 'tsa', 'curso', 'training'];
+  for (var i = 0; i < headerRow.length; i++) {
+    var h = normKey(headerRow[i] || '').toLowerCase();
+    if (!h || h.length < 4) continue;
+    var matched = false;
+    for (var k = 0; k < keywords.length; k++) {
+      if (h.indexOf(keywords[k]) >= 0) { matched = true; break; }
+    }
+    if (!matched) continue;
+    var excluded = false;
+    for (var e = 0; e < excludePatterns.length; e++) {
+      if (h.indexOf(excludePatterns[e]) >= 0) { excluded = true; break; }
+    }
+    if (excluded) continue;
+    Logger.log('[POSICION] Descubierta: base=' + baseKey + ' col=' + i + ' header="' + (headerRow[i] || '') + '"');
+    return i;
+  }
+  Logger.log('[POSICION] No encontrada para base=' + baseKey + ' (se revisaron ' + headerRow.length + ' columnas)');
+  return -1;
+}
+
+/**
+ * V49: Descubre la columna NEGOCIO escaneando encabezados.
+ * Busca: "negocio" (exact match or contains)
+ * Excluye falsos positivos de columnas de cursos.
+ */
+function descubrirColumnaNegocio(headerRow, baseKey) {
+  var excludePatterns = ['habilitacion', 'mmpp', 'avsec', 'sms ', 'dg ', 'tsa', 'curso', 'training', 'pre ', 'livestock'];
+  for (var i = 0; i < headerRow.length; i++) {
+    var h = normKey(headerRow[i] || '').toLowerCase();
+    if (!h || h.length < 4) continue;
+    if (h.indexOf('negocio') < 0) continue;
+    var excluded = false;
+    for (var e = 0; e < excludePatterns.length; e++) {
+      if (h.indexOf(excludePatterns[e]) >= 0) { excluded = true; break; }
+    }
+    if (excluded) continue;
+    Logger.log('[NEGOCIO] Descubierta: base=' + baseKey + ' col=' + i + ' header="' + (headerRow[i] || '') + '"');
+    return i;
+  }
+  Logger.log('[NEGOCIO] No encontrada para base=' + baseKey + ' (se revisaron ' + headerRow.length + ' columnas)');
+  return -1;
+}
+
+// V80: Descubrir columna ZONA por header (para NAM — columna EH)
+function descubrirColumnaZona(headerRow, baseKey) {
+  for (var i = 0; i < headerRow.length; i++) {
+    var h = normKey(headerRow[i] || '').toLowerCase();
+    if (h === 'zona') {
+      Logger.log('[ZONA] Descubierta: base=' + baseKey + ' col=' + i + ' header="' + (headerRow[i] || '') + '"');
+      return i;
+    }
+  }
+  Logger.log('[ZONA] No encontrada para base=' + baseKey);
+  return -1;
+}
+
+/**
+ * V92: Descubre dinamicamente las columnas de jerarquia escaneando encabezados.
+ * Busca 7 niveles: SUPERVISOR, JEFE AREA, JEFE DEPARTAMENTO, SUBGERENTE, GERENTE, GERENTE SR, DIRECTOR.
+ * Usa cfg como fallback si no encuentra alguna columna.
+ * @param {Array} headerRow - Fila de encabezados
+ * @param {Object} cfg - Config de base (COL_NAM, etc.) como fallback
+ * @param {string} baseKey - Clave de base
+ * @returns {Object} cfg actualizado con indices descubiertos
+ */
+function descubrirColumnasJerarquia(headerRow, cfg, baseKey) {
+  if (!headerRow || headerRow.length === 0) return cfg;
+
+  // Normalizar todos los headers una vez
+  var headers = [];
+  for (var i = 0; i < headerRow.length; i++) {
+    headers.push(normKey(headerRow[i] || ''));
+  }
+
+  var usedCols = {};
+  // Definir niveles de mas especifico a menos especifico para evitar falsos positivos
+  // GERENTE SR antes de GERENTE, SUBGERENTE antes de GERENTE
+  var levels = [
+    { cfgKey: 'director',         keywords: ['DIRECTOR'] },
+    { cfgKey: 'gerenteSr',        keywords: ['GERENTE SR', 'GERENTE SENIOR'] },
+    { cfgKey: 'subgerente',       keywords: ['SUBGERENTE', 'SUB GERENTE', 'SUB-GERENTE'] },
+    { cfgKey: 'ejecutivo',        keywords: ['GERENTE', 'EJECUTIVO'], exclude: ['GERENTE SR', 'GERENTE SENIOR', 'SUBGERENTE', 'SUB GERENTE'] },
+    { cfgKey: 'jefeDepartamento', keywords: ['JEFE DEPARTAMENTO', 'JEFE DE DEPARTAMENTO', 'JEFE DEPTO'] },
+    { cfgKey: 'jefeArea',         keywords: ['JEFE AREA', 'JEFE DE AREA'] },
+    { cfgKey: 'jefeDirecto',      keywords: ['SUPERVISOR', 'JEFE DIRECTO'] }
+  ];
+
+  var discovered = 0;
+  var changes = [];
+  for (var li = 0; li < levels.length; li++) {
+    var level = levels[li];
+    var found = -1;
+    for (var hi = 0; hi < headers.length; hi++) {
+      if (usedCols[hi]) continue;
+      var h = headers[hi];
+      if (!h || h.length < 4) continue;
+      var matchedKw = false;
+      for (var ki = 0; ki < level.keywords.length; ki++) {
+        if (h === level.keywords[ki] || h.indexOf(level.keywords[ki]) >= 0) {
+          matchedKw = true; break;
+        }
+      }
+      if (!matchedKw) continue;
+      if (level.exclude) {
+        var excluded = false;
+        for (var ei = 0; ei < level.exclude.length; ei++) {
+          if (h.indexOf(level.exclude[ei]) >= 0) { excluded = true; break; }
+        }
+        if (excluded) continue;
+      }
+      found = hi; break;
+    }
+    if (found >= 0) {
+      var oldVal = cfg[level.cfgKey];
+      cfg[level.cfgKey] = found;
+      usedCols[found] = true;
+      discovered++;
+      if (found !== oldVal) {
+        changes.push(level.cfgKey + ': ' + oldVal + '->' + found + ' ("' + (headerRow[found] || '') + '")');
+      }
+    }
+  }
+  if (changes.length > 0) {
+    Logger.log('[V92-HIER-DISCOVER] ' + baseKey + ': COLUMNAS ACTUALIZADAS: ' + changes.join(' | '));
+  }
+  Logger.log('[V92-HIER-DISCOVER] ' + baseKey + ': descubiertas ' + discovered + '/7 columnas de jerarquia');
+  return cfg;
+}
+
+function esEmpleadoActivo(row, baseKey) {
+  var config = STATUS_COLUMNS[baseKey];
+  if (!config) return true;
+  
+  // DISCOVER_WHITELIST se resuelve en runtime por leerHojaBase (cambia a WHITELIST con col descubierta)
+  if (config.logic === 'ALL_ACTIVE') {
+    return true;
+  }
+  
+  var val = normKey(row[config.col]);
+  
+  if (val === 'SIN KPI') return false;
+  
+  if (config.logic === 'NOT_WC') {
+    // V64-FIX: Verificar WC robusto — indexOf detecta "WC", "WC/MIA", etc.
+    if (val.indexOf('WC') >= 0) return false;
+    // V64-FIX: También verificar cfg.status (col 21 = Estatus Funcionario)
+    var cfgBase = CONFIG_BASE[baseKey];
+    if (cfgBase && cfgBase.status >= 0 && cfgBase.status !== config.col) {
+      var statusVal = normKey(row[cfgBase.status]);
+      if (statusVal.indexOf('WC') >= 0) return false;
+    }
+    return true;
+  } else if (config.logic === 'WHITELIST' || config.logic === 'DISCOVER_WHITELIST') {
+    if (!val) return false;
+    var wl = config.whitelist || ['ACTIVO'];
+    for (var i = 0; i < wl.length; i++) {
+      if (val === normKey(wl[i])) return true;
+    }
+    return false;
+  } else if (config.logic === 'BLACKLIST') {
+    if (!val) return false;
+    for (var i = 0; i < config.blacklist.length; i++) {
+      if (val === normKey(config.blacklist[i])) return false;
+    }
+    return true;
+  }
+  return true;
+}
+
+/**
+ * Descubre la columna de estado ACTIVO/INACTIVO en los encabezados.
+ * Busca columnas con "status/estatus/dotacion/estado" EXCLUYENDO las de habilitacion.
+ * Valida que la columna encontrada tenga valores "ACTIVO" en las primeras 50 filas.
+ * Retorna col index o -1 si no encuentra.
+ */
+function descubrirColumnaEstadoActivo(headerRow, data, baseKey) {
+  var cfg = STATUS_COLUMNS[baseKey];
+  if (!cfg || cfg.logic !== 'DISCOVER_WHITELIST') return -1;
+  
+  // V30d-I: FAST PATH — Si hay preferredCol, verificar primero si tiene ACTIVO
+  if (cfg.preferredCol >= 0 && cfg.preferredCol < headerRow.length) {
+    var prefHeader = (headerRow[cfg.preferredCol] || '').toString().trim();
+    var prefActivoCount = 0;
+    for (var pr = 1; pr < Math.min(data.length, 100); pr++) {
+      if (normKey(data[pr][cfg.preferredCol]) === 'ACTIVO') prefActivoCount++;
+    }
+    if (prefActivoCount > 0) {
+      Logger.log('DISCOVER STATUS ACTIVO ' + baseKey + ': FAST PATH preferredCol=' + cfg.preferredCol + ' header="' + prefHeader + '" tiene ' + prefActivoCount + ' ACTIVO en primeras 100 filas');
+      return cfg.preferredCol;
+    }
+    Logger.log('DISCOVER STATUS ACTIVO ' + baseKey + ': preferredCol=' + cfg.preferredCol + ' NO tiene ACTIVO (' + prefActivoCount + '), buscando dinámicamente...');
+  }
+  
+  var keywords = cfg.headerKeywords || ['status', 'estatus', 'dotacion', 'estado'];
+  var excludes = cfg.habExclude || ['habilitacion', 'habilitado'];
+  
+  var candidates = [];
+  for (var c = 0; c < headerRow.length; c++) {
+    var header = (headerRow[c] || '').toString().trim().toLowerCase();
+    if (!header) continue;
+    
+    // Debe matchear al menos un keyword
+    var matchesKw = false;
+    for (var k = 0; k < keywords.length; k++) {
+      if (header.indexOf(keywords[k]) >= 0) { matchesKw = true; break; }
+    }
+    if (!matchesKw) continue;
+    
+    // NO debe matchear exclusiones (habilitacion, habilitado)
+    var excluded = false;
+    for (var h = 0; h < excludes.length; h++) {
+      if (header.indexOf(excludes[h]) >= 0) { excluded = true; break; }
+    }
+    if (excluded) continue;
+    
+    candidates.push({ col: c, header: header });
+  }
+  
+  Logger.log('DISCOVER STATUS ACTIVO ' + baseKey + ': ' + candidates.length + ' candidatas:');
+  candidates.forEach(function(cc) { _log('  col=' + cc.col + ' header="' + cc.header + '"'); });
+  
+  // Validar: buscar la candidata que contenga "ACTIVO" en sus valores
+  for (var ci = 0; ci < candidates.length; ci++) {
+    var col = candidates[ci].col;
+    var valDist = {};
+    for (var r = 1; r < data.length; r++) {
+      var v = normKey(data[r][col]);
+      if (v) valDist[v] = (valDist[v] || 0) + 1;
+    }
+    _log('  Distribucion col ' + col + ' ("' + candidates[ci].header + '"):');
+    for (var vk in valDist) { _log('    "' + vk + '": ' + valDist[vk]); }
+    
+    if (valDist['ACTIVO']) {
+      Logger.log('DISCOVER STATUS ACTIVO ' + baseKey + ': ENCONTRADA col=' + col + ' header="' + candidates[ci].header + '" (tiene ' + valDist['ACTIVO'] + ' ACTIVO)');
+      return col;
+    }
+  }
+  
+  // Fallback: primera candidata si existe
+  if (candidates.length > 0) {
+    Logger.log('DISCOVER STATUS ACTIVO ' + baseKey + ': WARNING - ninguna tiene ACTIVO, usando primera candidata col=' + candidates[0].col);
+    return candidates[0].col;
+  }
+  
+  Logger.log('DISCOVER STATUS ACTIVO ' + baseKey + ': ERROR - NO se encontro columna de status activo');
+  return -1;
+}
+
+/**
+ * Determina si un empleado cuenta para KPI estadistico.
+ * V37: NUEVO INGRESO se excluye de KPIs en TODAS las bases.
+ * Empleados con NUEVO INGRESO aparecen en data pero no impactan %.
+ */
+function esEmpleadoKPI(row, baseKey) {
+  if (!esEmpleadoActivo(row, baseKey)) return false;
+  var config = STATUS_COLUMNS[baseKey];
+  if (!config) return true;
+  // V69: Para TODAS las bases, excluir NUEVO INGRESO
+  // Si col >= 0 (columna descubierta o fija), leer status de esa columna
+  if (config.col >= 0) {
+    var val = normKey(row[config.col]);
+    if (val === 'NUEVO INGRESO') return false;
+  }
+  // V69: Fallback — buscar NI en columnas alternativas cuando col = -1 (ALL_ACTIVE)
+  // Esto cubre el caso donde descubrirColumnaEstadoActivo falla
+  if (config.col === undefined || config.col < 0) {
+    // Buscar en todas las columnas típicas de status
+    var statusCols = [14, 15, 18, 21, 79];
+    for (var sc = 0; sc < statusCols.length; sc++) {
+      if (statusCols[sc] < row.length) {
+        var scVal = normKey(row[statusCols[sc]]);
+        if (scVal === 'NUEVO INGRESO') return false;
+      }
+    }
+  }
+  return true;
+}
+
+/**
+ * V37: Determina si un empleado es NUEVO INGRESO.
+ */
+function esNuevoIngreso(row, baseKey) {
+  var config = STATUS_COLUMNS[baseKey];
+  if (!config) return false;
+  var col = config.col;
+  if (col === undefined || col < 0) return false;
+  var val = normKey(row[col]);
+  return val === 'NUEVO INGRESO';
+}
+
+

@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
+  background: #f1f5f9; min-height: 100vh; color: #1e293b;
+}
+.ap-header {
+  background: linear-gradient(135deg, #1B0088 0%, #E30052 100%);
+  padding: 28px 24px; color: white; text-align: center;
+}
+.ap-header h1 { font-size: 22px; font-weight: 800; margin-bottom: 4px; }
+.ap-header p { font-size: 13px; opacity: 0.75; }
+.ap-container { max-width: 720px; margin: -20px auto 40px; padding: 0 16px; }
+.ap-card {
+  background: white; border-radius: 12px;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.06), 0 4px 16px rgba(0,0,0,0.04);
+  overflow: hidden; margin-bottom: 16px;
+}
+.ap-card-hd {
+  padding: 18px 24px; border-bottom: 1px solid #f1f5f9;
+  display: flex; align-items: center; gap: 10px;
+}
+.ap-card-hd h2 { font-size: 15px; font-weight: 700; color: #1e293b; }
+.ap-card-bd { padding: 20px 24px; }
+.ap-info-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.ap-info-item label { display: block; font-size: 10px; font-weight: 700; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 2px; }
+.ap-info-item span { font-size: 14px; font-weight: 600; color: #1e293b; }
+.ap-table { width: 100%; border-collapse: collapse; }
+.ap-table th {
+  text-align: left; font-size: 10px; font-weight: 700; color: #64748b;
+  text-transform: uppercase; letter-spacing: 0.5px;
+  padding: 10px 12px; border-bottom: 2px solid #e2e8f0; background: #f8fafc;
+}
+.ap-table td { padding: 12px; font-size: 13px; border-bottom: 1px solid #f1f5f9; vertical-align: middle; }
+.ap-table tr:hover { background: #f8fafc; }
+.ap-bp { font-weight: 700; color: #1e293b; font-size: 12px; }
+.ap-name { font-weight: 600; color: #334155; }
+.ap-area { color: #64748b; font-size: 12px; }
+.ap-badge {
+  display: inline-block; padding: 3px 10px; border-radius: 20px;
+  font-size: 10px; font-weight: 700;
+}
+.ap-badge-sel { background: #fef3c7; color: #92400e; }
+.ap-badge-pre { background: #ede9fe; color: #6d28d9; }
+.ap-badge-rej { background: #fee2e2; color: #991b1b; }
+.ap-badge-cit { background: #dbeafe; color: #1e40af; }
+.ap-badge-conf { background: #dcfce7; color: #166534; }
+.ap-radio-group { display: flex; gap: 4px; }
+.ap-radio-btn {
+  padding: 5px 12px; border-radius: 6px; border: 2px solid #e2e8f0;
+  font-size: 11px; font-weight: 700; cursor: pointer;
+  transition: all 0.15s; font-family: inherit; background: white;
+}
+.ap-radio-btn:hover { border-color: #cbd5e1; }
+.ap-radio-btn.approve { color: #16a34a; }
+.ap-radio-btn.approve.active { background: #dcfce7; border-color: #16a34a; color: #166534; }
+.ap-radio-btn.reject { color: #dc2626; }
+.ap-radio-btn.reject.active { background: #fee2e2; border-color: #dc2626; color: #991b1b; }
+.ap-radio-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.ap-comment {
+  width: 100%; border: 1px solid #e2e8f0; border-radius: 6px;
+  padding: 6px 10px; font-size: 11px; font-family: inherit;
+  margin-top: 4px; resize: none; transition: border-color 0.15s;
+}
+.ap-comment:focus { outline: none; border-color: #6366f1; }
+.ap-bulk-bar {
+  display: flex; gap: 8px; padding: 14px 24px; background: #f8fafc;
+  border-top: 1px solid #f1f5f9; align-items: center; flex-wrap: wrap;
+}
+.ap-btn {
+  padding: 10px 24px; border-radius: 8px; border: none;
+  font-size: 14px; font-weight: 700; cursor: pointer;
+  font-family: inherit; transition: all 0.15s;
+}
+.ap-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.ap-btn-primary { background: linear-gradient(135deg, #1B0088, #E30052); color: white; }
+.ap-btn-primary:hover:not(:disabled) { box-shadow: 0 4px 12px rgba(27,0,136,0.3); transform: translateY(-1px); }
+.ap-btn-secondary { background: #f1f5f9; color: #475569; border: 1px solid #e2e8f0; }
+.ap-btn-secondary:hover:not(:disabled) { background: #e2e8f0; }
+.ap-msg { padding: 16px 24px; text-align: center; font-size: 14px; line-height: 1.6; border-radius: 12px; }
+.ap-msg.success { color: #166534; background: #dcfce7; }
+.ap-msg.error { color: #991b1b; background: #fee2e2; }
+.ap-alert {
+  padding: 12px 16px; border-radius: 8px; font-size: 12px; line-height: 1.5;
+  margin-bottom: 16px; display: flex; align-items: flex-start; gap: 8px;
+}
+.ap-alert-info { background: #eff6ff; color: #1e40af; border-left: 4px solid #3b82f6; }
+.ap-alert-warn { background: #fefce8; color: #854d0e; border-left: 4px solid #eab308; }
+.ap-loading { text-align: center; padding: 60px 24px; }
+.ap-spin {
+  width: 32px; height: 32px; border: 3px solid #e2e8f0; border-top-color: #6366f1;
+  border-radius: 50%; animation: spin 0.6s linear infinite; margin: 0 auto 12px;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.ap-footer { text-align: center; padding: 20px; font-size: 11px; color: #94a3b8; }
+.ap-nota-prev { font-size: 10px; color: #94a3b8; font-style: italic; margin-top: 2px; }
+@media (max-width: 520px) {
+  .ap-info-grid { grid-template-columns: 1fr; }
+  .ap-radio-btn { padding: 4px 8px; font-size: 10px; }
+  .ap-table th, .ap-table td { padding: 8px 6px; }
+}
+</style>
+</head>
+<body>
+<div class="ap-header">
+  <h1>Validacion de Participantes</h1>
+  <p>Equipo de Capacitacion — LATAM Cargo</p>
+</div>
+<div class="ap-container">
+  <div id="ap-content">
+    <div class="ap-loading"><div class="ap-spin"></div><p style="color:#64748b;">Cargando informacion...</p></div>
+  </div>
+</div>
+<div class="ap-footer">MENTE — LATAM Cargo | Sistema de Capacitacion</div>
+<script>
+var _eventoId = '<?= eventoId ?>';
+var _token = '<?= token ?>';
+var _registros = [];
+var _decisions = {};
+var _yaProcesado = false;
+
+var ESTADO_BADGES = {
+  'SELECCIONADO': { cls: 'ap-badge-sel', label: 'Pendiente' },
+  'PRECONFIRMADO_JEFE': { cls: 'ap-badge-pre', label: 'En proceso' },
+  'RECHAZADO': { cls: 'ap-badge-rej', label: 'Rechazado' },
+  'CITADO': { cls: 'ap-badge-cit', label: 'En proceso' },
+  'CONFIRMADO': { cls: 'ap-badge-conf', label: 'Confirmado' }
+};
+
+function init() {
+  if (!_eventoId || !_token) { showError('Enlace invalido. Faltan parametros necesarios.'); return; }
+  google.script.run
+    .withSuccessHandler(onDataLoaded)
+    .withFailureHandler(function(e) { showError('Error al cargar datos: ' + (e.message || e)); })
+    .getRegistrosParaAprobacion(_eventoId, _token);
+}
+
+function onDataLoaded(res) {
+  if (!res || !res.success) { showError(res ? res.error : 'Sin respuesta del servidor'); return; }
+  _registros = res.registros || [];
+  _yaProcesado = res.yaProcesado || false;
+  if (!_registros.length) {
+    showMsg('No se encontraron participantes de su equipo para este curso.', 'error');
+    return;
+  }
+  // Pre-populate decisions from existing states
+  for (var i = 0; i < _registros.length; i++) {
+    var r = _registros[i];
+    if (r.estado === 'PRECONFIRMADO_JEFE' || r.estado === 'CONFIRMADO') _decisions[r.regId] = 'APROBAR';
+    else if (r.estado === 'RECHAZADO') _decisions[r.regId] = 'RECHAZAR';
+  }
+  renderPage(res);
+}
+
+function renderPage(res) {
+  var ev = res.evento || {};
+  var h = '';
+  // Course info card
+  h += '<div class="ap-card">';
+  h += '<div class="ap-card-hd"><span style="font-size:18px;">&#128218;</span><h2>Informacion del Curso</h2></div>';
+  h += '<div class="ap-card-bd"><div class="ap-info-grid">';
+  h += '<div class="ap-info-item"><label>Curso</label><span>' + (ev.sigla || '-') + '</span></div>';
+  h += '<div class="ap-info-item"><label>Fecha</label><span>' + (ev.fecha || '-') + '</span></div>';
+  h += '<div class="ap-info-item"><label>Instructor</label><span>' + (ev.instructor || '-') + '</span></div>';
+  h += '<div class="ap-info-item"><label>Sala</label><span>' + (ev.sala || '-') + '</span></div>';
+  h += '</div></div></div>';
+
+  // Status alert
+  if (_yaProcesado) {
+    h += '<div class="ap-alert ap-alert-warn">';
+    h += '<span style="font-size:16px;">&#9888;</span>';
+    h += '<div><strong>Este curso ya fue procesado.</strong><br/>Puede revisar sus decisiones anteriores y actualizarlas si lo necesita. Los cambios se guardaran al presionar "Confirmar Decisiones".</div>';
+    h += '</div>';
+  } else {
+    h += '<div class="ap-alert ap-alert-info">';
+    h += '<span style="font-size:16px;">&#8505;</span>';
+    h += '<div><strong>Instrucciones:</strong> Para cada participante, seleccione <strong>Aprobar</strong> o <strong>Rechazar</strong>. Opcionalmente agregue un comentario. Luego presione "Confirmar Decisiones".</div>';
+    h += '</div>';
+  }
+
+  // Participants table
+  h += '<div class="ap-card">';
+  h += '<div class="ap-card-hd"><span style="font-size:18px;">&#128101;</span><h2>' + _registros.length + ' Participante' + (_registros.length > 1 ? 's' : '') + '</h2>';
+  if (res.pendientes > 0 && res.procesados > 0) {
+    h += '<span style="font-size:11px;color:#94a3b8;margin-left:auto;">' + res.pendientes + ' pendiente' + (res.pendientes > 1 ? 's' : '') + ', ' + res.procesados + ' procesado' + (res.procesados > 1 ? 's' : '') + '</span>';
+  }
+  h += '</div>';
+  h += '<div style="overflow-x:auto;"><table class="ap-table"><thead><tr>';
+  h += '<th>N</th><th>BP</th><th>Nombre</th><th>Area</th><th>Estado</th><th>Decision</th>';
+  h += '</tr></thead><tbody>';
+
+  for (var i = 0; i < _registros.length; i++) {
+    var r = _registros[i];
+    var badge = ESTADO_BADGES[r.estado] || { cls: '', label: r.estado };
+    var isEditable = r.editable;
+    var prevDec = _decisions[r.regId] || '';
+
+    h += '<tr id="row-' + r.regId + '"' + (r.estado === 'PRECONFIRMADO_JEFE' || r.estado === 'CONFIRMADO' ? ' style="background:#f0fdf4;"' : r.estado === 'RECHAZADO' ? ' style="background:#fef2f2;"' : '') + '>';
+    h += '<td>' + (i + 1) + '</td>';
+    h += '<td class="ap-bp">' + r.bp + '</td>';
+    h += '<td class="ap-name">' + r.nombre + '</td>';
+    h += '<td class="ap-area">' + r.area + '</td>';
+    h += '<td><span class="ap-badge ' + badge.cls + '">' + badge.label + '</span></td>';
+    h += '<td>';
+    if (isEditable) {
+      h += '<div class="ap-radio-group">';
+      h += '<button class="ap-radio-btn approve' + (prevDec === 'APROBAR' ? ' active' : '') + '" data-regid="' + r.regId + '" data-dec="APROBAR" onclick="setDecision(this)">&#10003; Aprobar</button>';
+      h += '<button class="ap-radio-btn reject' + (prevDec === 'RECHAZAR' ? ' active' : '') + '" data-regid="' + r.regId + '" data-dec="RECHAZAR" onclick="setDecision(this)">&#10007; Rechazar</button>';
+      h += '</div>';
+      var prevComment = r.comentarioJefe || r.nota || '';
+      h += '<textarea class="ap-comment" id="comment-' + r.regId + '" rows="1" placeholder="Comentario (opcional)...">' + (prevComment && r.estado !== 'SELECCIONADO' ? prevComment : '') + '</textarea>';
+      if (prevComment && r.estado !== 'SELECCIONADO') {
+        h += '<div class="ap-nota-prev">Nota anterior: ' + prevComment + '</div>';
+      }
+    } else {
+      h += '<span style="font-size:11px;color:#94a3b8;">No editable (estado avanzado)</span>';
+    }
+    h += '</td></tr>';
+  }
+  h += '</tbody></table></div>';
+
+  // Bulk bar
+  var hasEditable = _registros.some(function(r) { return r.editable; });
+  if (hasEditable) {
+    h += '<div class="ap-bulk-bar">';
+    h += '<button class="ap-btn ap-btn-secondary" onclick="bulkAll(\'APROBAR\')">Aprobar todos</button>';
+    h += '<button class="ap-btn ap-btn-secondary" onclick="bulkAll(\'RECHAZAR\')" style="color:#dc2626;">Rechazar todos</button>';
+    h += '<div style="flex:1;"></div>';
+    h += '<button class="ap-btn ap-btn-primary" id="btn-submit" onclick="submitDecisions()">' + (_yaProcesado ? 'Actualizar Decisiones' : 'Confirmar Decisiones') + '</button>';
+    h += '</div>';
+  }
+  h += '</div>';
+  h += '<div id="ap-result" style="margin-top:16px;"></div>';
+  document.getElementById('ap-content').innerHTML = h;
+}
+
+function setDecision(btn) {
+  var regId = btn.getAttribute('data-regid');
+  var dec = btn.getAttribute('data-dec');
+  _decisions[regId] = dec;
+  var btns = btn.parentNode.querySelectorAll('.ap-radio-btn');
+  for (var i = 0; i < btns.length; i++) btns[i].classList.remove('active');
+  btn.classList.add('active');
+  var row = document.getElementById('row-' + regId);
+  if (row) row.style.background = dec === 'APROBAR' ? '#f0fdf4' : dec === 'RECHAZAR' ? '#fef2f2' : '';
+}
+
+function bulkAll(dec) {
+  var btns = document.querySelectorAll('.ap-radio-btn[data-dec="' + dec + '"]');
+  for (var i = 0; i < btns.length; i++) {
+    if (!btns[i].disabled) setDecision(btns[i]);
+  }
+}
+
+function submitDecisions() {
+  var decisiones = [];
+  var editables = _registros.filter(function(r) { return r.editable; });
+  for (var i = 0; i < editables.length; i++) {
+    var regId = editables[i].regId;
+    var dec = _decisions[regId];
+    if (!dec) { appAlert('Seleccione una decision para: ' + editables[i].nombre); return; }
+    var comment = document.getElementById('comment-' + regId);
+    decisiones.push({ regId: regId, decision: dec, comentario: comment ? comment.value.trim() : '' });
+  }
+  if (!decisiones.length) { appAlert('No hay participantes editables.'); return; }
+  var btn = document.getElementById('btn-submit');
+  btn.disabled = true; btn.textContent = 'Enviando...';
+  google.script.run
+    .withSuccessHandler(function(res) {
+      if (res && res.success) {
+        var msg = '';
+        if (res.aprobados > 0) msg += res.aprobados + ' confirmado' + (res.aprobados > 1 ? 's' : '');
+        if (res.rechazados > 0) msg += (msg ? ', ' : '') + res.rechazados + ' rechazado' + (res.rechazados > 1 ? 's' : '');
+        if (res.sinCambio > 0) msg += (msg ? ', ' : '') + res.sinCambio + ' sin cambios';
+        showMsg('Decisiones procesadas exitosamente. ' + msg + '.', 'success');
+      } else {
+        showError('Error: ' + (res ? res.error : 'Sin respuesta'));
+        btn.disabled = false; btn.textContent = 'Confirmar Decisiones';
+      }
+    })
+    .withFailureHandler(function(e) {
+      showError('Error: ' + (e.message || e));
+      btn.disabled = false; btn.textContent = 'Confirmar Decisiones';
+    })
+    .procesarAprobacionJefe(_eventoId, _token, decisiones);
+}
+
+function showMsg(msg, tipo) {
+  document.getElementById('ap-content').innerHTML = '<div class="ap-msg ' + tipo + '"><p style="font-size:24px;margin-bottom:8px;">' + (tipo === 'success' ? '&#10004;' : '&#9888;') + '</p><p>' + msg + '</p><p style="margin-top:12px;font-size:12px;color:#64748b;">Puede cerrar esta ventana.</p></div>';
+}
+function showError(msg) {
+  document.getElementById('ap-content').innerHTML = '<div class="ap-msg error"><p style="font-size:24px;margin-bottom:8px;">&#9888;</p><p>' + msg + '</p></div>';
+}
+init();
+</script>
+</body>
+</html>

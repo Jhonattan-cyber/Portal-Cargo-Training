@@ -1,0 +1,225 @@
+// ===================== V91: RECORDATORIO DE CURSOS =====================
+/**
+ * V92: Obtiene el estado del toggle de recordatorios.
+ * @returns {boolean} true si la funcion de recordatorios esta habilitada
+ */
+function getRecordatorioEnabled() {
+  try {
+    var val = PropertiesService.getScriptProperties().getProperty('REMINDER_FEATURE_ENABLED');
+    return val === 'true';
+  } catch(e) { return false; }
+}
+
+/**
+ * V92: Activa/desactiva la funcion de recordatorios (solo Admin).
+ * @param {boolean} enabled - true para activar, false para desactivar
+ * @returns {Object} {success, enabled}
+ */
+function setRecordatorioEnabled(enabled) {
+  var usr = getUsuarioActual();
+  if (!usr || (usr.rol || '').toUpperCase() !== 'ADMIN') {
+    return { success: false, error: 'Solo ADMIN puede cambiar esta configuracion.' };
+  }
+  var val = enabled ? 'true' : 'false';
+  PropertiesService.getScriptProperties().setProperty('REMINDER_FEATURE_ENABLED', val);
+  Logger.log('[V92-TOGGLE] Recordatorio cambiado a ' + val + ' por ' + (usr.email || 'unknown'));
+  return { success: true, enabled: enabled === true };
+}
+
+/**
+ * Envía correos de recordatorio a colaboradores con cursos pendientes.
+ * @param {Array} personas - Array de {correo, nombre, cursosPendientes: [{nombre, status, vencimiento}]}
+ * @param {string} modo - 'individual' o 'grupal'
+ * @param {string} nombreJefe - Nombre del jefe que envía
+ * @return {Object} {success, enviados, errores}
+ */
+function enviarRecordatorioCursos(personas, modo, nombreJefe) {
+  if (!personas || personas.length === 0) {
+    return { success: false, error: 'No hay personas seleccionadas.' };
+  }
+
+  var GROUP_FROM = 'grp_entrenamientos_cgo-grh@latam.com';
+  var GROUP_NAME = 'Entrenamientos CGO-GRH';
+  var appUrl = '';
+  try { appUrl = ScriptApp.getService().getUrl(); } catch(e) {}
+
+  var inlineImages = {};
+  try {
+    var logoBlob = Utilities.newBlob(Utilities.base64Decode(LOGO_BASE64), 'image/png', 'logo.png');
+    inlineImages['logo_latam'] = logoBlob;
+  } catch(e) {}
+
+  var enviados = 0;
+  var errores = [];
+
+  if (modo === 'grupal') {
+    // Un solo correo con todos los destinatarios
+    var emailList = personas.map(function(p) { return (p.correo || '').trim(); }).filter(function(e) { return e.length > 0; });
+    if (emailList.length === 0) return { success: false, error: 'No hay correos validos.' };
+
+    var htmlBody = _buildRecordatorioGrupal(personas, nombreJefe, appUrl);
+    var asunto = 'Recordatorio de Cursos Pendientes - Entrenamientos CGO-GRH';
+
+    var optsBase = { htmlBody: htmlBody, inlineImages: inlineImages, name: GROUP_NAME, replyTo: GROUP_FROM };
+    try {
+      GmailApp.sendEmail(emailList.join(','), asunto, ' ', Object.assign({}, optsBase, { from: GROUP_FROM }));
+      enviados = emailList.length;
+    } catch(e1) {
+      try {
+        GmailApp.sendEmail(emailList.join(','), asunto, ' ', optsBase);
+        enviados = emailList.length;
+      } catch(e2) { errores.push('Error enviando grupal: ' + e2.message); }
+    }
+    registrarEnvioCorreo(asunto, emailList.join(', '), enviados > 0 ? 'OK (' + enviados + ')' : 'ERROR');
+
+  } else {
+    // Correos individuales
+    for (var i = 0; i < personas.length; i++) {
+      var p = personas[i];
+      var email = (p.correo || '').trim();
+      if (!email) { errores.push('Sin correo: ' + (p.nombre || '?')); continue; }
+
+      var htmlBody = _buildRecordatorioIndividual(p, nombreJefe, appUrl);
+      var asunto = 'Recordatorio: Cursos Pendientes - ' + (p.nombre || '');
+
+      var optsBase = { htmlBody: htmlBody, inlineImages: inlineImages, name: GROUP_NAME, replyTo: GROUP_FROM };
+      try {
+        GmailApp.sendEmail(email, asunto, ' ', Object.assign({}, optsBase, { from: GROUP_FROM }));
+        enviados++;
+        registrarEnvioCorreo(asunto, email, 'OK');
+      } catch(e1) {
+        try {
+          GmailApp.sendEmail(email, asunto, ' ', optsBase);
+          enviados++;
+          registrarEnvioCorreo(asunto, email, 'OK (fallback)');
+        } catch(e2) {
+          errores.push(p.nombre + ': ' + e2.message);
+          registrarEnvioCorreo(asunto, email, 'ERROR: ' + e2.message);
+        }
+      }
+    }
+  }
+
+  return {
+    success: enviados > 0,
+    enviados: enviados,
+    total: personas.length,
+    errores: errores,
+    message: 'Se enviaron ' + enviados + ' de ' + personas.length + ' recordatorios.'
+  };
+}
+
+function _buildRecordatorioIndividual(persona, nombreJefe, appUrl) {
+  var cursos = persona.cursosPendientes || [];
+  var filasHTML = '';
+  for (var i = 0; i < cursos.length; i++) {
+    var c = cursos[i];
+    var statusColor = c.status === 'VENCIDO' ? '#dc2626' : '#d97706';
+    var statusLabel = c.status === 'VENCIDO' ? 'Vencido' : 'Prox. a vencer';
+    var statusIcon = c.status === 'VENCIDO' ? '&#9888;' : '&#9200;';
+    filasHTML += '<tr style="border-bottom:1px solid #f1f5f9;">' +
+      '<td style="padding:12px 16px;font-size:14px;color:#1e293b;font-weight:500;">' + (c.nombre || c.sigla || '-') + '</td>' +
+      '<td style="padding:12px 16px;text-align:center;"><span style="display:inline-block;padding:4px 12px;border-radius:20px;font-size:12px;font-weight:700;background:' + (c.status === 'VENCIDO' ? '#fef2f2' : '#fffbeb') + ';color:' + statusColor + ';">' + statusIcon + ' ' + statusLabel + '</span></td>' +
+      '<td style="padding:12px 16px;text-align:center;font-size:13px;color:#64748b;">' + (c.vencimiento || '-') + '</td>' +
+      '</tr>';
+  }
+
+  return '<!DOCTYPE html><html><head><meta charset="utf-8"></head><body style="margin:0;padding:0;background:#f8fafc;font-family:Arial,Helvetica,sans-serif;">' +
+    '<div style="max-width:640px;margin:0 auto;background:white;border-radius:16px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,0.08);">' +
+    // Header corporativo
+    '<div style="background:linear-gradient(135deg,#0f172a 0%,#1e3a5f 50%,#1e40af 100%);padding:32px 40px;text-align:center;">' +
+    '<img src="cid:logo_latam" style="height:48px;margin-bottom:12px;" />' +
+    '<div style="width:40px;height:2px;background:#60a5fa;margin:0 auto 10px;border-radius:2px;"></div>' +
+    '<h1 style="color:white;font-size:22px;margin:0;font-weight:800;letter-spacing:1px;">Recordatorio de Cursos</h1>' +
+    '<p style="color:rgba(255,255,255,0.5);font-size:11px;margin:6px 0 0;text-transform:uppercase;letter-spacing:2px;">Entrenamientos CGO-GRH</p>' +
+    '</div>' +
+    '<div style="height:4px;background:linear-gradient(90deg,#dc2626,#f59e0b,#2563eb);"></div>' +
+    // Body
+    '<div style="padding:32px 40px;">' +
+    '<p style="font-size:15px;color:#0f172a;line-height:1.6;margin:0 0 8px;font-weight:600;">Estimado(a) ' + (persona.nombre || 'alumno(a)') + ',</p>' +
+    '<p style="font-size:14px;color:#475569;line-height:1.6;margin:0 0 24px;">De acuerdo a nuestros registros, tienes los siguientes cursos pendientes que requieren tu atencion:</p>' +
+    // Table
+    '<table style="width:100%;border-collapse:collapse;border-radius:12px;overflow:hidden;border:1px solid #e2e8f0;">' +
+    '<thead><tr style="background:linear-gradient(135deg,#f8fafc,#f1f5f9);">' +
+    '<th style="padding:12px 16px;text-align:left;font-size:11px;font-weight:800;color:#475569;text-transform:uppercase;letter-spacing:0.5px;">Curso</th>' +
+    '<th style="padding:12px 16px;text-align:center;font-size:11px;font-weight:800;color:#475569;text-transform:uppercase;letter-spacing:0.5px;">Estado</th>' +
+    '<th style="padding:12px 16px;text-align:center;font-size:11px;font-weight:800;color:#475569;text-transform:uppercase;letter-spacing:0.5px;">Fecha</th>' +
+    '</tr></thead>' +
+    '<tbody>' + filasHTML + '</tbody>' +
+    '</table>' +
+    '<div style="background:#eff6ff;border-left:4px solid #2563eb;padding:14px 18px;border-radius:0 8px 8px 0;margin:24px 0;">' +
+    '<p style="font-size:14px;color:#1e40af;margin:0;font-weight:500;">Por favor, gestiona la realizacion de estos cursos a la brevedad para mantener tu habilitacion al dia.</p></div>' +
+    // CTA
+    (appUrl ? '<div style="text-align:center;margin:24px 0;"><a href="' + appUrl + '" style="display:inline-block;padding:14px 36px;background:linear-gradient(135deg,#1e40af,#2563eb);color:white;text-decoration:none;border-radius:10px;font-size:14px;font-weight:700;letter-spacing:0.5px;">Ir a la Aplicacion</a></div>' : '') +
+    '<div style="padding-top:20px;margin-top:16px;">' +
+    '<p style="font-size:12px;color:#94a3b8;margin:0;">Este recordatorio fue enviado por <strong>' + (nombreJefe || 'tu jefatura') + '</strong>.</p>' +
+    '<p style="font-size:12px;color:#94a3b8;margin:4px 0 0;">Si tienes dudas, contacta al area de Entrenamientos.</p>' +
+    '</div>' +
+    '</div>' +
+    // Footer
+    '<div style="background:#0f172a;padding:20px 40px;text-align:center;">' +
+    '<p style="font-size:10px;color:rgba(255,255,255,0.4);margin:0;">Portal de Capacitacion &middot; Entrenamientos CGO-GRH &middot; LATAM Airlines</p>' +
+    '</div>' +
+    '</div>' +
+    '</body></html>';
+}
+
+function _buildRecordatorioGrupal(personas, nombreJefe, appUrl) {
+  var filasHTML = '';
+  for (var i = 0; i < personas.length; i++) {
+    var p = personas[i];
+    var cursos = p.cursosPendientes || [];
+    var cursosTexto = cursos.map(function(c) {
+      var label = c.status === 'VENCIDO' ? 'Vencido' : 'Prox. a vencer';
+      var dot = c.status === 'VENCIDO' ? '&#x25CF;' : '&#x25CF;';
+      var color = c.status === 'VENCIDO' ? '#dc2626' : '#d97706';
+      return '<span style="color:' + color + ';">' + dot + '</span> ' + (c.nombre || c.sigla || '-') + ' <span style="color:#94a3b8;">(' + label + ' - ' + (c.vencimiento || '-') + ')</span>';
+    }).join('<br>');
+    var peorStatus = cursos.some(function(c) { return c.status === 'VENCIDO'; }) ? 'VENCIDO' : 'PROGRAMAR';
+    var bgColor = peorStatus === 'VENCIDO' ? '#fef2f2' : '#fffbeb';
+
+    filasHTML += '<tr style="border-bottom:1px solid #e2e8f0;">' +
+      '<td style="padding:12px 16px;font-size:14px;color:#1e293b;font-weight:600;background:' + bgColor + ';vertical-align:top;">' + (p.nombre || '-') + '</td>' +
+      '<td style="padding:12px 16px;font-size:12px;color:#475569;line-height:1.6;background:' + bgColor + ';">' + cursosTexto + '</td>' +
+      '</tr>';
+  }
+
+  return '<!DOCTYPE html><html><head><meta charset="utf-8"></head><body style="margin:0;padding:0;background:#f8fafc;font-family:Arial,Helvetica,sans-serif;">' +
+    '<div style="max-width:640px;margin:0 auto;background:white;border-radius:16px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,0.08);">' +
+    '<div style="background:linear-gradient(135deg,#0f172a 0%,#1e3a5f 50%,#1e40af 100%);padding:32px 40px;text-align:center;">' +
+    '<img src="cid:logo_latam" style="height:48px;margin-bottom:12px;" />' +
+    '<div style="width:40px;height:2px;background:#60a5fa;margin:0 auto 10px;border-radius:2px;"></div>' +
+    '<h1 style="color:white;font-size:22px;margin:0;font-weight:800;letter-spacing:1px;">Recordatorio de Cursos</h1>' +
+    '<p style="color:rgba(255,255,255,0.5);font-size:11px;margin:6px 0 0;text-transform:uppercase;letter-spacing:2px;">Entrenamientos CGO-GRH</p>' +
+    '</div>' +
+    '<div style="height:4px;background:linear-gradient(90deg,#dc2626,#f59e0b,#2563eb);"></div>' +
+    '<div style="padding:32px 40px;">' +
+    '<p style="font-size:15px;color:#0f172a;line-height:1.6;margin:0 0 8px;font-weight:600;">Estimados/as,</p>' +
+    '<p style="font-size:14px;color:#475569;line-height:1.6;margin:0 0 24px;">De acuerdo a nuestros registros, los siguientes colaboradores tienen cursos pendientes que requieren atencion:</p>' +
+    '<table style="width:100%;border-collapse:collapse;border-radius:12px;overflow:hidden;border:1px solid #e2e8f0;">' +
+    '<thead><tr style="background:linear-gradient(135deg,#f8fafc,#f1f5f9);">' +
+    '<th style="padding:12px 16px;text-align:left;font-size:11px;font-weight:800;color:#475569;text-transform:uppercase;letter-spacing:0.5px;">Colaborador</th>' +
+    '<th style="padding:12px 16px;text-align:left;font-size:11px;font-weight:800;color:#475569;text-transform:uppercase;letter-spacing:0.5px;">Cursos Pendientes</th>' +
+    '</tr></thead>' +
+    '<tbody>' + filasHTML + '</tbody>' +
+    '</table>' +
+    '<div style="background:#eff6ff;border-left:4px solid #2563eb;padding:14px 18px;border-radius:0 8px 8px 0;margin:24px 0;">' +
+    '<p style="font-size:14px;color:#1e40af;margin:0;font-weight:500;">Por favor, gestionen la realizacion de estos cursos a la brevedad.</p></div>' +
+    (appUrl ? '<div style="text-align:center;margin:24px 0;"><a href="' + appUrl + '" style="display:inline-block;padding:14px 36px;background:linear-gradient(135deg,#1e40af,#2563eb);color:white;text-decoration:none;border-radius:10px;font-size:14px;font-weight:700;">Ir a la Aplicacion</a></div>' : '') +
+    '<div style="padding-top:16px;">' +
+    '<p style="font-size:12px;color:#94a3b8;margin:0;">Enviado por <strong>' + (nombreJefe || 'Jefatura') + '</strong></p>' +
+    '</div>' +
+    '</div>' +
+    '<div style="background:#0f172a;padding:20px 40px;text-align:center;">' +
+    '<p style="font-size:10px;color:rgba(255,255,255,0.4);margin:0;">Portal de Capacitacion &middot; Entrenamientos CGO-GRH &middot; LATAM Airlines</p>' +
+    '</div>' +
+    '</div>' +
+    '</body></html>';
+}
+
+
+
+/**
+ * Genera el HTML del correo de Forecast (plantilla mejorada)
+ */
+

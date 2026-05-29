@@ -1,0 +1,103 @@
+function getRegionalData(baseKey) {
+  try {
+    // ═══════════════════════════════════════════════════════════════
+    // SEGURIDAD: SILO POR PAIS - Verificar acceso del usuario
+    // Si NO es ADMIN, solo puede ver datos de su propia base (+ HCC transversal)
+    // ═══════════════════════════════════════════════════════════════
+    var usr = getUsuarioActual();
+    if (usr && usr.rol !== 'ADMIN') {
+      var baseUsuario = (usr.base || '').toUpperCase();
+      // Permitir: su propia base + HCC (transversal)
+      if (baseKey !== 'HCC' && baseKey !== baseUsuario) {
+        Logger.log('SEGURIDAD getRegionalData: Usuario ' + usr.email + ' (base=' + baseUsuario + ') bloqueado de acceder a ' + baseKey);
+        return { success: true, base: baseKey, total: 0, verde: 0, amarillo: 0, rojo: 0, empleados: [] };
+      }
+    }
+
+    var empleados;
+    
+    // HCC es un AREA: leer todas las bases reales y filtrar por area HCC
+    if (baseKey === 'HCC') {
+      empleados = [];
+      var allBases = ['CHILE', 'RAMPA', 'LATAM', 'NAM'];
+      allBases.forEach(function(b) {
+        try {
+          leerHoja(b, 'base').forEach(function(e) {
+            if (e.esHCC) {
+              empleados.push(e);
+            }
+          });
+        } catch(err) { Logger.log('getRegionalData HCC - Error leyendo ' + b + ': ' + err.message); }
+      });
+    } else {
+      empleados = leerHoja(baseKey, 'base');
+      empleados.forEach(function(e) { e.baseRegion = baseKey; });
+    }
+
+    // V22c: FILTRO JEFE usando función unificada buildArbolJerarquico
+    var esJefe = usr && usr.nombre && (usr.rol === 'JEFE' || (usr.rol || '').indexOf('JEFE') === 0);
+    if (esJefe && usr.rol !== 'ADMIN') {
+      var _ntbDash1 = {};
+      for (var _d1i = 0; _d1i < empleados.length; _d1i++) {
+        var _d1n = normKey(empleados[_d1i].nombre || '');
+        var _d1b = String(empleados[_d1i].bp || '').trim();
+        if (_d1n && _d1b && !_ntbDash1[_d1n]) _ntbDash1[_d1n] = _d1b;
+      }
+      // V96: Agregar JEFEs de hoja Jefes
+      try {
+        var _ssJ1 = getSpreadsheet('MAESTRO');
+        var _shJ1 = _ssJ1 ? _ssJ1.getSheetByName('Jefes') : null;
+        if (_shJ1) {
+          var _jd1 = _shJ1.getDataRange().getDisplayValues();
+          for (var _j1i = 1; _j1i < _jd1.length; _j1i++) {
+            var _jn1 = normKey(_jd1[_j1i][1] || '');
+            var _jb1 = String(_jd1[_j1i][2] || '').trim();
+            if (_jn1 && _jb1 && !_ntbDash1[_jn1]) _ntbDash1[_jn1] = _jb1;
+          }
+        }
+      } catch(e) {}
+      var arbol = buildArbolJerarquico(usr.nombre, empleados, {email: usr.email || '', bp: usr.bp || '', nombreToBP: _ntbDash1});
+      if (arbol && arbol.personas) {
+        empleados = arbol.personas;
+        Logger.log('FILTRO JEFE getRegionalData: ' + (arbol.total || arbol.personas.length) + ' subordinados');
+      }
+    }
+    
+    var v = 0, a = 0, r = 0;
+    empleados.forEach(function(e) { if (e.semaforo === 'VERDE') v++; else if (e.semaforo === 'AMARILLO') a++; else r++; });
+    
+    // PERFORMANCE: Minificar payload
+    var empleadosMin = empleados.map(function(e) {
+      return {
+        bp: e.bp, nombre: e.nombre, correo: e.correo, pais: e.pais,
+        area: e.area, jefeDirecto: e.jefeDirecto, jefeArea: e.jefeArea,
+        gerente: e.gerente, baseRegion: e.baseRegion, esHCC: e.esHCC,
+        cuentaKPI: e.cuentaKPI,
+        totalCursos: e.totalCursos, habilitados: e.habilitados,
+        porVencer: e.porVencer, vencidos: e.vencidos,
+        pendientes: e.pendientes, cumplimiento: e.cumplimiento,
+        semaforo: e.semaforo,
+        habilitacionGeneral: e.habilitacionGeneral,
+        tieneAlerta: e.tieneAlerta,
+        cursosAplicables: e.cursosAplicables,
+        vencidosAplicables: e.vencidosAplicables,
+        pvAplicables: e.pvAplicables,
+        cursos: e.cursos
+      };
+    });
+    
+    // Extraer opciones de filtros unicos para UI tipo Looker
+    var filtrosUI = { paises: {}, areas: {}, jefesDirectos: {}, jefesArea: {}, ejecutivos: {} };
+    empleados.forEach(function(e) {
+      if (e.pais) filtrosUI.paises[e.pais] = (filtrosUI.paises[e.pais] || 0) + 1;
+      if (e.area) filtrosUI.areas[e.area] = (filtrosUI.areas[e.area] || 0) + 1;
+      if (e.jefeDirecto) filtrosUI.jefesDirectos[e.jefeDirecto] = (filtrosUI.jefesDirectos[e.jefeDirecto] || 0) + 1;
+      if (e.jefeArea) filtrosUI.jefesArea[e.jefeArea] = (filtrosUI.jefesArea[e.jefeArea] || 0) + 1;
+      if (e.gerente) filtrosUI.ejecutivos[e.gerente] = (filtrosUI.ejecutivos[e.gerente] || 0) + 1;
+    });
+    
+    return { success: true, base: baseKey, total: empleados.length, verde: v, amarillo: a, rojo: r, empleados: empleadosMin, filtrosUI: filtrosUI };
+  } catch(e) { return { success: false, error: e.message, base: baseKey }; }
+}
+
+// ===================== DASHBOARD STATS =====================

@@ -1,0 +1,82 @@
+<!-- ======= MI EQUIPO SECTION ======= -->
+<div id="section-mi-equipo" class="module-section" style="display:none;">
+  <!-- V102: Toggle Equipo / Pendientes -->
+  <div id="mi-equipo-toggle-bar" data-testid="mi-equipo-toggle-bar" style="display:flex;align-items:center;gap:4px;margin-bottom:16px;background:#f1f5f9;border-radius:10px;padding:4px;width:fit-content;">
+    <button id="btn-toggle-equipo" data-testid="btn-toggle-equipo" onclick="toggleMiEquipoVista('equipo')" style="padding:8px 20px;border-radius:8px;border:none;font-size:13px;font-weight:700;cursor:pointer;transition:all 0.2s;font-family:inherit;background:#ffffff;color:#1e293b;box-shadow:0 1px 3px rgba(0,0,0,0.1);">
+      <i class="ph ph-users-three" style="margin-right:4px;"></i>Mi Equipo
+    </button>
+    <button id="btn-toggle-pendientes" data-testid="btn-toggle-pendientes" onclick="toggleMiEquipoVista('pendientes')" style="padding:8px 20px;border-radius:8px;border:none;font-size:13px;font-weight:700;cursor:pointer;transition:all 0.2s;font-family:inherit;background:transparent;color:#64748b;position:relative;">
+      <i class="ph ph-clipboard-text" style="margin-right:4px;"></i>Pendientes
+      <span id="pendientes-badge-tab" data-testid="pendientes-badge-tab" style="display:none;position:absolute;top:2px;right:2px;background:#ef4444;color:white;font-size:9px;font-weight:800;border-radius:50%;min-width:18px;height:18px;line-height:18px;text-align:center;padding:0 4px;">0</span>
+    </button>
+  </div>
+
+  <!-- Sub-vista: Equipo (existente) -->
+  <div id="mi-equipo-vista-equipo">
+    <div id="mi-equipo-kpis" style="display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:16px;"></div>
+    <!-- V30d-I #4: Glosario discreto -->
+    <div style="margin-bottom:8px; display:inline-flex;gap:12px;align-items:center;flex-wrap:wrap;">
+      <span style="display:inline-flex;align-items:center;gap:5px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:20px;padding:3px 10px;font-size:11px;color:#15803d;">
+        <span style="width:8px;height:8px;border-radius:50%;background:#22c55e;display:inline-block;"></span>
+        <strong>CURSOS AL D&Iacute;A</strong><span style="opacity:0.7;">— vigente &gt;90 d&iacute;as</span>
+      </span>
+      <span style="display:inline-flex;align-items:center;gap:5px;background:#fefce8;border:1px solid #fde68a;border-radius:20px;padding:3px 10px;font-size:11px;color:#a16207;">
+        <span style="width:8px;height:8px;border-radius:50%;background:#eab308;display:inline-block;"></span>
+        <strong>PROGRAMAR</strong><span style="opacity:0.7;">— de 90 a 0 d&iacute;as</span>
+      </span>
+      <span style="display:inline-flex;align-items:center;gap:5px;background:#fef2f2;border:1px solid #fecaca;border-radius:20px;padding:3px 10px;font-size:11px;color:#b91c1c;">
+        <span style="width:8px;height:8px;border-radius:50%;background:#ef4444;display:inline-block;"></span>
+        <strong>VENCIDOS (Cr&iacute;tico)</strong><span style="opacity:0.7;">— menor a 0 d&iacute;as</span>
+      </span>
+    </div>
+    <div class="card-container">
+      <div class="card-header" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
+        <h3 style="font-weight:700;color:#1e293b;"><i class="ph ph-users-three" style="margin-right:4px;"></i> Mi Equipo</h3>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+          <button id="btn-recordatorio-cursos" data-testid="btn-recordatorio-cursos" onclick="abrirModalRecordatorio()" style="display:none;padding:8px 16px;background:linear-gradient(135deg,#2563eb,#1d4ed8);color:white;border:none;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;transition:all 0.2s;font-family:inherit;" onmouseover="this.style.transform='translateY(-1px)';this.style.boxShadow='0 4px 12px rgba(37,99,235,0.4)'" onmouseout="this.style.transform='';this.style.boxShadow=''">
+            <i class="ph ph-paper-plane-tilt" style="margin-right:4px;"></i>Enviar Recordatorio
+          </button>
+          <select id="mi-equipo-filter-fuente" class="px-3 py-2 border rounded-lg text-sm font-bold" onchange="cambiarFuenteMiEquipo()" data-testid="mi-equipo-filter-fuente" style="border-color:#6366f1;background:#eef2ff;color:#4338ca;">
+            <!-- V47e: Opciones se llenan din&aacute;micamente por _initFuenteMiEquipo() -->
+          </select>
+          <select id="mi-equipo-filter-estado" class="px-3 py-2 border rounded-lg text-sm" onchange="filtrarMiEquipo()" data-testid="mi-equipo-filter-estado">
+            <option value="">Todos los estados</option>
+            <option value="OK">Al d&iacute;a</option>
+            <option value="PENDIENTE">Programar</option>
+            <option value="CRITICO">Cr&iacute;ticos</option>
+            <option value="SIN_CURSOS">Sin cursos</option>
+          </select>
+          <select id="mi-equipo-filter-base" class="px-3 py-2 border rounded-lg text-sm" onchange="filtrarMiEquipo()" data-testid="mi-equipo-filter-base">
+            <option value="">Todas las bases</option>
+          </select>
+          <select id="mi-equipo-filter-ni" class="px-3 py-2 border rounded-lg text-sm" onchange="filtrarMiEquipo()" data-testid="mi-equipo-filter-ni" style="border-color:#93c5fd;">
+            <option value="">Todos</option>
+            <option value="NO">Activos</option>
+            <option value="SI">Nuevos Ingresos</option>
+          </select>
+          <input type="text" id="mi-equipo-search" class="input-search" placeholder="Buscar..." oninput="debounceFiltrarMiEquipo()" style="max-width:200px;" data-testid="mi-equipo-search">
+        </div>
+      </div>
+      <div style="overflow-x:auto;">
+        <table class="tabla-regional">
+          <thead><tr>
+            <th>Colaborador</th><th class="text-center">Pa&iacute;s</th><th class="text-center">Cursos Aplic.</th>
+            <th class="text-center">Vencidos</th><th class="text-center">Estado por cursos</th><th class="text-center">%</th><th class="text-center">Acci&oacute;n</th>
+          </tr></thead>
+          <tbody id="mi-equipo-tbody"></tbody>
+        </table>
+      </div>
+      <div id="mi-equipo-footer" class="card-footer"></div>
+    </div>
+  </div>
+
+  <!-- Sub-vista: Pendientes de Aprobacion (V102) -->
+  <div id="mi-equipo-vista-pendientes" style="display:none;">
+    <div id="pendientes-content" data-testid="pendientes-content">
+      <div style="text-align:center;padding:40px;">
+        <div style="display:inline-block;width:32px;height:32px;border:4px solid #6366f1;border-top-color:transparent;border-radius:50%;animation:spin 1s linear infinite;"></div>
+        <p style="font-size:12px;color:#64748b;margin-top:8px;">Cargando pendientes...</p>
+      </div>
+    </div>
+  </div>
+</div>

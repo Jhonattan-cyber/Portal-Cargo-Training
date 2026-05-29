@@ -1,0 +1,182 @@
+// ===================== COLUMNAS FIJAS DE EMPLEADO POR BASE (MAPEO EXACTO) =====================
+// Estos son los datos del EMPLEADO en la hoja BASE. NO SON CURSOS.
+// Jerarquía V26: DIRECTOR → GERENTE SR → GERENTE → SUBGERENTE → JEFE DEPTO → JEFE AREA → SUPERVISOR → Colaborador
+// NOTA: las antiguas cols S(18), T(19), U(20) / K(10), L(11), M(12) etc. quedaron renombradas a "1","2","3"
+//       y DEBEN SER IGNORADAS. Solo usar las nuevas columnas al final de cada hoja.
+
+// LATAM (PHH RED / DASHBOARD PHH RED) - hoja 'BASE'
+// Nueva jerarquía: CS=96 … CY=102
+var COL_LATAM = {
+  bp: 0,               // A = BP
+  nombre: 2,           // C = Nombre
+  posicion: 7,         // H = Función (cargo/posición)
+  pais: 8,             // I = País
+  area: 10,            // K = AREA
+  status: 15,          // P = Status
+  correo: 17,          // R = Correo electrónico
+  // Jerarquía nueva (cols al final de la hoja):
+  jefeDirecto: 96,     // CS = SUPERVISOR        (nivel 7 - más bajo)
+  jefeArea: 97,        // CT = JEFE AREA         (nivel 6)
+  jefeDepartamento: 98,// CU = JEFE DEPARTAMENTO (nivel 5)
+  subgerente: 99,      // CV = SUBGERENTE        (nivel 4)
+  ejecutivo: 100,      // CW = GERENTE           (nivel 3)
+  gerenteSr: 101,      // CX = GERENTE SR        (nivel 2)
+  director: 102,       // CY = DIRECTOR          (nivel 1 - más alto)
+  nombreCompleto: true
+};
+
+// CHILE (TRAINING CL) - hoja 'BASE'
+// Nueva jerarquía: CY=102 … DE=108
+var COL_CHILE = {
+  bp: 0,               // A = BP
+  nombre: 2,           // C = Nombre
+  posicion: 7,         // H = Función (cargo/posición)
+  pais: -1,            // Chile no tiene columna País explícita (todos son Chile)
+  area: 10,            // K = AREA
+  status: 15,          // P = Status
+  correo: 17,          // R = Correo electrónico
+  // Jerarquía nueva:
+  jefeDirecto: 102,    // CY = SUPERVISOR        (nivel 7)
+  jefeArea: 103,       // CZ = JEFE AREA         (nivel 6)
+  jefeDepartamento: 104,// DA = JEFE DEPARTAMENTO (nivel 5)
+  subgerente: 105,     // DB = SUBGERENTE        (nivel 4)
+  ejecutivo: 106,      // DC = GERENTE           (nivel 3)
+  gerenteSr: 107,      // DD = GERENTE SR        (nivel 2)
+  director: 108,       // DE = DIRECTOR          (nivel 1)
+  nombreCompleto: true
+};
+
+// RAMPA (DASHBOARD RAMPA) - hoja 'BASE'
+// Nueva jerarquía: CD=81 … CJ=87
+var COL_RAMPA = {
+  bp: 0,               // A = BP
+  nombre: 2,           // C = NOMBRE
+  correo: 3,           // D = CORREO (o E en algunas versiones)
+  pais: 6,             // G = PAIS (V64: corregido de H=7 a G=6 según hoja real)
+  area: 5,             // F = ZONA (edificio/zona)
+  status: 15,          // P = STATUS HABILITACIÓN
+  // Jerarquía nueva:
+  jefeDirecto: 81,     // CD = SUPERVISOR        (nivel 7)
+  jefeArea: 82,        // CE = JEFE AREA         (nivel 6)
+  jefeDepartamento: 83,// CF = JEFE DEPARTAMENTO (nivel 5)
+  subgerente: 84,      // CG = SUBGERENTE        (nivel 4)
+  ejecutivo: 85,       // CH = GERENTE           (nivel 3)
+  gerenteSr: 86,       // CI = GERENTE SR        (nivel 2)
+  director: 87,        // CJ = DIRECTOR          (nivel 1)
+  nombreCompleto: true
+};
+
+// NAM (CONTROL NORTE) - hoja 'BASE'
+// V52: Columnas actualizadas según estructura real del archivo
+// Nueva jerarquía: EA=130 … EG=136
+var COL_NAM = {
+  bp: 0,               // A = BP
+  nombre: 2,           // C = Nombre
+  negocio: 6,          // G = NEGOCIO (V52: nuevo campo centralizado)
+  correo: 13,          // N = Correo electrónico
+  pais: 14,            // O = PAIS
+  posicion: 19,        // T = POSICIÓN (V52: antes mapeado como area)
+  area: 110,           // DG = AREA (V52: columna real de área)
+  status: 21,          // V = Estatus Funcionario
+  zona: -1,            // V80: EH = ZONA (descubierta por header "ZONA")
+  // Jerarquía nueva:
+  jefeDirecto: 130,    // EA = SUPERVISOR        (nivel 7)
+  jefeArea: 131,       // EB = JEFE AREA         (nivel 6)
+  jefeDepartamento: 132,// EC = JEFE DEPARTAMENTO (nivel 5)
+  subgerente: 133,     // ED = SUBGERENTE        (nivel 4)
+  ejecutivo: 134,      // EE = GERENTE           (nivel 3)
+  gerenteSr: 135,      // EF = GERENTE SR        (nivel 2)
+  director: 136,       // EG = DIRECTOR          (nivel 1)
+  nombreCompleto: true
+};
+
+// PLAN configs - Verificados contra PDF "ordenes planificacion.pdf"
+// Formato vertical: 1 fila = 1 curso
+// BASE-ONLY V26: No existen configs PLAN. Solo CONFIG_BASE.
+var CONFIG_BASE = { CHILE: COL_CHILE, LATAM: COL_LATAM, NAM: COL_NAM, RAMPA: COL_RAMPA };
+
+// V30: Alias de bases — la app a veces pasa labels distintos
+var BASE_ALIAS = {
+  'TRAINING CL':     'CHILE',
+  'TRAINING':        'CHILE',
+  'CL':              'CHILE',
+  'PHH RED':         'LATAM',
+  'PHH':             'LATAM',
+  'DASHBOARD PHH':   'LATAM',
+  'DASHBOARD PHH RED': 'LATAM',
+  'CONTROL NORTE':   'NAM',
+  'CTRL NORTE':      'NAM',
+  'NAM&EU':          'NAM',
+  'NAM_EU':          'NAM',
+  'NAM EU':          'NAM',
+  'DASHBOARD RAMPA': 'RAMPA'
+};
+
+// V30: BASURA conocida en campos de jerarquia (tratar como vacio)
+var JERARQUIA_BASURA = {'#N/A':1, 'N/A':1, 'NA':1, 'ERROR':1, '#ERROR!':1, '#REF!':1, '#VALUE!':1, '-':1, '--':1, '0':1, 'NULL':1, 'UNDEFINED':1, '#N/D':1, '#¡REF!':1};
+
+/**
+ * limpiarValorJerarquia — Limpia basura de campos de jerarquia.
+ * Retorna string limpio UPPERCASE o '' si es basura/vacío.
+ */
+function limpiarValorJerarquia(val) {
+  var s = String(val || '').trim();
+  if (!s) return '';
+  var su = s.toUpperCase();
+  if (JERARQUIA_BASURA[su]) return '';
+  if (su.length < 2) return '';
+  return su;
+}
+
+/**
+ * resolveBaseKey V30 — Normaliza y resuelve alias de base.
+ * @param {string} input — nombre o alias de base
+ * @returns {string} key válida de CONFIG_BASE, o lanza error
+ */
+function resolveBaseKey(input) {
+  var raw = String(input || '').trim().toUpperCase();
+  var validKeys = Object.keys(CONFIG_BASE).join(', ');
+  if (!raw) {
+    _log('[V0-HIER] ERROR resolveBaseKey: input vacio/null. Keys validas: ' + validKeys);
+    throw new Error('[V30] Base vacia o null (input="' + String(input) + '"). Keys validas: ' + validKeys);
+  }
+  if (CONFIG_BASE[raw]) return raw;
+  if (BASE_ALIAS[raw]) return BASE_ALIAS[raw];
+  var aliasKeys = Object.keys(BASE_ALIAS).join(', ');
+  _log('[V0-HIER] ERROR resolveBaseKey: "' + raw + '" no encontrada. Keys: ' + validKeys + ' | Alias: ' + aliasKeys);
+  throw new Error('[V30] Base "' + raw + '" no encontrada. Keys validas: ' + validKeys + '. Alias: ' + aliasKeys);
+}
+
+
+// ===================== NORMALIZACION =====================
+
+/**
+ * normKey: Helper universal para normalizar CUALQUIER texto antes de comparar.
+ * Uso obligatorio en: headers, alias cursos, status, jefes.
+ */
+function normKey(texto) {
+  return String(texto || '').toUpperCase().trim()
+    .replace(/[ÁÀÂÃ]/g,'A').replace(/[ÉÈÊË]/g,'E').replace(/[ÍÌÎÏ]/g,'I')
+    .replace(/[ÓÒÔÕ]/g,'O').replace(/[ÚÙÛÜ]/g,'U').replace(/Ñ/g,'N')
+    .replace(/\s+/g,' ');
+}
+
+/**
+ * normBP: Lectura segura de BP. NUNCA parsear a numero.
+ * Preserva ceros iniciales ("00123" → "00123").
+ */
+function normBP(valor) {
+  return String(valor || '').trim();
+}
+
+/**
+ * V34: Parsea el campo "País" del perfil CAPACITY (Admins col O).
+ * Retorna: { allowedBases:[], allowedCountries:[], excludedAreas:[], excludedBases:[], notes:'' }
+ *
+ * Casos reales:
+ *   "PE"                          → bases:[LATAM], countries:[PE]
+ *   "CO (Sin HCC, CCOP, RAMPA)"   → bases:[LATAM], countries:[CO], exclAreas:[HCC,CCOP], exclBases:[RAMPA]
+ *   "AR-UY-PY"                    → bases:[LATAM,RAMPA], countries:[AR,UY,PY]
+ *   "CONTROL NORTE(USA)"          → bases:[NAM], countries:[US]
+ *   "ALL RAMPA SOLO CL"           → bases:[RAMPA], countries:[CL]
+ */

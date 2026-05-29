@@ -1,0 +1,520 @@
+<!-- ======= GUÍA DE USUARIO - CARGO TRAINING PORTAL V31.2 ======= -->
+<div id="section-guia" class="module-section" style="display:none;">
+  <div id="guia-content"></div>
+</div>
+
+<script>
+function initGuia() {
+  var cont = document.getElementById('guia-content');
+  if (!cont) return;
+
+  var rolUsuario = 'COLABORADOR';
+  if (APP && APP.usuario && APP.usuario.rol) {
+    var r = APP.usuario.rol.toUpperCase();
+    if (r === 'ADMIN') rolUsuario = 'ADMIN';
+    else if (r.indexOf('JEFE') >= 0 || r === 'EJECUTIVO' || r === 'GERENTE') rolUsuario = 'JEFE';
+  }
+  var esAdmin = (rolUsuario === 'ADMIN');
+  var esJefe = (rolUsuario === 'JEFE');
+
+  var html = '';
+
+  // ═══ ESTILOS ═══
+  html += '<style>';
+  html += '@media print { body, html { overflow: visible !important; height: auto !important; } body * { visibility: hidden; } #guia-print-area, #guia-print-area * { visibility: visible; } #guia-print-area { position: absolute; left: 0; top: 0; width: 100%; padding: 24px; } .guia-no-print { display: none !important; } .guia-section { display: block !important; page-break-inside: avoid; margin-bottom: 24px; } .guia-card { break-inside: avoid; page-break-inside: avoid; border: 1px solid #ccc !important; } table { page-break-inside: avoid; } aside, nav, .sidebar, header { display: none !important; } }';
+  html += '.guia-tab-btn { transition: all 0.2s; border: 2px solid #e2e8f0; background: #fff; font-weight: 600; font-size: 12px; cursor: pointer; color: #475569; padding: 8px 16px; border-radius: 20px; }';
+  html += '.guia-tab-btn:hover { transform: translateY(-1px); box-shadow: 0 2px 6px rgba(0,0,0,0.08); }';
+  html += '.guia-tab-btn.active { background: #4f46e5; color: #fff; border-color: #4f46e5; box-shadow: 0 2px 8px rgba(99,102,241,0.3); }';
+  html += '.guia-card { border-radius: 12px; border: 1px solid #e2e8f0; padding: 20px; margin-bottom: 16px; background: #fff; }';
+  html += '.guia-step { counter-increment: step; position: relative; padding-left: 40px; margin-bottom: 14px; font-size: 13px; color: #475569; }';
+  html += '.guia-step::before { content: counter(step); position: absolute; left: 0; top: 0; width: 28px; height: 28px; background: #4f46e5; color: #fff; border-radius: 50%; text-align: center; line-height: 28px; font-weight: 800; font-size: 13px; }';
+  html += '.guia-steps { counter-reset: step; }';
+  html += '.guia-ej { border-left: 4px solid #6366f1; background: #f8faff; padding: 12px 16px; border-radius: 0 8px 8px 0; margin: 10px 0; font-size: 13px; }';
+  html += '.guia-warn { border-left: 4px solid #f59e0b; background: #fffbeb; padding: 10px 14px; border-radius: 0 8px 8px 0; margin: 10px 0; font-size: 13px; }';
+  html += '.guia-tip { border-left: 4px solid #10b981; background: #f0fdf4; padding: 10px 14px; border-radius: 0 8px 8px 0; margin: 10px 0; font-size: 13px; }';
+  html += '.guia-sem { display: inline-block; width: 14px; height: 14px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }';
+  html += '.guia-badge { display: inline-block; padding: 3px 12px; border-radius: 12px; font-size: 11px; font-weight: 700; }';
+  html += '</style>';
+
+  html += '<div id="guia-print-area" style="font-family: -apple-system, BlinkMacSystemFont, sans-serif; max-width: 960px; margin: 0 auto; padding: 24px 16px;">';
+
+  // ═══ HEADER ═══
+  html += '<div style="text-align:center; margin-bottom:32px;">';
+  html += '<h1 style="font-size:26px; font-weight:800; color:#1e293b; margin:0 0 6px 0;">Guia de Usuario</h1>';
+  html += '<p style="font-size:13px; color:#64748b; margin:0;">Cargo Training Portal - Todo lo que necesitas saber para usar el portal</p>';
+  if (esAdmin) {
+    html += '<div class="guia-no-print" style="margin-top:16px;">';
+    html += '<button onclick="imprimirGuia()" style="padding:8px 20px; background:#4f46e5; color:#fff; border:none; border-radius:8px; font-weight:700; font-size:13px; cursor:pointer;" data-testid="guia-btn-imprimir">Imprimir / Exportar PDF</button>';
+    html += '</div>';
+  }
+  html += '</div>';
+
+  // ═══ TABS ═══
+  var tabs = [];
+  if (esAdmin) tabs.push({ id: 'perfiles', label: 'Perfiles' });
+  tabs.push({ id: 'miscursos', label: 'Mis Cursos' });
+  if (esAdmin || esJefe) {
+    tabs.push({ id: 'miequipo', label: 'Mi Equipo' });
+    tabs.push({ id: 'forecast', label: 'Forecast' });
+    tabs.push({ id: 'correo', label: 'Correo Forecast' });
+  }
+  if (esAdmin) {
+    tabs.push({ id: 'admin', label: 'Vistas Admin' });
+    tabs.push({ id: 'kpis', label: 'KPIs y %' });
+  }
+  tabs.push({ id: 'glosario', label: 'Glosario' });
+  tabs.push({ id: 'cursos', label: 'Siglas Cursos' });
+
+  html += '<div class="guia-no-print" style="display:flex; gap:8px; flex-wrap:wrap; justify-content:center; margin-bottom:24px;">';
+  tabs.forEach(function(t) {
+    html += '<button class="guia-tab-btn" onclick="mostrarSeccionGuia(\'' + t.id + '\')" data-guia-tab="' + t.id + '" data-testid="guia-tab-' + t.id + '">' + t.label + '</button>';
+  });
+  html += '</div>';
+
+  // ══════════════════════════════════════════════════════════════════
+  // PERFILES (solo Admin)
+  // ══════════════════════════════════════════════════════════════════
+  if (esAdmin) {
+    html += '<div id="guia-sec-perfiles" class="guia-section" style="display:none;">';
+    html += '<h2 style="font-size:20px; font-weight:800; color:#1e293b; border-bottom:3px solid #6366f1; padding-bottom:8px; margin-bottom:20px;">Tipos de Usuario</h2>';
+    html += '<p style="font-size:13px; color:#475569; margin-bottom:16px;">El portal se adapta automaticamente segun el rol de quien lo abre. Esto es lo que ve cada uno:</p>';
+
+    html += '<div class="guia-card">';
+    html += '<h3 style="font-size:16px; font-weight:700; color:#1e293b; margin-bottom:8px;"><span class="guia-badge" style="background:#dbeafe; color:#2563eb;">COLABORADOR</span></h3>';
+    html += '<p style="font-size:13px; color:#475569;">Es cualquier persona con cursos asignados. Al entrar al portal, solo ve la seccion <b>"Mis Cursos"</b> donde puede consultar el estado de cada uno de sus cursos: si ya vencio, si esta por vencer o si esta al dia. No tiene acceso a datos de otras personas.</p>';
+    html += '<div class="guia-ej"><b>Ejemplo:</b> Juan entra y ve que tiene 5 cursos. Uno aparece en rojo porque vencio hace 15 dias. Sabe que debe coordinarse con su jefe para reprogramarlo.</div>';
+    html += '</div>';
+
+    html += '<div class="guia-card">';
+    html += '<h3 style="font-size:16px; font-weight:700; color:#1e293b; margin-bottom:8px;"><span class="guia-badge" style="background:#fef3c7; color:#d97706;">JEFE / LIDER</span></h3>';
+    html += '<p style="font-size:13px; color:#475569;">Cualquier persona con gente a cargo (Supervisor, Jefe de Area, Jefe de Departamento, Gerente). Ademas de sus propios cursos, puede ver el estado de capacitacion de todo su equipo y una proyeccion mensual (Forecast) para planificar.</p>';
+    html += '<div class="guia-ej"><b>Ejemplo:</b> Maria (Jefe de Area con 14 personas) abre "Mi Equipo" y detecta que 3 colaboradores tienen cursos vencidos. Luego va a Forecast y ve que en marzo venceran 5 cursos mas. Puede actuar antes de que se acumulen.</div>';
+    html += '</div>';
+
+    html += '<div class="guia-card">';
+    html += '<h3 style="font-size:16px; font-weight:700; color:#1e293b; margin-bottom:8px;"><span class="guia-badge" style="background:#fce7f3; color:#be185d;">ADMINISTRADOR</span></h3>';
+    html += '<p style="font-size:13px; color:#475569;">Ve todo: todas las bases, todos los paises, todas las areas. Tiene herramientas extra: Resumen General (dashboard con graficos), Resumen Admin (detalle por area/region), Seguimiento, y Configuracion.</p>';
+    html += '<div class="guia-ej"><b>Ejemplo:</b> El admin selecciona "HCC", filtra por Chile, y detecta que 3 jefes de area tienen mas del 30% de sus equipos con vencidos. Envia un correo directamente desde la plataforma.</div>';
+    html += '</div>';
+    html += '</div>';
+  }
+
+  // ══════════════════════════════════════════════════════════════════
+  // MIS CURSOS (todos)
+  // ══════════════════════════════════════════════════════════════════
+  html += '<div id="guia-sec-miscursos" class="guia-section" style="display:none;">';
+  html += '<h2 style="font-size:20px; font-weight:800; color:#1e293b; border-bottom:3px solid #6366f1; padding-bottom:8px; margin-bottom:20px;">Mis Cursos - Como ver mi estado</h2>';
+  html += '<p style="font-size:13px; color:#475569; margin-bottom:16px;">Esta seccion muestra <b>tus propios cursos</b>. Cada curso tiene un nombre, una fecha de vencimiento y un color que indica la urgencia.</p>';
+
+  html += '<div class="guia-card">';
+  html += '<h3 style="font-size:15px; font-weight:700; color:#1e293b; margin-bottom:12px;">Tutorial: Como revisar mis cursos</h3>';
+  html += '<div class="guia-steps">';
+  html += '<div class="guia-step">Haz click en <b>"Mis Cursos"</b> en el menu lateral izquierdo.</div>';
+  html += '<div class="guia-step">Veras una lista con todos tus cursos asignados. Cada uno muestra su nombre (ej: DGR, AVSEC, SMS) y su estado con un color.</div>';
+  html += '<div class="guia-step">Revisa los colores: <span class="guia-sem" style="background:#dc2626;"></span><b>Rojo</b> = vencido (accion inmediata), <span class="guia-sem" style="background:#d97706;"></span><b>Naranja</b> = por vencer (menos de 30 dias), <span class="guia-sem" style="background:#eab308;"></span><b>Amarillo</b> = programar (31-90 dias), <span class="guia-sem" style="background:#16a34a;"></span><b>Verde</b> = al dia.</div>';
+  html += '<div class="guia-step">Si tienes algun curso en rojo o naranja, coordina con tu jefe para reprogramar la capacitacion lo antes posible.</div>';
+  html += '</div>';
+  html += '</div>';
+
+  html += '<div class="guia-card">';
+  html += '<h3 style="font-size:15px; font-weight:700; color:#1e293b; margin-bottom:10px;">Que significa cada estado</h3>';
+  html += '<table style="width:100%; border-collapse:collapse; font-size:13px;">';
+  html += '<thead><tr style="background:#f1f5f9;"><th style="padding:8px; text-align:left;">Color</th><th style="padding:8px; text-align:left;">Estado</th><th style="padding:8px; text-align:left;">Que significa</th><th style="padding:8px; text-align:left;">Que hacer</th></tr></thead><tbody>';
+  html += '<tr style="border-bottom:1px solid #e5e7eb;"><td style="padding:8px;"><span class="guia-sem" style="background:#dc2626;"></span></td><td style="padding:8px; font-weight:700;">VENCIDO</td><td style="padding:8px;">Tu curso ya paso su fecha limite.</td><td style="padding:8px;">Habla con tu jefe para reprogramar.</td></tr>';
+  html += '<tr style="border-bottom:1px solid #e5e7eb; background:#f8fafc;"><td style="padding:8px;"><span class="guia-sem" style="background:#d97706;"></span></td><td style="padding:8px; font-weight:700;">POR VENCER</td><td style="padding:8px;">Vence en menos de 30 dias.</td><td style="padding:8px;">Verifica que estes inscrito para renovarlo.</td></tr>';
+  html += '<tr style="border-bottom:1px solid #e5e7eb;"><td style="padding:8px;"><span class="guia-sem" style="background:#eab308;"></span></td><td style="padding:8px; font-weight:700;">PROGRAMAR</td><td style="padding:8px;">Vence entre 31 y 90 dias.</td><td style="padding:8px;">Todavia hay tiempo, pero agenda la capacitacion.</td></tr>';
+  html += '<tr style="border-bottom:1px solid #e5e7eb; background:#f8fafc;"><td style="padding:8px;"><span class="guia-sem" style="background:#6b7280;"></span></td><td style="padding:8px; font-weight:700;">SIN PLAN</td><td style="padding:8px;">No tiene fecha asignada.</td><td style="padding:8px;">Consulta con tu jefe si este curso aplica.</td></tr>';
+  html += '<tr><td style="padding:8px;"><span class="guia-sem" style="background:#16a34a;"></span></td><td style="padding:8px; font-weight:700;">AL DIA</td><td style="padding:8px;">Curso completado y vigente.</td><td style="padding:8px;">No necesitas hacer nada.</td></tr>';
+  html += '</tbody></table>';
+  html += '</div>';
+  html += '</div>';
+
+  // ══════════════════════════════════════════════════════════════════
+  // MI EQUIPO (Jefe + Admin)
+  // ══════════════════════════════════════════════════════════════════
+  if (esAdmin || esJefe) {
+    html += '<div id="guia-sec-miequipo" class="guia-section" style="display:none;">';
+    html += '<h2 style="font-size:20px; font-weight:800; color:#1e293b; border-bottom:3px solid #6366f1; padding-bottom:8px; margin-bottom:20px;">Mi Equipo - Como ver y priorizar</h2>';
+    html += '<p style="font-size:13px; color:#475569; margin-bottom:16px;">Aqui ves a todas las personas de tu equipo con el estado de sus cursos. Te ayuda a saber <b>quien necesita atencion urgente</b>.</p>';
+
+    html += '<div class="guia-card">';
+    html += '<h3 style="font-size:15px; font-weight:700; color:#1e293b; margin-bottom:12px;">Tutorial: Como revisar mi equipo y priorizar</h3>';
+    html += '<div class="guia-steps">';
+    html += '<div class="guia-step">Haz click en <b>"Mi Equipo"</b> en el menu lateral.</div>';
+    html += '<div class="guia-step">Veras una lista de todos tus colaboradores. El portal los ordena automaticamente por urgencia: <b>primero los que tienen cursos vencidos</b>, luego los que tienen pendientes, y al final los que estan al dia.</div>';
+    html += '<div class="guia-step">Cada colaborador muestra: su nombre, total de cursos, cuantos estan vencidos / por vencer / al dia, y un <b>% de cumplimiento</b>.</div>';
+    html += '<div class="guia-step">Haz click en una persona para ver el detalle de sus cursos: cual curso esta vencido, cual esta por vencer, etc.</div>';
+    html += '<div class="guia-step">Enfocate en los que estan en rojo primero. Esos son los que necesitan accion inmediata para reprogramar sus cursos vencidos.</div>';
+    html += '</div>';
+    html += '</div>';
+
+    html += '<div class="guia-card">';
+    html += '<h3 style="font-size:15px; font-weight:700; color:#1e293b; margin-bottom:10px;">Semaforo de cumplimiento del equipo</h3>';
+    html += '<p style="font-size:13px; color:#475569; margin-bottom:10px;">El % de cumplimiento te dice que tan bien esta tu equipo en general:</p>';
+    html += '<table style="width:100%; border-collapse:collapse; font-size:13px;"><tbody>';
+    html += '<tr style="border-bottom:1px solid #e5e7eb;"><td style="padding:8px;"><span class="guia-sem" style="background:#16a34a;"></span><b>Verde</b></td><td style="padding:8px;">95% - 100%</td><td style="padding:8px;">Tu equipo esta muy bien. Solo mantener.</td></tr>';
+    html += '<tr style="border-bottom:1px solid #e5e7eb; background:#f8fafc;"><td style="padding:8px;"><span class="guia-sem" style="background:#ca8a04;"></span><b>Amarillo</b></td><td style="padding:8px;">80% - 94%</td><td style="padding:8px;">Hay personas por atender. Revisa quienes tienen pendientes.</td></tr>';
+    html += '<tr><td style="padding:8px;"><span class="guia-sem" style="background:#dc2626;"></span><b>Rojo</b></td><td style="padding:8px;">Menos de 80%</td><td style="padding:8px;">Situacion critica. Actua de inmediato.</td></tr>';
+    html += '</tbody></table>';
+    html += '<div class="guia-tip"><b>Tip:</b> Si quieres saber que cursos estan causando mas problemas, revisa la columna "Cursos a atender" de cada persona. Ahi veras el nombre y fecha del curso urgente.</div>';
+    html += '</div>';
+    html += '</div>';
+
+    // ══════════════════════════════════════════════════════════════════
+    // FORECAST (Jefe + Admin) — V66: Actualizado con todo lo nuevo
+    // ══════════════════════════════════════════════════════════════════
+    html += '<div id="guia-sec-forecast" class="guia-section" style="display:none;">';
+    html += '<h2 style="font-size:20px; font-weight:800; color:#1e293b; border-bottom:3px solid #6366f1; padding-bottom:8px; margin-bottom:20px;">Forecast - Proyeccion mensual</h2>';
+    html += '<p style="font-size:13px; color:#475569; margin-bottom:16px;">El Forecast muestra <b>cuantas personas tendran cursos vencidos cada mes</b>. Sirve para planificar y evitar acumulaciones de vencimientos.</p>';
+
+    // Tutorial paso a paso
+    html += '<div class="guia-card">';
+    html += '<h3 style="font-size:15px; font-weight:700; color:#1e293b; margin-bottom:12px;">Tutorial: Como usar el Forecast</h3>';
+    html += '<div class="guia-steps">';
+    html += '<div class="guia-step">Haz click en <b>"Forecast"</b> en el menu lateral.</div>';
+    html += '<div class="guia-step">Selecciona la <b>fuente de datos</b> (solo Admin): <b>PHH</b> (Handling, Cargo & Commercial), <b>RAMPA</b> (Operaciones en Rampa), o <b>Control Norte (NAM)</b>. Los jefes y supervisores ven automaticamente solo su fuente.</div>';
+    html += '<div class="guia-step">Selecciona el <b>tipo de curso</b>: <b>HCC</b> (cursos Handling/Cargo/Commercial) o <b>DGR</b> (Mercancias Peligrosas).</div>';
+    html += '<div class="guia-step">Usa el <b>filtro "Jefe Directo"</b> para ver solo el equipo de un jefe especifico. Si eres supervisor o jefe, este filtro se pre-selecciona con tu equipo.</div>';
+    html += '<div class="guia-step">En la parte superior veras <b>3 tarjetas KPI</b>:</div>';
+    html += '</div>';
+
+    // KPI Cards explanation
+    html += '<table style="width:100%; border-collapse:collapse; font-size:13px; margin:10px 0;">';
+    html += '<thead><tr style="background:#1e293b; color:#fff;"><th style="padding:8px; text-align:left;">Tarjeta</th><th style="padding:8px; text-align:left;">Color</th><th style="padding:8px; text-align:left;">Que significa</th></tr></thead><tbody>';
+    html += '<tr style="border-bottom:1px solid #e5e7eb;"><td style="padding:8px; font-weight:700;">CRITICO</td><td style="padding:8px;"><span class="guia-sem" style="background:#dc2626;"></span>Rojo</td><td style="padding:8px;">Personas con al menos 1 curso <b>ya vencido</b>. Accion inmediata.</td></tr>';
+    html += '<tr style="border-bottom:1px solid #e5e7eb; background:#f8fafc;"><td style="padding:8px; font-weight:700;">PENDIENTES</td><td style="padding:8px;"><span class="guia-sem" style="background:#d97706;"></span>Naranja</td><td style="padding:8px;">Personas con cursos <b>por vencer</b> (&#60;30 dias), <b>programar</b> (31-90 dias) o <b>sin plan</b>. Sin vencidos aun.</td></tr>';
+    html += '<tr><td style="padding:8px; font-weight:700;">AL DIA</td><td style="padding:8px;"><span class="guia-sem" style="background:#16a34a;"></span>Verde</td><td style="padding:8px;">Personas con todos sus cursos vigentes. No requieren accion.</td></tr>';
+    html += '</tbody></table>';
+
+    // NI explanation
+    html += '<div class="guia-warn"><b>Nuevos Ingresos (NI):</b> Las personas con menos de 3 meses en la empresa se marcan como "Nuevo Ingreso". Aparecen en la tabla pero <b>no impactan el % de cumplimiento</b> ni se cuentan en las tarjetas KPI. Si hay NI, veras un mensaje informativo debajo de las tarjetas indicando cuantos son.</div>';
+
+    html += '</div>';
+
+    // La tabla
+    html += '<div class="guia-card">';
+    html += '<h3 style="font-size:15px; font-weight:700; color:#1e293b; margin-bottom:10px;">Como leer la tabla del Forecast</h3>';
+    html += '<p style="font-size:13px; color:#475569; margin-bottom:10px;">Cada <b>fila</b> es un jefe o supervisor. Las columnas son:</p>';
+    html += '<table style="width:100%; border-collapse:collapse; font-size:13px; margin:10px 0;">';
+    html += '<thead><tr style="background:#1e293b; color:#fff;"><th style="padding:8px; text-align:left;">Columna</th><th style="padding:8px; text-align:left;">Que muestra</th></tr></thead><tbody>';
+    html += '<tr style="border-bottom:1px solid #e5e7eb;"><td style="padding:8px; font-weight:700;">Nombre del Jefe</td><td style="padding:8px;">Click para abrir el drilldown con el detalle de su equipo.</td></tr>';
+    html += '<tr style="border-bottom:1px solid #e5e7eb; background:#f8fafc;"><td style="padding:8px; font-weight:700;">COLAB.</td><td style="padding:8px;">Colaboradores unicos bajo ese jefe.</td></tr>';
+    html += '<tr style="border-bottom:1px solid #e5e7eb;"><td style="padding:8px; font-weight:700;">S/F</td><td style="padding:8px;">Cursos vencidos <b>sin fecha</b> registrada (solo si existen).</td></tr>';
+    html += '<tr style="border-bottom:1px solid #e5e7eb; background:#f8fafc;"><td style="padding:8px; font-weight:700;">Ene, Feb, Mar...</td><td style="padding:8px;">Personas afectadas en ese mes. Click para ver detalle mensual.</td></tr>';
+    html += '</tbody></table>';
+
+    // Filas footer
+    html += '<p style="font-size:13px; color:#475569; margin-top:12px;">Al final de la tabla hay 2 filas resumen (fondo oscuro):</p>';
+    html += '<ul style="font-size:13px; color:#475569; padding-left:18px; margin:6px 0 10px 0;">';
+    html += '<li><b>TOTAL COLABORADORES:</b> BPs unicos activos (excluye NI). Si hay NI, aparecen como nota "(+ X NI)". Este numero coincide con el KPI "Total colaboradores activos" de las tarjetas superiores.</li>';
+    html += '<li><b>TOTAL CURSOS:</b> Registros de cursos totales. Click para ver todos los cursos.</li>';
+    html += '</ul>';
+
+    // Colores de celdas
+    html += '<h3 style="font-size:15px; font-weight:700; color:#1e293b; margin:16px 0 10px 0;">Colores de las celdas mensuales</h3>';
+    html += '<table style="width:100%; border-collapse:collapse; font-size:13px;">';
+    html += '<tbody>';
+    html += '<tr style="border-bottom:1px solid #e5e7eb;"><td style="padding:8px; width:30px;"><span style="display:inline-block;width:20px;height:20px;border-radius:4px;background:#fee2e2;border:1px solid #fca5a5;"></span></td><td style="padding:8px; font-weight:700; color:#b91c1c;">Rojo</td><td style="padding:8px;">Hay cursos vencidos en ese mes.</td></tr>';
+    html += '<tr style="border-bottom:1px solid #e5e7eb; background:#f8fafc;"><td style="padding:8px;"><span style="display:inline-block;width:20px;height:20px;border-radius:4px;background:#fef3c7;border:1px solid #fde68a;"></span></td><td style="padding:8px; font-weight:700; color:#92400e;">Naranja/Amarillo</td><td style="padding:8px;">Cursos por vencer o a programar.</td></tr>';
+    html += '<tr><td style="padding:8px;"><span style="display:inline-block;width:20px;height:20px;border-radius:4px;background:#ecfdf5;border:1px solid #a7f3d0;"></span></td><td style="padding:8px; font-weight:700; color:#065f46;">Verde</td><td style="padding:8px;">Todo al dia en ese mes.</td></tr>';
+    html += '</tbody></table>';
+    html += '</div>';
+
+    // Drilldown
+    html += '<div class="guia-card">';
+    html += '<h3 style="font-size:15px; font-weight:700; color:#1e293b; margin-bottom:10px;">El Drilldown (detalle por jefe)</h3>';
+    html += '<p style="font-size:13px; color:#475569; margin-bottom:10px;">Cuando haces click en un jefe se abre una ventana con:</p>';
+    html += '<ul style="font-size:13px; color:#475569; padding-left:18px; margin:0 0 10px 0;">';
+    html += '<li><b>Resumen:</b> Total de colaboradores, cursos y % de cumplimiento de ese jefe.</li>';
+    html += '<li><b>Filtro por supervisor:</b> Si el jefe tiene supervisores bajo el, aparecen como botones. Click para filtrar.</li>';
+    html += '<li><b>Tabla de personas:</b> Cada persona con sus cursos y su estado detallado.</li>';
+    html += '</ul>';
+    html += '<div class="guia-warn"><b>Sobre "Sin Supervisor":</b> Si un colaborador no tiene supervisor asignado en el sistema, aparece bajo esta etiqueta. No es un error, simplemente ese campo esta vacio en la base de datos.</div>';
+    html += '<div class="guia-tip"><b>Drilldown mensual:</b> Tambien puedes hacer click en los numeros mensuales de la fila TOTAL CURSOS para ver que cursos vencen en un mes especifico.</div>';
+    html += '</div>';
+
+    // Fuentes de datos
+    if (esAdmin) {
+      html += '<div class="guia-card">';
+      html += '<h3 style="font-size:15px; font-weight:700; color:#1e293b; margin-bottom:10px;">Fuentes de datos (solo Admin)</h3>';
+      html += '<table style="width:100%; border-collapse:collapse; font-size:13px; margin:10px 0;">';
+      html += '<thead><tr style="background:#1e293b; color:#fff;"><th style="padding:8px; text-align:left;">Fuente</th><th style="padding:8px; text-align:left;">Que incluye</th></tr></thead><tbody>';
+      html += '<tr style="border-bottom:1px solid #e5e7eb;"><td style="padding:8px; font-weight:700;">PHH</td><td style="padding:8px;">Personal Handling & Cargo. Base principal con la mayoria de colaboradores.</td></tr>';
+      html += '<tr style="border-bottom:1px solid #e5e7eb; background:#f8fafc;"><td style="padding:8px; font-weight:700;">RAMPA</td><td style="padding:8px;">Personal de operaciones en rampa.</td></tr>';
+      html += '<tr style="border-bottom:1px solid #e5e7eb;"><td style="padding:8px; font-weight:700;">Control Norte (NAM)</td><td style="padding:8px;">Personal de la base Control Norte / Norteamerica.</td></tr>';
+      html += '<tr><td style="padding:8px; font-weight:700;">CONSOLIDADO</td><td style="padding:8px;">Vista combinada de todas las fuentes. Solo disponible para usuarios con permisos especiales.</td></tr>';
+      html += '</tbody></table>';
+      html += '<div class="guia-warn"><b>Importante:</b> Los jefes y supervisores no ven el selector de fuente. Automaticamente ven los datos de su base asignada.</div>';
+      html += '</div>';
+    }
+    html += '</div>';
+
+    // ══════════════════════════════════════════════════════════════════
+    // CORREO FORECAST (Jefe + Admin) — V66: NUEVA SECCION
+    // ══════════════════════════════════════════════════════════════════
+    html += '<div id="guia-sec-correo" class="guia-section" style="display:none;">';
+    html += '<h2 style="font-size:20px; font-weight:800; color:#1e293b; border-bottom:3px solid #6366f1; padding-bottom:8px; margin-bottom:20px;">Correo desde Forecast</h2>';
+    html += '<p style="font-size:13px; color:#475569; margin-bottom:16px;">Puedes generar y enviar un correo resumen directamente desde el Forecast. El correo <b>respeta los filtros activos</b>, asi que los KPIs del correo coinciden con lo que ves en pantalla.</p>';
+
+    html += '<div class="guia-card">';
+    html += '<h3 style="font-size:15px; font-weight:700; color:#1e293b; margin-bottom:12px;">Tutorial: Generar y enviar correo</h3>';
+    html += '<div class="guia-steps">';
+    html += '<div class="guia-step">Asegurate de tener los filtros que deseas activos (fuente, tipo, jefe).</div>';
+    html += '<div class="guia-step">Haz click en el boton <b>"Generar Correo"</b> (icono de sobre) en la parte superior del Forecast.</div>';
+    html += '<div class="guia-step">Se abre un modal con el resumen del correo. Revisa los KPIs: % Cumplimiento, Colaboradores Vencidos, Cursos Vencidos y <b>Colaboradores Activos</b>.</div>';
+    html += '<div class="guia-step">A la izquierda veras la lista de <b>destinatarios</b> (jefes con equipo a cargo). Usa los botones <b>"Todos"</b> y <b>"Ninguno"</b> para seleccionar/deseleccionar rapidamente.</div>';
+    html += '<div class="guia-step">Haz click en <b>"Enviar Correo"</b> para enviar. Los destinatarios seleccionados recibiran el resumen con los datos filtrados.</div>';
+    html += '</div>';
+    html += '</div>';
+
+    html += '<div class="guia-card">';
+    html += '<h3 style="font-size:15px; font-weight:700; color:#1e293b; margin-bottom:10px;">KPIs del correo</h3>';
+    html += '<p style="font-size:13px; color:#475569; margin-bottom:10px;">El correo muestra 4 KPIs principales, todos calculados con la misma fuente que el dashboard:</p>';
+    html += '<table style="width:100%; border-collapse:collapse; font-size:13px; margin:10px 0;">';
+    html += '<thead><tr style="background:#1e293b; color:#fff;"><th style="padding:8px; text-align:left;">KPI</th><th style="padding:8px; text-align:left;">Formula / Significado</th></tr></thead><tbody>';
+    html += '<tr style="border-bottom:1px solid #e5e7eb;"><td style="padding:8px; font-weight:700;">% CUMPLIMIENTO</td><td style="padding:8px;">(Evaluables - Con Vencidos) / Evaluables x 100. Los NI no se incluyen.</td></tr>';
+    html += '<tr style="border-bottom:1px solid #e5e7eb; background:#f8fafc;"><td style="padding:8px; font-weight:700;">COLABORADORES VENCIDOS</td><td style="padding:8px;">Personas con al menos 1 curso vencido (del equipo filtrado).</td></tr>';
+    html += '<tr style="border-bottom:1px solid #e5e7eb;"><td style="padding:8px; font-weight:700;">CURSOS VENCIDOS</td><td style="padding:8px;">Total de registros de cursos en estado "vencido".</td></tr>';
+    html += '<tr><td style="padding:8px; font-weight:700;">COLABORADORES ACTIVOS</td><td style="padding:8px;">Total de personas evaluables (= Total activos - Nuevos Ingresos). Coincide con las tarjetas KPI del Forecast.</td></tr>';
+    html += '</tbody></table>';
+    html += '<div class="guia-tip"><b>Tip:</b> Si necesitas un correo para un equipo especifico, primero filtra por "Jefe Directo" y luego genera el correo. Los datos se ajustaran automaticamente.</div>';
+    html += '</div>';
+    html += '</div>';
+  }
+
+  // ══════════════════════════════════════════════════════════════════
+  // VISTAS ADMIN (solo Admin)
+  // ══════════════════════════════════════════════════════════════════
+  if (esAdmin) {
+    html += '<div id="guia-sec-admin" class="guia-section" style="display:none;">';
+    html += '<h2 style="font-size:20px; font-weight:800; color:#1e293b; border-bottom:3px solid #6366f1; padding-bottom:8px; margin-bottom:20px;">Vistas exclusivas de Administrador</h2>';
+    html += '<p style="font-size:13px; color:#475569; margin-bottom:16px;">Como administrador tienes acceso a varias herramientas adicionales para gestionar la capacitacion de toda la organizacion.</p>';
+
+    html += '<div class="guia-card">';
+    html += '<h3 style="font-size:15px; font-weight:700; color:#1e293b; margin-bottom:10px;">Resumen General (Dashboard)</h3>';
+    html += '<p style="font-size:13px; color:#475569; margin-bottom:10px;">Es la primera pantalla que ves al entrar. Muestra un panorama global:</p>';
+    html += '<ul style="font-size:13px; color:#475569; padding-left:18px; margin:0 0 10px 0;">';
+    html += '<li><b>Tarjetas KPI:</b> Total de colaboradores, habilitados, inhabilitados, y % de habilitacion.</li>';
+    html += '<li><b>Grafico por pais:</b> Distribucion de personas por pais.</li>';
+    html += '<li><b>Top jefes con vencidos:</b> Los jefes cuyo equipo tiene mas cursos vencidos.</li>';
+    html += '<li><b>Cursos:</b> Estado de cada curso (sigla) con su % de cumplimiento.</li>';
+    html += '</ul>';
+    html += '<div class="guia-steps">';
+    html += '<div class="guia-step">Selecciona la base que quieres ver (HCC, Chile, Rampa, LATAM, NAM, o Todo).</div>';
+    html += '<div class="guia-step">Revisa las tarjetas principales: Colaboradores, Habilitados, Con vencidos.</div>';
+    html += '<div class="guia-step">Baja a "Top Jefes con vencidos" para ver donde estan los problemas mas grandes.</div>';
+    html += '</div>';
+    html += '</div>';
+
+    html += '<div class="guia-card">';
+    html += '<h3 style="font-size:15px; font-weight:700; color:#1e293b; margin-bottom:10px;">Resumen Admin</h3>';
+    html += '<p style="font-size:13px; color:#475569;">Vista detallada por area y region. Permite comparar el cumplimiento entre diferentes grupos para identificar donde se necesita mas atencion.</p>';
+    html += '</div>';
+
+    html += '<div class="guia-card">';
+    html += '<h3 style="font-size:15px; font-weight:700; color:#1e293b; margin-bottom:10px;">Forecast (como Admin)</h3>';
+    html += '<div class="guia-steps">';
+    html += '<div class="guia-step">Como Admin, puedes ver el Forecast de CUALQUIER base y filtrar por pais, area o jefe.</div>';
+    html += '<div class="guia-step">En la tabla, haz click en un jefe para ver su equipo completo.</div>';
+    html += '<div class="guia-step">Desde el drilldown puedes enviar un correo directamente al jefe o al equipo con los cursos pendientes.</div>';
+    html += '</div>';
+    html += '</div>';
+
+    html += '<div class="guia-card">';
+    html += '<h3 style="font-size:15px; font-weight:700; color:#1e293b; margin-bottom:10px;">Seguimiento</h3>';
+    html += '<p style="font-size:13px; color:#475569;">Permite registrar acciones de seguimiento sobre los casos de vencimiento. Util para documentar que se hizo una gestion con cada jefe.</p>';
+    html += '</div>';
+
+    html += '<div class="guia-card">';
+    html += '<h3 style="font-size:15px; font-weight:700; color:#1e293b; margin-bottom:10px;">Configuracion</h3>';
+    html += '<p style="font-size:13px; color:#475569;">Gestion de usuarios del portal: agregar, editar roles, y administrar accesos.</p>';
+    html += '</div>';
+    html += '</div>';
+
+    // ══════════════════════════════════════════════════════════════════
+    // KPIs Y % (solo Admin)
+    // ══════════════════════════════════════════════════════════════════
+    html += '<div id="guia-sec-kpis" class="guia-section" style="display:none;">';
+    html += '<h2 style="font-size:20px; font-weight:800; color:#1e293b; border-bottom:3px solid #6366f1; padding-bottom:8px; margin-bottom:20px;">Como se calculan los KPIs y porcentajes</h2>';
+    html += '<p style="font-size:13px; color:#475569; margin-bottom:16px;">Esta seccion explica en detalle que significa cada numero y como se calcula.</p>';
+
+    html += '<div class="guia-card">';
+    html += '<h3 style="font-size:15px; font-weight:700; color:#1e293b; margin-bottom:10px;">% Habilitacion (Resumen General)</h3>';
+    html += '<p style="font-size:13px; color:#475569; margin-bottom:10px;">Indica cuantas personas estan <b>habilitadas</b> (sin cursos vencidos) del total de personas <b>evaluables</b>.</p>';
+    html += '<table style="width:100%; border-collapse:collapse; font-size:13px; margin:10px 0;">';
+    html += '<thead><tr style="background:#1e293b; color:#fff;"><th style="padding:8px; text-align:left;">Concepto</th><th style="padding:8px; text-align:left;">Que incluye</th></tr></thead><tbody>';
+    html += '<tr style="border-bottom:1px solid #e5e7eb;"><td style="padding:8px; font-weight:700;">Habilitados</td><td style="padding:8px;">Personas donde <b>todos</b> sus cursos aplicables estan vigentes.</td></tr>';
+    html += '<tr style="border-bottom:1px solid #e5e7eb; background:#f8fafc;"><td style="padding:8px; font-weight:700;">Inhabilitados</td><td style="padding:8px;">Personas con al menos 1 curso aplicable vencido.</td></tr>';
+    html += '<tr><td style="padding:8px; font-weight:700;">Sin KPI (excluidos)</td><td style="padding:8px;">Personas sin cursos aplicables asignados (ej: nuevos ingresos). <b>No cuentan</b> en el denominador.</td></tr>';
+    html += '</tbody></table>';
+    html += '<div style="background:#f1f5f9; padding:14px; border-radius:8px; margin:12px 0;">';
+    html += '<p style="font-size:14px; font-weight:800; color:#1e293b; margin:0 0 6px 0;">Formula:</p>';
+    html += '<p style="font-size:14px; color:#4f46e5; font-weight:700; margin:0;">% Habilitacion = Habilitados / (Habilitados + Inhabilitados) x 100</p>';
+    html += '<p style="font-size:12px; color:#64748b; margin:6px 0 0 0;">Nota: las personas "Sin KPI" NO se incluyen en el denominador.</p>';
+    html += '</div>';
+    html += '</div>';
+
+    html += '<div class="guia-card">';
+    html += '<h3 style="font-size:15px; font-weight:700; color:#1e293b; margin-bottom:10px;">% Cumplimiento (Forecast)</h3>';
+    html += '<p style="font-size:13px; color:#475569; margin-bottom:10px;">En el Forecast, el % es <b>por persona</b>, no por curso:</p>';
+    html += '<div style="background:#f1f5f9; padding:14px; border-radius:8px; margin:12px 0;">';
+    html += '<p style="font-size:14px; font-weight:800; color:#1e293b; margin:0 0 6px 0;">Formula:</p>';
+    html += '<p style="font-size:14px; color:#4f46e5; font-weight:700; margin:0;">% Cumplimiento = (Evaluables - Criticos) / Evaluables x 100</p>';
+    html += '<p style="font-size:12px; color:#64748b; margin:6px 0 0 0;">Donde "Evaluables" = Total colaboradores activos - Nuevos Ingresos.</p>';
+    html += '</div>';
+    html += '<div class="guia-warn"><b>Nuevos Ingresos (NI):</b> Personas con menos de 3 meses en la empresa. Se muestran en la tabla pero NO impactan el %. Si hay 9 personas y 1 es NI, el denominador del % es 8.</div>';
+    html += '</div>';
+
+    html += '<div class="guia-card">';
+    html += '<h3 style="font-size:15px; font-weight:700; color:#1e293b; margin-bottom:10px;">Total Colaboradores (tabla vs KPIs)</h3>';
+    html += '<p style="font-size:13px; color:#475569; margin-bottom:10px;">Tanto la fila "TOTAL COLABORADORES" de la tabla como las tarjetas KPI usan el mismo numero:</p>';
+    html += '<div style="background:#f1f5f9; padding:14px; border-radius:8px; margin:12px 0;">';
+    html += '<p style="font-size:14px; color:#4f46e5; font-weight:700; margin:0;">Total Colaboradores = BPs unicos activos - Nuevos Ingresos</p>';
+    html += '<p style="font-size:12px; color:#64748b; margin:6px 0 0 0;">Si hay NI, se muestran como nota "(+ X NI)" en la tabla.</p>';
+    html += '</div>';
+    html += '<div class="guia-tip"><b>Consistencia garantizada:</b> El total de colaboradores es identico en las tarjetas KPI superiores, la fila TOTAL COLABORADORES de la tabla, y el correo generado desde Forecast. Todos usan la misma fuente de datos filtrada.</div>';
+    html += '</div>';
+
+    html += '<div class="guia-card">';
+    html += '<h3 style="font-size:15px; font-weight:700; color:#1e293b; margin-bottom:10px;">Semaforo del Forecast</h3>';
+    html += '<table style="width:100%; border-collapse:collapse; font-size:13px;"><tbody>';
+    html += '<tr style="border-bottom:1px solid #e5e7eb;"><td style="padding:8px;"><span class="guia-sem" style="background:#16a34a;"></span><b>Verde</b></td><td style="padding:8px;">95% - 100%</td><td style="padding:8px;">Excelente nivel de cumplimiento.</td></tr>';
+    html += '<tr style="border-bottom:1px solid #e5e7eb; background:#f8fafc;"><td style="padding:8px;"><span class="guia-sem" style="background:#ca8a04;"></span><b>Amarillo</b></td><td style="padding:8px;">90% - 94%</td><td style="padding:8px;">Atencion necesaria.</td></tr>';
+    html += '<tr><td style="padding:8px;"><span class="guia-sem" style="background:#dc2626;"></span><b>Rojo</b></td><td style="padding:8px;">Menos de 90%</td><td style="padding:8px;">Critico. Actuar de inmediato.</td></tr>';
+    html += '</tbody></table>';
+    html += '</div>';
+
+    html += '<div class="guia-card">';
+    html += '<h3 style="font-size:15px; font-weight:700; color:#1e293b; margin-bottom:10px;">Ejemplo numerico completo</h3>';
+    html += '<div class="guia-ej">';
+    html += '<b>Escenario:</b> Un jefe tiene 9 personas en su equipo.<br>';
+    html += '- 1 persona es Nuevo Ingreso (NI, menos de 3 meses)<br>';
+    html += '- De las 8 evaluables: 2 tienen cursos vencidos, 1 tiene cursos por vencer, 5 estan al dia<br><br>';
+    html += '<b>Resultado:</b><br>';
+    html += '- Total colaboradores: <b>8</b> (+ 1 NI)<br>';
+    html += '- Critico: <b>2</b> | Pendientes: <b>1</b> | Al dia: <b>5</b><br>';
+    html += '- % Cumplimiento: (8 - 2) / 8 x 100 = <b>75%</b> (rojo)<br>';
+    html += '- El NI aparece en la tabla pero no afecta el 75%';
+    html += '</div>';
+    html += '</div>';
+    html += '</div>';
+  }
+
+  // ══════════════════════════════════════════════════════════════════
+  // GLOSARIO (todos)
+  // ══════════════════════════════════════════════════════════════════
+  html += '<div id="guia-sec-glosario" class="guia-section" style="display:none;">';
+  html += '<h2 style="font-size:20px; font-weight:800; color:#1e293b; border-bottom:3px solid #6366f1; padding-bottom:8px; margin-bottom:20px;">Glosario</h2>';
+  html += '<div class="guia-card">';
+  html += '<table style="width:100%; border-collapse:collapse; font-size:13px;">';
+  html += '<thead><tr style="background:#1e293b; color:#fff;"><th style="padding:8px 12px; text-align:left;">Termino</th><th style="padding:8px 12px; text-align:left;">Que significa</th></tr></thead><tbody>';
+
+  var glosario = [
+    ['AL DIA', 'Curso o persona con todo vigente. Sin accion requerida.'],
+    ['BP', 'Numero de identificacion unico de cada colaborador.'],
+    ['Colaborador', 'Cualquier persona con cursos asignados.'],
+    ['Cumplimiento (%)', 'Proporcion de personas sin vencidos sobre el total evaluable.'],
+    ['Habilitado', 'Curso completado y vigente, o persona sin ningun vencido.'],
+    ['Inhabilitado', 'Persona con al menos 1 curso vencido.'],
+    ['Por Vencer', 'Curso que vence en menos de 30 dias.'],
+    ['Programar', 'Curso que vence entre 31 y 90 dias. Debe planificarse.'],
+    ['Sin Plan', 'Curso asignado sin fecha. Consultar con el jefe.'],
+    ['Vencido', 'Curso cuya fecha ya paso. Accion inmediata.'],
+    ['WC', 'Status inactivo (Working Condition). Personas con WC se excluyen de los conteos y KPIs.']
+  ];
+  if (esAdmin || esJefe) {
+    glosario.push(['COLAB.', 'Colaboradores unicos bajo un jefe. Excluye NI del total.']);
+    glosario.push(['Correo Forecast', 'Email generado desde el Forecast con KPIs y detalle de vencidos. Respeta los filtros activos.']);
+    glosario.push(['Drilldown', 'Ventana de detalle que se abre al hacer click en un jefe o celda mensual en Forecast.']);
+    glosario.push(['Forecast', 'Vista que proyecta cuantas personas se veran afectadas mes a mes por vencimientos.']);
+    glosario.push(['NI (Nuevo Ingreso)', 'Persona con menos de 3 meses en la empresa. No impacta el % de cumplimiento. Se muestra como "(+ X NI)".']);
+    glosario.push(['S/F (Sin Fecha)', 'Curso vencido que no tiene fecha registrada en el sistema.']);
+    glosario.push(['Sin Supervisor', 'Persona sin supervisor asignado en la base de datos.']);
+    glosario.push(['TOTAL COLABORADORES', 'Fila footer de la tabla: BPs unicos activos excluyendo NI. Coincide con los KPIs superiores.']);
+    glosario.push(['TOTAL CURSOS', 'Fila footer de la tabla: total de registros de cursos. Click para ver detalle.']);
+  }
+  if (esAdmin) {
+    glosario.push(['CONSOLIDADO', 'Vista combinada de todas las fuentes (PHH + RAMPA + NAM). Solo usuarios con permisos especiales.']);
+    glosario.push(['Evaluados', 'Personas con al menos 1 registro de curso. Las que se usan para calcular %.']);
+    glosario.push(['HCC', 'Handling, Cargo & Commercial. Una de las divisiones de la organizacion.']);
+    glosario.push(['Jerarquia', 'Cadena de mando: Director, Gerente Sr, Gerente, Subgerente, Jefe Depto, Jefe Area, Supervisor, Colaborador.']);
+    glosario.push(['NAM', 'Control Norte / Norteamerica. Base de datos del personal de esa region.']);
+    glosario.push(['PHH', 'Base de datos principal de Personal Handling & Cargo.']);
+    glosario.push(['RAMPA', 'Base de datos del personal de operaciones en rampa.']);
+    glosario.push(['Sin KPI', 'Persona sin cursos aplicables (ej: nuevo ingreso). Excluida del % de habilitacion.']);
+  }
+  glosario.sort(function(a, b) { return a[0].localeCompare(b[0]); });
+  glosario.forEach(function(g, i) {
+    var bg = i % 2 === 0 ? '#fff' : '#f8fafc';
+    html += '<tr style="border-bottom:1px solid #e5e7eb; background:' + bg + ';"><td style="padding:8px 12px; font-weight:700; color:#4f46e5; white-space:nowrap;">' + g[0] + '</td><td style="padding:8px 12px; color:#475569;">' + g[1] + '</td></tr>';
+  });
+  html += '</tbody></table>';
+  html += '</div>';
+  html += '</div>';
+
+  // ══════════════════════════════════════════════════════════════════
+  // SIGLAS DE CURSOS (todos) — V66: NUEVA SECCION
+  // ══════════════════════════════════════════════════════════════════
+  html += '<div id="guia-sec-cursos" class="guia-section" style="display:none;">';
+  html += '<h2 style="font-size:20px; font-weight:800; color:#1e293b; border-bottom:3px solid #6366f1; padding-bottom:8px; margin-bottom:20px;">Siglas de Cursos</h2>';
+  html += '<p style="font-size:13px; color:#475569; margin-bottom:16px;">Cada curso en el portal se identifica con una <b>sigla</b> (codigo corto). Aqui se explica que significa cada una y que area cubre.</p>';
+
+  html += '<div class="guia-card">';
+  html += '<h3 style="font-size:15px; font-weight:700; color:#1e293b; margin-bottom:10px;">Cursos de Seguridad y Operaciones</h3>';
+  html += '<table style="width:100%; border-collapse:collapse; font-size:13px;">';
+  html += '<thead><tr style="background:#1e293b; color:#fff;"><th style="padding:8px 12px; text-align:left; width:120px;">Sigla</th><th style="padding:8px 12px; text-align:left;">Nombre completo</th><th style="padding:8px 12px; text-align:left;">Descripcion</th></tr></thead><tbody>';
+
+  var cursos = [
+    ['AVSEC', 'Aviation Security', 'Seguridad aeroportuaria. Protocolos de proteccion contra actos de interferencia ilicita en la aviacion civil.'],
+    ['CRM', 'Crew Resource Management', 'Gestion de recursos de equipo. Comunicacion efectiva, toma de decisiones y trabajo en equipo en operaciones.'],
+    ['DGR / MMPP', 'Dangerous Goods Regulations', 'Mercancias Peligrosas. Manejo, almacenamiento y transporte seguro de materiales peligrosos segun IATA.'],
+    ['ERP', 'Emergency Response Plan', 'Plan de respuesta ante emergencias. Protocolos y procedimientos ante situaciones criticas.'],
+    ['FACTOR HUMANO', 'Factor Humano', 'Capacitacion sobre factores humanos en operaciones: fatiga, estres, errores, y como prevenirlos.'],
+    ['MOC', 'Management of Change', 'Gestion del cambio. Proceso para evaluar y controlar riesgos asociados a cambios operacionales.'],
+    ['PETS', 'Live Animals / PETS', 'Transporte de animales vivos. Regulaciones y procedimientos para el manejo seguro de animales en carga.'],
+    ['RAD', 'Radiation Safety', 'Seguridad radiologica. Manejo de materiales radiactivos y protocolos de proteccion.'],
+    ['SMS', 'Safety Management System', 'Sistema de Gestion de Seguridad. Marco para identificar, evaluar y mitigar riesgos operacionales.'],
+    ['SST', 'Seguridad y Salud en el Trabajo', 'Normas de seguridad ocupacional, prevencion de accidentes laborales y salud del trabajador.'],
+    ['ULD', 'Unit Load Device', 'Dispositivos de carga unitarizada. Manejo de contenedores y pallets de carga aerea.']
+  ];
+  cursos.forEach(function(c, i) {
+    var bg = i % 2 === 0 ? '#fff' : '#f8fafc';
+    html += '<tr style="border-bottom:1px solid #e5e7eb; background:' + bg + ';">';
+    html += '<td style="padding:8px 12px; font-weight:700; color:#4f46e5; white-space:nowrap;">' + c[0] + '</td>';
+    html += '<td style="padding:8px 12px; font-weight:600; color:#1e293b;">' + c[1] + '</td>';
+    html += '<td style="padding:8px 12px; color:#475569;">' + c[2] + '</td>';
+    html += '</tr>';
+  });
+  html += '</tbody></table>';
+  html += '</div>';
+
+  html += '<div class="guia-tip"><b>Nota:</b> La lista de siglas puede variar segun actualizaciones en la hoja de datos. Si encuentras una sigla que no aparece aqui, consulta con el administrador del portal.</div>';
+  html += '</div>';
+
+  // FOOTER
+  html += '<div style="text-align:center; margin-top:40px; padding:16px; color:#94a3b8; font-size:11px;">';
+  html += '<p style="margin:0;">Cargo Training Portal - Guia de Usuario v3.0</p>';
+  html += '</div>';
+  html += '</div>';
+
+  cont.innerHTML = html;
+  mostrarSeccionGuia(tabs[0].id);
+}
+
+function mostrarSeccionGuia(secId) {
+  var secs = document.querySelectorAll('[id^="guia-sec-"]');
+  for (var i = 0; i < secs.length; i++) secs[i].style.display = 'none';
+  var target = document.getElementById('guia-sec-' + secId);
+  if (target) target.style.display = 'block';
+  var btns = document.querySelectorAll('.guia-tab-btn');
+  for (var j = 0; j < btns.length; j++) {
+    btns[j].getAttribute('data-guia-tab') === secId ? btns[j].classList.add('active') : btns[j].classList.remove('active');
+  }
+}
+
+function imprimirGuia() {
+  var secs = document.querySelectorAll('[id^="guia-sec-"]');
+  for (var i = 0; i < secs.length; i++) secs[i].style.display = 'block';
+  setTimeout(function() { window.print(); }, 200);
+}
+</script>

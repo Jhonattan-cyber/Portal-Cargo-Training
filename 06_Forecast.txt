@@ -1,0 +1,731 @@
+// ===================== FORECAST (REINGENIERIA v2: HASH MAP + CRUCE ROBUSTO) =====================
+/**
+ * Obtiene datos de Forecast con RENDIMIENTO OPTIMIZADO.
+ * 
+ * @param {string} filtro - 'TODO', 'CHILE', 'RAMPA', 'LATAM', 'NAM', 'HCC'
+ * @param {string} [usuarioBase] - V30c: base del usuario para garantizar inclusión
+ * @returns {Object} { success, cl, latam, rampa, nam, hcc, metadata }
+ */
+function getForecastData(filtro, usuarioBase) {
+  Logger.log('>>> START getForecastData("' + filtro + '", usuarioBase="' + (usuarioBase || '') + '")');
+  try {
+    var t0 = new Date().getTime();
+    var _perfPhases = {}; // V74: [PERF] timing por fase
+    
+    // ═══ CACHE: Intentar leer resultado armado desde cache ═══
+    // V97-FIX: Cache key incluye categoría de rol del usuario para evitar
+    // cache pollution entre usuarios con diferentes niveles de acceso.
+    // Un COLLABORADOR con SILO puede contaminar el cache de un JEFE/ADMIN.
+    var _cacheUsr = getUsuarioActual();
+    var _cacheRolCat = 'UNKNOWN';
+    if (_cacheUsr) {
+      var _cacheRol = (_cacheUsr.rol || '').toUpperCase();
+      var _ROLES_EQUIPO_CACHE = ['JEFE', 'JEFE_DIRECTO', 'JEFE_AREA', 'GERENTE', 'EJECUTIVO', 'JEFE_EJECUTIVO'];
+      if (_cacheRol === 'ADMIN') _cacheRolCat = 'ADMIN';
+      else if (_cacheRol === 'CAPACITY') _cacheRolCat = 'CAPACITY';
+      else if (_ROLES_EQUIPO_CACHE.some(function(r) { return _cacheRol.indexOf(r) >= 0; })) _cacheRolCat = 'EQUIPO';
+      else _cacheRolCat = 'INDIV';
+    }
+    var cacheKey = 'FORECAST_V97_' + (filtro || 'TODO') + '_' + _cacheRolCat;
+    var cache = CacheService.getScriptCache();
+    var cached = cache.get(cacheKey);
+    if (cached) {
+      try {
+        var parsed = JSON.parse(cached);
+        if (parsed && parsed.success) {
+          Logger.log('[PERF] base=' + filtro + ' cacheHit=true registros=' + (parsed.registros ? parsed.registros.length : 0) + ' | readMs=' + (new Date().getTime() - t0) + 'ms');
+          Logger.log('◀◀◀ END getForecastData("' + filtro + '") [CACHE HIT]');
+          return parsed;
+        }
+      } catch(ce) { Logger.log('FORECAST: Cache corrupto para "' + cacheKey + '": ' + ce.message); }
+    }
+    Logger.log('FORECAST: Cache MISS para "' + cacheKey + '", recalculando...');
+
+    // PERMISOS: Determinar scope del usuario
+    // V23b: Para roles con equipo, NO restringir bases — su equipo puede cruzar bases.
+    //       La seguridad se basa en JERARQUÍA (buildArbolJerarquico), no en base del usuario.
+    var usr = getUsuarioActual();
+    var basesPermitidas = null; // null = todas (ADMIN)
+    var filtroEsBaseEspecifica = (filtro === 'CHILE' || filtro === 'CL' || filtro === 'LATAM' || filtro === 'RAMPA' || filtro === 'NAM');
+    var ROLES_CON_EQUIPO = ['JEFE', 'JEFE_DIRECTO', 'JEFE_AREA', 'GERENTE', 'EJECUTIVO', 'JEFE_EJECUTIVO'];
+    var rolUsuarioFC = usr ? (usr.rol || '').toUpperCase() : '';
+    var esRolConEquipo = ROLES_CON_EQUIPO.some(function(r) { return rolUsuarioFC.indexOf(r) >= 0; });
+    
+    Logger.log('FORECAST getForecastData: email=' + (usr ? usr.email : 'null') + ' | rol=' + rolUsuarioFC + ' | base=' + (usr ? usr.base : 'null') + ' | filtro=' + filtro + ' | esRolConEquipo=' + esRolConEquipo);
+    if (usr && rolUsuarioFC !== 'ADMIN' && rolUsuarioFC !== 'CAPACITY') {
+      var baseUsuario = usr.base || '';
+      if (filtroEsBaseEspecifica || esRolConEquipo) {
+        // Roles con equipo: leer TODAS las bases porque su árbol puede cruzar bases
+        // Filtro explícito: respetar selección del usuario
+        basesPermitidas = null;
+        Logger.log('PERMISOS FORECAST: ' + (esRolConEquipo ? 'ROL_CON_EQUIPO → basesPermitidas=TODAS (arbol cruza bases)' : 'filtro específico "' + filtro + '" → basesPermitidas=NO_APLICA'));
+      } else {
+        basesPermitidas = [baseUsuario];
+        Logger.log('PERMISOS FORECAST: Usuario ' + usr.email + ' (base=' + baseUsuario + ', rol=' + rolUsuarioFC + ') → basesPermitidas=' + JSON.stringify(basesPermitidas));
+      }
+    } else {
+      Logger.log('FORECAST: usr=' + (usr ? 'ADMIN' : 'null (sin sesión)') + ' → basesPermitidas=TODAS');
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // SELECCIÓN INTELIGENTE DE BASES A LEER
+    // HCC no es una base física, es un ÁREA que viene de empleados
+    // en LATAM (PHH) y posiblemente RAMPA. No leer CHILE/NAM para HCC.
+    // ═══════════════════════════════════════════════════════════════
+    var todasLasBases = ['CHILE', 'RAMPA', 'LATAM', 'NAM'];
+    var bases; // bases que realmente vamos a leer
+    
+    if (filtro === 'HCC') {
+      // HCC: solo leer bases que pueden tener empleados HCC (LATAM=PHH, RAMPA)
+      bases = ['LATAM', 'RAMPA'];
+      // SEGURIDAD: intersectar con basesPermitidas del usuario
+      if (basesPermitidas) {
+        bases = bases.filter(function(b) { return basesPermitidas.indexOf(b) >= 0; });
+      }
+      Logger.log('FORECAST MODO HCC: basesALeer final=' + JSON.stringify(bases));
+    } else if (filtro === 'CHILE' || filtro === 'CL') {
+      bases = ['CHILE'];
+      Logger.log('FORECAST MODO BASE: Solo leyendo CHILE');
+    } else if (filtro === 'LATAM') {
+      bases = ['LATAM'];
+      Logger.log('FORECAST MODO BASE: Solo leyendo LATAM');
+    } else if (filtro === 'RAMPA') {
+      bases = ['RAMPA'];
+      Logger.log('FORECAST MODO BASE: Solo leyendo RAMPA');
+    } else if (filtro === 'NAM') {
+      bases = ['NAM'];
+      Logger.log('FORECAST MODO BASE: Solo leyendo NAM');
+    } else {
+      // TODO u otro: leer todas
+      bases = todasLasBases;
+      Logger.log('FORECAST MODO TODO: Leyendo todas las bases');
+    }
+    
+    // ═══ V30c: GARANTIA — siempre incluir la base del usuario ═══
+    if (usuarioBase && todasLasBases.indexOf(usuarioBase) >= 0 && bases.indexOf(usuarioBase) < 0) {
+      bases.push(usuarioBase);
+      Logger.log('[ARG-AUDIT] GARANTIA: base del usuario "' + usuarioBase + '" NO estaba en bases → AGREGADA. basesALeerFinal=' + JSON.stringify(bases));
+    }
+    Logger.log('[ARG-AUDIT] basesALeerFinal=' + JSON.stringify(bases));
+    
+    var resultado = { cl: [], latam: [], rampa: [], nam: [], hcc: [] };
+    var metadata = { totalBaseLeida: 0, totalPlanLeido: 0, basesProcesadas: [], errores: [], bpIgnorados: 0 };
+
+    // ═══════════════════════════════════════════════════════════════
+    // [BASE-ONLY V26] PASO 1 + 2 COMBINADO: Leer BASE → generar registros
+    // Sin PLAN. Sin merge. Sin plan-only employees. 100% BASE.
+    // ═══════════════════════════════════════════════════════════════
+    bases.forEach(function(bk) {
+      try {
+        var _tBaseStart = new Date().getTime();
+        var incluirEnResultado = (filtro !== 'HCC');
+
+        // FUENTE ÚNICA: Hoja BASE de cada Excel
+        var baseEmps = leerHoja(bk, 'base');
+        var _tBaseRead = new Date().getTime();
+        _perfPhases['read_' + bk] = _tBaseRead - _tBaseStart;
+        if (!Array.isArray(baseEmps)) baseEmps = [];
+        metadata.totalBaseLeida += baseEmps.length;
+        metadata.basesProcesadas.push(bk + ':' + baseEmps.length);
+        metadata['total' + bk] = baseEmps.length;
+        var hccFromBase = 0;
+        baseEmps.forEach(function(e) { if (e.esHCC) hccFromBase++; });
+        metadata.totalHCC = (metadata.totalHCC || 0) + hccFromBase;
+        // V36: Also track raw HCC count (before active filter) for accurate totals
+        if (baseEmps._hccRawCount > 0) {
+          metadata.totalHCCRaw = (metadata.totalHCCRaw || 0) + baseEmps._hccRawCount;
+          _log('[V6-HCC-RAW] ' + bk + ': raw=' + baseEmps._hccRawCount + ' active=' + hccFromBase + ' delta=' + (baseEmps._hccRawCount - hccFromBase));
+          if (baseEmps._hccFilteredOut && baseEmps._hccFilteredOut.length > 0) {
+            _log('[V6-HCC-FILTERED-OUT] ' + bk + ': ' + baseEmps._hccFilteredOut.length + ' HCC employees EXCLUDED by active filter:');
+            baseEmps._hccFilteredOut.forEach(function(f) { _log('  ' + f); });
+          }
+        }
+        Logger.log('[BASE-ONLY] ' + bk + ': ' + baseEmps.length + ' empleados BASE | HCC=' + hccFromBase + ' (raw=' + (baseEmps._hccRawCount || 0) + ') | lecturas PLAN=0');
+
+        // ═══ V36-BP COMBINED METADATA PASS — single iteration over baseEmps ═══
+        // Builds: jerarquiaIndex, jerarquiaIndexBP, posicionGlobal, nombreToBP, hierRoleMap
+        if (!metadata.jerarquiaIndex) metadata.jerarquiaIndex = {};
+        if (!metadata.posicionGlobal) metadata.posicionGlobal = {};
+        if (!metadata.nombreToBP) metadata.nombreToBP = {};
+        if (!metadata.bpToNombre) metadata.bpToNombre = {};
+        if (!metadata._hierRoleMap) metadata._hierRoleMap = {};
+        var HIER_FIELDS = ['jefeDirecto', 'jefeArea', 'jefeDepartamento', 'subgerente', 'gerente', 'gerenteSr', 'director'];
+        var HIER_ROLE_NAMES = {
+          'jefeDirecto': 'SUPERVISOR', 'jefeArea': 'JEFE AREA',
+          'jefeDepartamento': 'JEFE DEPARTAMENTO', 'subgerente': 'SUBGERENTE',
+          'gerente': 'GERENTE', 'gerenteSr': 'GERENTE SR', 'director': 'DIRECTOR'
+        };
+        var bpConflictos = 0;
+        
+        baseEmps.forEach(function(emp) {
+          var nameNorm = normKey(emp.nombre || '');
+          
+          // 1. posicionGlobal: employee name → position (from POSICION column)
+          if (nameNorm && emp.posicion) {
+            if (!metadata.posicionGlobal[nameNorm]) metadata.posicionGlobal[nameNorm] = emp.posicion;
+          }
+          
+          // 2. nombreToBP & bpToNombre
+          if (nameNorm && emp.bp) {
+            metadata.bpToNombre[emp.bp] = emp.nombre;
+            if (!metadata.nombreToBP[nameNorm]) {
+              metadata.nombreToBP[nameNorm] = emp.bp;
+            } else if (metadata.nombreToBP[nameNorm] !== emp.bp) {
+              bpConflictos++;
+              if (bpConflictos <= 5) {
+                _log('[V6-BP-CONFLICT] "' + emp.nombre + '" → existing BP=' + metadata.nombreToBP[nameNorm] + ' new BP=' + emp.bp);
+              }
+            }
+          }
+          
+          // 3. Hierarchy indexes (7 levels) + hierRoleMap (derive role from hierarchy)
+          for (var hfi = 0; hfi < HIER_FIELDS.length; hfi++) {
+            var hField = HIER_FIELDS[hfi];
+            var supNorm = normKey(emp[hField] || '');
+            if (!supNorm) continue;
+            
+            // jerarquiaIndex (name-based)
+            if (!metadata.jerarquiaIndex[supNorm]) metadata.jerarquiaIndex[supNorm] = [];
+            var existsName = false;
+            for (var xi = 0; xi < metadata.jerarquiaIndex[supNorm].length; xi++) {
+              if (metadata.jerarquiaIndex[supNorm][xi].b === emp.bp) { existsName = true; break; }
+            }
+            if (!existsName) {
+              metadata.jerarquiaIndex[supNorm].push({ b: emp.bp, n: emp.nombre, pos: emp.posicion || '' });
+            }
+            
+            // hierRoleMap: track highest hierarchy level for each manager name
+            if (!metadata._hierRoleMap[supNorm] || metadata._hierRoleMap[supNorm].level < hfi) {
+              metadata._hierRoleMap[supNorm] = { level: hfi, role: HIER_ROLE_NAMES[hField] };
+            }
+          }
+        });
+        
+        // Fill posicionGlobal for managers using hierarchy role if they have no POSICION value
+        var hierFills = 0;
+        Object.keys(metadata._hierRoleMap).forEach(function(nameNorm) {
+          if (!metadata.posicionGlobal[nameNorm]) {
+            metadata.posicionGlobal[nameNorm] = metadata._hierRoleMap[nameNorm].role;
+            hierFills++;
+          }
+        });
+        
+        _log('[V6-META] ' + bk + ': hierIndex=' + Object.keys(metadata.jerarquiaIndex).length
+          + ' posGlobal=' + Object.keys(metadata.posicionGlobal).length
+          + ' (hierFills=' + hierFills + ')'
+          + ' nombreToBP=' + Object.keys(metadata.nombreToBP).length
+          + ' conflicts=' + bpConflictos);
+
+        // V35: HCC audit — identify employees with 0 applicable courses
+        if (hccFromBase > 0) {
+          var hccConCursos = 0, hccSinCursos = [];
+          baseEmps.forEach(function(emp) {
+            if (!emp.esHCC) return;
+            var cursosAplicables = emp.cursos.filter(function(c) { return c.status !== 'NO_APLICA'; });
+            if (cursosAplicables.length > 0) { hccConCursos++; }
+            else { hccSinCursos.push(emp.bp + '|' + emp.nombre + '|cursos=' + emp.cursos.length + '(todos NO_APLICA o 0)'); }
+          });
+          if (hccSinCursos.length > 0) {
+            Logger.log('[HCC-AUDIT] ' + bk + ': ' + hccFromBase + ' HCC activos = ' + hccConCursos + ' con cursos + ' + hccSinCursos.length + ' SIN CURSOS APLICABLES');
+            Logger.log('[HCC-AUDIT] BPs sin cursos: ' + hccSinCursos.join(' | '));
+          }
+          if (!metadata.hccSinCursos) metadata.hccSinCursos = [];
+          metadata.hccSinCursos = metadata.hccSinCursos.concat(hccSinCursos);
+        }
+
+        // ═══════════════════════════════════════════════════════════════
+        // PASO 2: Generar registros de forecast directamente desde BASE
+        // ═══════════════════════════════════════════════════════════════
+        var regCount = 0;
+        // V54b: Track employees that have 0 visible course records (all NO_APLICA)
+        var empsConRegistros = {};
+        for (var ei = 0; ei < baseEmps.length; ei++) {
+          var emp = baseEmps[ei];
+          var esHCC = emp.esHCC || false;
+          var empTieneRegistro = false;
+          for (var ci = 0; ci < emp.cursos.length; ci++) {
+            var c = emp.cursos[ci];
+            // V30d-I: Incluir TODOS los cursos excepto NO_APLICA
+            // SIN DATO = curso que necesita atención (sin info de tracking)
+            // Antes: se excluían SIN DATO, dejando solo 2-3 cursos por persona
+            if (c.status === 'NO_APLICA') continue;
+
+            var mes = 0, anio = 0;
+            var fechaRef = c.planDate || c.vencimiento;
+            if (fechaRef) {
+              var fp = parseFechaLatina(fechaRef);
+              if (fp.date) { mes = fp.date.getMonth() + 1; anio = fp.date.getFullYear(); }
+            }
+
+            // PAYLOAD: Claves minificadas
+            // Jerarquía V26: 7 niveles incluidos para buildArbolJerarquico
+            var registro = {
+              b:  emp.bp,
+              n:  emp.nombre,
+              p:  emp.pais,
+              co: emp.correo,
+              pos: emp.posicion || '',
+              jd: emp.jefeDirecto,      // SUPERVISOR (nivel 7)
+              ja: emp.jefeArea,         // JEFE AREA  (nivel 6)
+              jdpto: emp.jefeDepartamento || '', // JEFE DEPTO (nivel 5)
+              sg: emp.subgerente || '', // SUBGERENTE (nivel 4)
+              g:  emp.gerente,          // GERENTE    (nivel 3)
+              gsr: emp.gerenteSr || '', // GERENTE SR (nivel 2)
+              dir: emp.director || '',  // DIRECTOR   (nivel 1)
+              a:  emp.area,
+              neg: emp.negocio || '',
+              z: emp.zona || '',
+              ac:  emp.areaCanon || '',
+              cu: c.sigla,
+              cn: c.nombre,
+              v:  c.vencimiento || '',
+              h:  c.habilitacion || '',
+              pd: c.planDate || '',
+              d:  c.dias,
+              s:  c.status,
+              sr: _clasificarStatusReal(c.status, c.dias, c.vencimiento || ''),
+              m:  mes,
+              an: anio,
+              bo: bk,
+              ni: emp.esNuevoIngreso || false,
+              hcc: emp.esHCC || false,
+              kpi: emp.cuentaKPI === true,
+              stRaw: emp.statusRaw || ''
+            };
+
+            if (incluirEnResultado) {
+              registro.gr = bk;
+              if (bk === 'CHILE') resultado.cl.push(registro);
+              else if (bk === 'LATAM') resultado.latam.push(registro);
+              else if (bk === 'RAMPA') resultado.rampa.push(registro);
+              else if (bk === 'NAM') resultado.nam.push(registro);
+              regCount++;
+            }
+            if (esHCC) {
+              var regHCC = {};
+              for (var rk in registro) regHCC[rk] = registro[rk];
+              regHCC.gr = 'HCC';
+              resultado.hcc.push(regHCC);
+            }
+            empTieneRegistro = true;
+          }
+          empsConRegistros[emp.bp] = empTieneRegistro;
+          
+          // V54b: Si el empleado NO tiene ningún registro visible (todos sus cursos son NO_APLICA),
+          // crear un registro placeholder para que aparezca en personasMap del frontend.
+          // Esto asegura que el conteo de totalActivos sea consistente con la base Excel.
+          if (!empTieneRegistro) {
+            var placeholderReg = {
+              b:  emp.bp,
+              n:  emp.nombre,
+              p:  emp.pais,
+              co: emp.correo,
+              pos: emp.posicion || '',
+              jd: emp.jefeDirecto,
+              ja: emp.jefeArea,
+              jdpto: emp.jefeDepartamento || '',
+              sg: emp.subgerente || '',
+              g:  emp.gerente,
+              gsr: emp.gerenteSr || '',
+              dir: emp.director || '',
+              a:  emp.area,
+              neg: emp.negocio || '',
+              z: emp.zona || '',
+              ac:  emp.areaCanon || '',
+              cu: '_SIN_CURSOS',
+              cn: 'Sin cursos aplicables',
+              v: '', h: '', pd: '',
+              d:  null,
+              s:  'SIN_CURSOS',
+              sr: 'SIN_CURSOS',
+              m:  0, an: 0,
+              bo: bk,
+              ni: emp.esNuevoIngreso || false,
+              hcc: emp.esHCC || false,
+              kpi: emp.cuentaKPI === true,
+              stRaw: emp.statusRaw || '',
+              sc: true  // flag: es placeholder sin cursos
+            };
+            if (incluirEnResultado) {
+              placeholderReg.gr = bk;
+              if (bk === 'CHILE') resultado.cl.push(placeholderReg);
+              else if (bk === 'LATAM') resultado.latam.push(placeholderReg);
+              else if (bk === 'RAMPA') resultado.rampa.push(placeholderReg);
+              else if (bk === 'NAM') resultado.nam.push(placeholderReg);
+              regCount++;
+            }
+            if (esHCC) {
+              var phReg = {};
+              for (var phk in placeholderReg) phReg[phk] = placeholderReg[phk];
+              phReg.gr = 'HCC';
+              resultado.hcc.push(phReg);
+            }
+          }
+        }
+        // V54b: Log employees with 0 visible courses
+        var sinCursosCount = baseEmps.filter(function(e) { return !empsConRegistros[e.bp]; }).length;
+        if (sinCursosCount > 0) {
+          _log('[V4b-PLACEHOLDER] ' + bk + ': ' + sinCursosCount + ' empleados con 0 cursos visibles (todos NO_APLICA) → placeholder creado');
+        }
+        Logger.log('[COURSES-READ] ' + bk + ': registrosCursos=' + regCount + ' | baseEmps=' + baseEmps.length);
+      } catch(e) {
+        Logger.log('ERROR Forecast [BASE-ONLY] ' + bk + ': ' + e.message + ' | stack: ' + (e.stack || 'N/A'));
+        metadata.errores.push(bk + ': ' + e.message);
+      }
+    });
+
+    // ═══════════════════════════════════════════════════════════════
+    // V64: CROSS-BASE WC EXCLUSION — excluir BPs WC de TODAS las bases
+    // V99-REGLA-NEGOCIO: WC es concepto de Control Norte (NAM) solamente.
+    // NO debe contaminar datos de PHH/LATAM, RAMPA, CHILE ni HCC.
+    // Antes se filtraba cross-base; ahora solo se filtra NAM.
+    // ═══════════════════════════════════════════════════════════════
+    var wcSet = {};
+    // Fuente 1: Session variable (populated when leerHojaBase runs — cache miss)
+    Object.keys(_wcBPsSession).forEach(function(bp) { wcSet[bp] = true; });
+    // Fuente 2: Separate cache (populated during previous leerHojaBase — cache hit)
+    try {
+      var cachedWC = getFromCache('NAM', 'wcBPs');
+      if (cachedWC && Array.isArray(cachedWC)) {
+        cachedWC.forEach(function(bp) { wcSet[bp] = true; });
+      }
+    } catch(e) {}
+    var wcBPsList = Object.keys(wcSet);
+    if (wcBPsList.length > 0) {
+      var beforeNAM = resultado.nam.length;
+      // V99: Solo filtrar NAM — WC es exclusivo de Control Norte
+      resultado.nam = resultado.nam.filter(function(r) { return !wcSet[r.b]; });
+      var removedNAM = beforeNAM - resultado.nam.length;
+      _log('[V99-WC-NAM-ONLY] WC BPs=' + wcBPsList.length + ' | Removidos de NAM=' + removedNAM + ' | Otras bases: sin filtro WC');
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // V36-BP POST-PROCESS: Rebuild jerarquiaIndexBP with fuzzy name→BP resolution
+    // After ALL bases are loaded, nombreToBP is complete. Now resolve hierarchy
+    // names that didn't match any employee name exactly (e.g., "JIMENEZ AMELIA PAOLA"
+    // in hierarchy vs "JIMENEZ PAOLA" as employee name).
+    // ═══════════════════════════════════════════════════════════════
+    metadata.jerarquiaIndexBP = {};
+    function _fuzzyResolveBP(nameNorm) {
+      // 1. Exact match
+      if (metadata.nombreToBP[nameNorm]) return metadata.nombreToBP[nameNorm];
+      var tokens = nameNorm.split(' ').filter(function(p) { return p.length > 1; });
+      if (tokens.length < 2) return null;
+      // 1.5 V97: Canonical match (tokens sorted — handles name order inversions)
+      var canonicalInput = tokens.slice().sort().join(' ');
+      for (var ck in metadata.nombreToBP) {
+        var ckTokens = ck.split(' ').filter(function(p) { return p.length > 1; });
+        if (ckTokens.length === tokens.length) {
+          if (ckTokens.slice().sort().join(' ') === canonicalInput) return metadata.nombreToBP[ck];
+        }
+      }
+      // 2. Hierarchy name has MORE tokens (e.g., "JIMENEZ AMELIA PAOLA") — try 2-token subsets
+      if (tokens.length > 2) {
+        for (var ti = 0; ti < tokens.length; ti++) {
+          for (var tj = ti + 1; tj < tokens.length; tj++) {
+            var subName = tokens[ti] + ' ' + tokens[tj];
+            if (metadata.nombreToBP[subName]) return metadata.nombreToBP[subName];
+          }
+        }
+      }
+      // 3. Hierarchy name has FEWER tokens (e.g., "JIMENEZ PAOLA") — find longer name containing all
+      for (var nk in metadata.nombreToBP) {
+        var allFound = true;
+        for (var tk = 0; tk < tokens.length; tk++) {
+          if (nk.indexOf(tokens[tk]) < 0) { allFound = false; break; }
+        }
+        if (allFound) return metadata.nombreToBP[nk];
+      }
+      return null;
+    }
+    var bpResolved = 0, bpUnresolved = 0;
+    Object.keys(metadata.jerarquiaIndex).forEach(function(supNorm) {
+      var supBP = _fuzzyResolveBP(supNorm);
+      if (!supBP) { bpUnresolved++; return; }
+      bpResolved++;
+      if (!metadata.jerarquiaIndexBP[supBP]) {
+        metadata.jerarquiaIndexBP[supBP] = metadata.jerarquiaIndex[supNorm];
+      } else {
+        // Merge subordinates from different name forms of the same BP
+        var existing = metadata.jerarquiaIndexBP[supBP];
+        var toAdd = metadata.jerarquiaIndex[supNorm];
+        for (var mi = 0; mi < toAdd.length; mi++) {
+          var found = false;
+          for (var mj = 0; mj < existing.length; mj++) {
+            if (existing[mj].b === toAdd[mi].b) { found = true; break; }
+          }
+          if (!found) existing.push(toAdd[mi]);
+        }
+      }
+    });
+    _log('[V6-BP-POSTPROCESS] jerarquiaIndexBP rebuilt: ' + Object.keys(metadata.jerarquiaIndexBP).length + ' supervisors | resolved=' + bpResolved + ' unresolved=' + bpUnresolved);
+
+
+    if (usr && usr.rol !== 'ADMIN') {
+      var totalPorPais = (resultado.cl || []).length + (resultado.latam || []).length + (resultado.rampa || []).length + (resultado.nam || []).length;
+      Logger.log('FORECAST PASO4: Jefe "' + usr.nombre + '" (rol=' + usr.rol + ', base=' + usr.base + ') | totalPorPais=' + totalPorPais + ' | CL=' + (resultado.cl || []).length + ' LATAM=' + (resultado.latam || []).length + ' RAMPA=' + (resultado.rampa || []).length + ' NAM=' + (resultado.nam || []).length + ' HCC=' + (resultado.hcc || []).length + ' → filtro jerarquía se aplicará en getForecastDataByBase()');
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // PASO 5: SEGURIDAD - SILOS POR PAIS
+    // V23b: Roles con equipo NO reciben SILO — su seguridad es JERARQUIA.
+    //       El buildArbolJerarquico en getForecastDataByBase filtra correctamente.
+    // ═══════════════════════════════════════════════════════════════
+    if (usr && rolUsuarioFC !== 'ADMIN' && rolUsuarioFC !== 'CAPACITY' && !esRolConEquipo) {
+      var baseUsr = (usr.base || '').toUpperCase();
+      var filtroUpper = (filtro || 'TODO').toUpperCase();
+      var userAreaUpper = normKey(usr.area || '');
+
+      if (filtroUpper === 'TODO') {
+        // SILO estricto: en vista "TODO", solo mostrar base propia (SOLO para roles sin equipo)
+        if (baseUsr !== 'CHILE') { delete resultado.cl; }
+        if (baseUsr !== 'LATAM') { delete resultado.latam; }
+        if (baseUsr !== 'RAMPA') { delete resultado.rampa; }
+        if (baseUsr !== 'NAM')   { delete resultado.nam; }
+        if (userAreaUpper.indexOf('HCC') < 0) { delete resultado.hcc; }
+      }
+
+      Logger.log('SILO FORECAST: filtro=' + filtroUpper + ' Usuario base=' + baseUsr + ' area=' + userAreaUpper + ' -> claves restantes: ' + Object.keys(resultado).join(','));
+    } else if (esRolConEquipo) {
+      Logger.log('SILO FORECAST: SKIP — rol con equipo (' + rolUsuarioFC + '), seguridad por jerarquía');
+    }
+
+    var registrosFiltrados = [];
+    if (filtro === 'HCC') {
+      registrosFiltrados = resultado.hcc || [];
+    } else if (filtro === 'CHILE' || filtro === 'CL') {
+      registrosFiltrados = resultado.cl || [];
+    } else if (filtro === 'LATAM') {
+      registrosFiltrados = resultado.latam || [];
+    } else if (filtro === 'RAMPA') {
+      registrosFiltrados = resultado.rampa || [];
+    } else if (filtro === 'NAM') {
+      registrosFiltrados = resultado.nam || [];
+    } else {
+      // TODO: HCC employees ya están en sus base buckets, no concatenar resultado.hcc
+      registrosFiltrados = (resultado.cl || []).concat(resultado.latam || [], resultado.rampa || [], resultado.nam || []);
+    }
+
+    // ═══ FILTRAR NA: Solo excluir NO_APLICA — SIN DATO se mantiene para conteo de personas ═══
+    // V54: SIN DATO DEBE llegar al frontend para que el empleado aparezca en personasMap
+    var antesNA = registrosFiltrados.length;
+    registrosFiltrados = registrosFiltrados.filter(function(r) {
+      var st = (r.s || '').toUpperCase();
+      return st !== 'NO_APLICA';
+    });
+    var removidosNA = antesNA - registrosFiltrados.length;
+    if (removidosNA > 0) {
+      Logger.log('FILTRO NA: Removidos ' + removidosNA + ' registros NO_APLICA de ' + antesNA + ' → ' + registrosFiltrados.length);
+    }
+
+    var totalGeneral = (resultado.cl || []).length + (resultado.latam || []).length + (resultado.rampa || []).length + (resultado.nam || []).length + (resultado.hcc || []).length;
+    var elapsed = new Date().getTime() - t0;
+    
+    // Distribución de meses para diagnóstico
+    var mesDist = {};
+    registrosFiltrados.forEach(function(r) {
+      var mk = r.m || 0;
+      mesDist[mk] = (mesDist[mk] || 0) + 1;
+    });
+    
+    // Log detallado según modo
+    Logger.log('getForecastData("' + filtro + '"): RESULTADO');
+    _log('  Bases leídas: ' + JSON.stringify(bases));
+    _log('  Total registros: ' + totalGeneral);
+    _log('  HCC=' + (resultado.hcc || []).length + ' | CL=' + (resultado.cl || []).length + ' | LATAM=' + (resultado.latam || []).length + ' | RAMPA=' + (resultado.rampa || []).length + ' | NAM=' + (resultado.nam || []).length);
+    _log('  registrosFiltrados (para frontend): ' + registrosFiltrados.length);
+    _log('  Tiempo: ' + elapsed + 'ms | Rol=' + (usr ? usr.rol : 'null') + ' | Errores=' + metadata.errores.length);
+    _log('  Meses: ' + JSON.stringify(mesDist));
+    Logger.log('[FORECAST] rows=' + registrosFiltrados.length + ' | total_registros=' + totalGeneral + ' | baseEmps=' + metadata.totalBaseLeida + ' | plan=0');
+    
+    // V58: Diagnostic — unique person counts per base
+    var _v58BPsByBase = {};
+    registrosFiltrados.forEach(function(r) {
+      var bk = r.bo || 'SIN_BASE';
+      if (!_v58BPsByBase[bk]) _v58BPsByBase[bk] = {};
+      _v58BPsByBase[bk][r.b] = true;
+    });
+    var _v58Summary = [];
+    Object.keys(_v58BPsByBase).forEach(function(bk) {
+      _v58Summary.push(bk + '=' + Object.keys(_v58BPsByBase[bk]).length + ' personas');
+    });
+    _log('[V8-DIAG] Personas únicas por base: ' + _v58Summary.join(' | '));
+
+    // ═══ V74: [PERF] Log detallado de performance por fase ═══
+    _perfPhases['build'] = new Date().getTime() - t0 - Object.keys(_perfPhases).reduce(function(s, k) { return s + (k.indexOf('read_') === 0 ? _perfPhases[k] : 0); }, 0);
+    _perfPhases['total'] = new Date().getTime() - t0;
+    var perfParts = [];
+    Object.keys(_perfPhases).forEach(function(k) { perfParts.push(k + '=' + _perfPhases[k] + 'ms'); });
+    Logger.log('[PERF] base=' + filtro + ' cacheHit=false registros=' + registrosFiltrados.length + ' personas=' + Object.keys(_v58BPsByBase).reduce(function(s, k) { return s + Object.keys(_v58BPsByBase[k]).length; }, 0) + ' | ' + perfParts.join(' '));
+
+    // Construir respuesta: solo incluir claves de paises que existen (no eliminadas)
+    var response = {
+      success: true,
+      registros: registrosFiltrados,
+      total: totalGeneral,
+      metadata: metadata,
+      hcc: resultado.hcc || [],
+      _perf: _perfPhases // V74: Enviar timing al frontend para diagnóstico
+    };
+    if (resultado.cl) response.cl = resultado.cl;
+    if (resultado.latam) response.latam = resultado.latam;
+    if (resultado.rampa) response.rampa = resultado.rampa;
+    if (resultado.nam) response.nam = resultado.nam;
+    
+    // ═══ CACHE: Guardar resultado para reutilizar (5 min) ═══
+    // NO cachear resultados vacíos para evitar envenenar el cache
+    if (registrosFiltrados.length > 0) {
+      try {
+        var respJson = JSON.stringify(response);
+        if (respJson.length < 90000) {
+          cache.put(cacheKey, respJson, 600);
+          Logger.log('FORECAST: Guardado en cache "' + cacheKey + '" (' + respJson.length + ' bytes, 10min)');
+        } else {
+          Logger.log('FORECAST: Resultado muy grande para cache (' + respJson.length + ' bytes), skip');
+        }
+      } catch(cacheErr) { Logger.log('FORECAST: Error guardando cache: ' + cacheErr.message); }
+    } else {
+      Logger.log('FORECAST: Resultado vacío, NO se guarda en cache para evitar envenenamiento');
+      // Limpiar cache previo si existía (podría estar contaminado)
+      try { cache.remove(cacheKey); } catch(e) {}
+    }
+    
+    Logger.log('◀◀◀ END getForecastData("' + filtro + '") [OK] registros=' + registrosFiltrados.length + ' | ' + elapsed + 'ms');
+    return response;
+  } catch(e) {
+    Logger.log('◀◀◀ END getForecastData("' + filtro + '") [ERROR] ' + e.message);
+    return { success: false, error: 'getForecastData: ' + e.message };
+  }
+}
+
+/**
+ * Obtiene forecast filtrado para el frontend
+ */
+
+// ===================== ENVÍO DE CORREO FORECAST =====================
+/**
+ * Envía el Forecast por correo electrónico
+ * @param {string} asunto - Asunto del correo
+ * @param {string} htmlBody - Cuerpo HTML del correo
+ * @param {string} destinatarios - Lista de emails separados por coma
+ * @returns {Object} { success, message }
+ */
+function enviarCorreoForecast(asunto, htmlBody, destinatarios) {
+  try {
+    Logger.log('[V75d-SEND] Asunto recibido: "' + asunto + '" | destinatarios: "' + destinatarios + '"');
+    if (!asunto || !htmlBody) {
+      return { success: false, error: 'Asunto y contenido son requeridos.' };
+    }
+
+    // Si no hay destinatarios, usar el email del usuario actual
+    if (!destinatarios) {
+      destinatarios = Session.getActiveUser().getEmail();
+    }
+
+    // Limpiar destinatarios
+    var emails = String(destinatarios)
+      .split(',')
+      .map(function (e) { return e.trim(); })
+      .filter(function (e) { return e.length > 0; });
+
+    if (emails.length === 0) {
+      return { success: false, error: 'No hay destinatarios válidos.' };
+    }
+
+    // ═══ LOGO INLINE: Siempre crear blob desde base64 constante ═══
+    var inlineImages = {};
+    try {
+      var logoBlob = Utilities.newBlob(Utilities.base64Decode(LOGO_BASE64), 'image/png', 'logo.png');
+      inlineImages['logo_latam'] = logoBlob;
+      // Reemplazar cualquier data URI existente con cid:logo_latam
+      htmlBody = htmlBody.replace(/src="data:image\/png;base64,[^"]+"/g, 'src="cid:logo_latam"');
+      Logger.log('Logo inline preparado desde constante LOGO_BASE64');
+    } catch (logoErr) {
+      Logger.log('Error preparando logo inline: ' + (logoErr && logoErr.message ? logoErr.message : logoErr));
+    }
+
+    // ═══ V74: Inyectar URL real de la app en el correo ═══
+    // El frontend puede no tener la URL disponible (async race condition)
+    // El backend siempre puede obtenerla con ScriptApp.getService().getUrl()
+    try {
+      var realAppUrl = ScriptApp.getService().getUrl();
+      if (realAppUrl) {
+        // Reemplazar placeholder __APP_URL__ si el frontend no tenía la URL
+        htmlBody = htmlBody.replace(/__APP_URL__/g, realAppUrl);
+        // También reemplazar href="#" (fallback viejo) por la URL real
+        htmlBody = htmlBody.replace(/href="#"/g, 'href="' + realAppUrl + '"');
+        Logger.log('[V74-EMAIL] URL de la app inyectada en correo: ' + realAppUrl);
+      }
+    } catch (urlErr) {
+      Logger.log('[V74-EMAIL] No se pudo obtener URL de la app: ' + (urlErr && urlErr.message ? urlErr.message : urlErr));
+    }
+
+    // Config de envío por defecto "a nombre del grupo"
+    var GROUP_FROM = 'grp_entrenamientos_cgo-grh@latam.com';
+    var GROUP_NAME = 'Entrenamientos CGO-GRH';
+
+    // Base options
+    var optsBase = {
+      htmlBody: htmlBody,
+      inlineImages: inlineImages,
+      name: GROUP_NAME,
+      replyTo: GROUP_FROM
+    };
+
+    // Intento 1: enviar usando From=grupo (requiere "Enviar como" habilitado en la cuenta ejecutora)
+    try {
+      GmailApp.sendEmail(emails.join(','), asunto, ' ', Object.assign({}, optsBase, { from: GROUP_FROM }));
+      registrarEnvioCorreo(asunto, emails.join(','), 'OK (FROM=GRUPO)');
+      Logger.log('Correo enviado FROM grupo a: ' + emails.join(', '));
+      return {
+        success: true,
+        message: 'Correo enviado exitosamente a ' + emails.length + ' destinatario(s).',
+        usedFrom: GROUP_FROM,
+        fallback: false
+      };
+    } catch (fromErr) {
+      // Fallback: si no se puede usar From=grupo, enviamos igual con Reply-To=grupo
+      Logger.log('No se pudo enviar con FROM grupo, aplicando fallback Reply-To. Error: ' + (fromErr && fromErr.message ? fromErr.message : fromErr));
+
+      GmailApp.sendEmail(emails.join(','), asunto, ' ', optsBase);
+      registrarEnvioCorreo(asunto, emails.join(','), 'OK (FALLBACK REPLY-TO)');
+      Logger.log('Correo enviado con fallback (Reply-To grupo) a: ' + emails.join(', '));
+
+      return {
+        success: true,
+        message: 'Correo enviado (fallback Reply-To) a ' + emails.length + ' destinatario(s).',
+        usedFrom: Session.getActiveUser().getEmail(),
+        fallback: true,
+        fromError: String(fromErr)
+      };
+    }
+  } catch (e) {
+    Logger.log('Error enviando correo: ' + (e && e.message ? e.message : e));
+    registrarEnvioCorreo(asunto, destinatarios, 'ERROR: ' + (e && e.message ? e.message : e));
+    return { success: false, error: 'Error al enviar: ' + (e && e.message ? e.message : e) };
+  }
+}
+
+/**
+ * Registra el envío de correos en una hoja de log
+ */
+function registrarEnvioCorreo(asunto, destinatarios, resultado) {
+  try {
+    var ss = getSpreadsheet('MAESTRO');
+    var sh = ss.getSheetByName('Log Correos');
+    if (!sh) {
+      sh = ss.insertSheet('Log Correos');
+      sh.appendRow(['FECHA', 'USUARIO', 'ASUNTO', 'DESTINATARIOS', 'RESULTADO']);
+    }
+    sh.appendRow([
+      new Date(),
+      Session.getActiveUser().getEmail(),
+      asunto,
+      destinatarios,
+      resultado
+    ]);
+  } catch(e) {
+    Logger.log('Error registrando log: ' + e.message);
+  }
+}
+

@@ -1,0 +1,283 @@
+function parseCapacityFilter(paisRaw) {
+  var empty = { allowedBases: [], allowedCountries: [], excludedAreas: [], excludedBases: [], notes: '' };
+  if (!paisRaw) return empty;
+  var raw = paisRaw.toString().trim();
+  var rawUpper = raw.toUpperCase();
+  var result = { allowedBases: [], allowedCountries: [], excludedAreas: [], excludedBases: [], notes: raw };
+
+  // --- Caso especial: "CONTROL NORTE(USA)" ---
+  if (rawUpper.indexOf('CONTROL NORTE') >= 0) {
+    result.allowedBases = ['NAM'];
+    var cnMatch = raw.match(/\(([^)]+)\)/);
+    if (cnMatch) {
+      var c = cnMatch[1].trim().toUpperCase();
+      if (c === 'USA') c = 'US';
+      result.allowedCountries = [c];
+    }
+    return result;
+  }
+
+  // --- Caso especial: "ALL RAMPA SOLO CL" ---
+  if (rawUpper.indexOf('ALL RAMPA') >= 0) {
+    result.allowedBases = ['RAMPA'];
+    var soloMatch = raw.match(/SOLO\s+(\w+)/i);
+    if (soloMatch) {
+      result.allowedCountries = [soloMatch[1].trim().toUpperCase()];
+    }
+    return result;
+  }
+
+  // --- V78: Caso especial: PAIS es un nombre de base directo ---
+  var DIRECT_BASE_MAP = { 'RAMPA': 'RAMPA', 'LATAM': 'LATAM', 'PHH': 'LATAM', 'CHILE': 'CHILE', 'CL': 'CHILE', 'NAM': 'NAM', 'TRAINING CL': 'CHILE', 'TRAINING': 'CHILE' };
+  if (DIRECT_BASE_MAP[rawUpper] && rawUpper.indexOf('-') < 0 && rawUpper.indexOf('(') < 0) {
+    result.allowedBases = [DIRECT_BASE_MAP[rawUpper]];
+    // Sin filtro de país — ve todo lo de esa base
+    result.allowedCountries = [];
+    return result;
+  }
+
+  // --- Caso general: "CO (Sin HCC, CCOP, RAMPA)" o "PE" o "AR-UY-PY" ---
+  var cleanPais = raw;
+
+  // Extraer exclusiones "(Sin HCC, CCOP, RAMPA)"
+  var exclMatch = cleanPais.match(/\(\s*[Ss]in\s+([^)]+)\)/);
+  if (exclMatch) {
+    var KNOWN_BASES = { 'RAMPA': true, 'NAM': true, 'CL': true, 'CHILE': true, 'LATAM': true, 'PHH': true };
+    var items = exclMatch[1].split(',').map(function(s) { return s.trim().toUpperCase(); }).filter(function(s) { return s.length > 0; });
+    items.forEach(function(item) {
+      if (KNOWN_BASES[item]) {
+        var baseNorm = (item === 'PHH') ? 'LATAM' : (item === 'CL') ? 'CHILE' : item;
+        result.excludedBases.push(baseNorm);
+      } else {
+        result.excludedAreas.push(item);
+      }
+    });
+    cleanPais = cleanPais.replace(/\s*\([^)]*\)/, '').trim();
+  }
+
+  // Parsear códigos de país (separados por "-")
+  var countries = cleanPais.split('-').map(function(p) { return p.trim().toUpperCase(); }).filter(function(p) { return p.length > 0; });
+  result.allowedCountries = countries;
+
+  // Bases por defecto: múltiples países → LATAM+RAMPA; uno solo → solo LATAM
+  if (countries.length > 1) {
+    result.allowedBases = ['LATAM', 'RAMPA'];
+  } else {
+    result.allowedBases = ['LATAM'];
+  }
+
+  // Aplicar exclusiones de base
+  result.excludedBases.forEach(function(eb) {
+    var idx = result.allowedBases.indexOf(eb);
+    if (idx >= 0) result.allowedBases.splice(idx, 1);
+  });
+
+  // Fallback: si todas las bases fueron excluidas, dejar LATAM
+  if (result.allowedBases.length === 0) {
+    result.allowedBases = ['LATAM'];
+  }
+
+  return result;
+}
+
+/**
+ * Normaliza sigla de curso con fuzzy matching via ALIAS_CURSOS.
+ */
+// ===================== DICCIONARIO UNIVERSAL DE CURSOS (FUZZY MATCHING) =====================
+// Cubre todas las variaciones detectadas en logs vs Looker Studio
+var ALIAS_CURSOS = {
+  // === NAM ===
+  "TSA GA": "TSAGA", "TSA DOC": "TSADOC", "TSADOC": "TSADOC", "TSA GENERAL AWARENESS": "TSAGA",
+  "TSA DOCUMENTAL": "TSADOC", "TSA DO": "TSADOC", "TSAGA": "TSAGA",
+  "DG 6": "DG6", "DG 7": "DG7", "DG 8": "DG8", "DG6": "DG6", "DG7": "DG7", "DG8": "DG8",
+  "FORKLIFT": "FORKLIFT", "FORKLIFT DRIVER": "FORKLIFT",
+  "LIVESTOCK": "LIVESTOCK", "LIVESTOK": "LIVESTOCK", "LIVE STOCK": "LIVESTOCK",
+  "LIVE": "LIVESTOCK",
+  "PETS": "PETS", "PHARMA": "PHARMA",
+  "HSE": "HSE", "SEGURIDAD LABORAL": "HSE",
+  "AVSEC": "AVSEC", "AVSEC INITIAL": "AVSEC",
+  "AVSE": "AVSEC",
+  "INTERFERENCIA ILICITA": "AVSEC", "INTERFERENCIA ILICITA CARGA": "AVSEC",
+  // === CHILE & LATAM ===
+  "CRM": "CRM", "CRM C": "CRM", "CRM CARGO": "CRM", "RM": "CRM",
+  "MO": "MOC", "MOC": "MOC", "MOC AVANZADO": "MOC", "MOC BASICO": "MOC", "MOC BAS": "MOC", "MOC BASIC": "MOC", "MOC ADV": "MOC",
+  "GRUA HORQUILLA": "GRUA", "OJT GRUA HORQUILLA": "GRUA", "GRA HORQUILLA": "GRUA", "GRUA": "GRUA",
+  "MMPP C": "MMPP", "MMPP D": "MMPP", "MMPP": "MMPP", "MERCANCIAS PELIGROSAS": "MMPP",
+  "CSA 9": "CSA", "CSA": "CSA", "SCCA 8": "SCCA", "SCCA 9": "SCCA", "SCCA": "SCCA",
+  "LITIO": "BATERIAS", "BATERIAS LITIO": "BATERIAS", "BAT LITIO": "BATERIAS", "BATERAS": "BATERIAS", "BATERIAS": "BATERIAS",
+  "HABILITACION MP": "BATERIAS", "HABILITACION MMPP": "BATERIAS",
+  "HABILITAION MP": "BATERIAS", "HABILITAION": "BATERIAS",
+  "DG6 / MMPP ACEPTACION": "MMPP", "DG6 MMPP ACEPTACION": "MMPP",
+  "DG8 / MMPP BODEGA AVANZADA": "MMPP", "DG8 MMPP BODEGA AVANZADA": "MMPP",
+  "PSICOACTIVAS": "PSICO", "SUSTANCIAS PSICOACTIVAS": "PSICO", "PSICO": "PSICO", "PSICOACTIVOS": "PSICO", "SUST PSICOACTIVAS": "PSICO",
+  "PSIOACTIVAS": "PSICO", "PSIOACTIVOS": "PSICO",
+  "SIN": "SIN", "SINISTER": "SIN", "SINIESTRO": "SIN",
+  "PRE": "PRE", "PLAN DE RESPUESTA": "PRE", "PLAN RESPUESTA EMERGENCIAS": "PRE", "PLAN DE RESPUESTA EN EMERGENCIAS": "PRE",
+  "SGSO": "SGSO",
+  // === CHILE: Rayos X / Proteccion Radiologica ===
+  "OP RX": "RX", "OPRX": "RX", "OP. RX": "RX", "OPERACION DE RAYOS X": "RX",
+  "RAYOS X": "RX", "RX": "RX", "OPERACION RX": "RX",
+  "P RADIOLOGICA": "RADIO", "P. RADIOLOGICA": "RADIO", "PROTECCION RADIOLOGICA": "RADIO", "RADIO": "RADIO",
+  // === RAMPA ===
+  "W&B": "WB", "W & B": "WB", "WEIGHT AND BALANCE": "WB", "WB": "WB",
+  "MONTCARGA": "MONTCARGA", "MONTACARGA": "MONTCARGA",
+  "MOT": "MOT", "MOTORISTA": "MOT",
+  "LABORAL": "HSE",
+  "AMADEUS": "AMADEUS"
+};
+
+/**
+ * _limpiarSiglaRaw: Limpieza agresiva de una sigla/texto ANTES de buscar en alias.
+ * Remueve puntos, comas, guiones, tildes, colapsa espacios.
+ */
+function _limpiarSiglaRaw(s) {
+  if (!s) return '';
+  var r = s.toString().trim().toUpperCase();
+  // Remover tildes/acentos
+  r = r.replace(/[ÁÀÂÃ]/g,'A').replace(/[ÉÈÊË]/g,'E').replace(/[ÍÌÎÏ]/g,'I')
+       .replace(/[ÓÒÔÕ]/g,'O').replace(/[ÚÙÛÜ]/g,'U').replace(/Ñ/g,'N');
+  // Remover puntos, comas, guiones (excepto & que tiene significado en W&B)
+  r = r.replace(/[.,\-_\/\\;:()#!¡¿?"'`~]+/g, ' ');
+  // Colapsar espacios multiples
+  r = r.replace(/\s+/g, ' ').trim();
+  return r;
+}
+
+function normalizarSigla(s) {
+  if (!s) return '';
+  // Paso 0: Limpieza agresiva (puntos, comas, tildes, espacios)
+  var limpio = _limpiarSiglaRaw(s);
+  if (!limpio) return '';
+  // Paso 1: Busqueda exacta en alias (con texto limpio)
+  if (ALIAS_CURSOS[limpio]) return ALIAS_CURSOS[limpio];
+  // Paso 1b: Intentar tambien con normKey (legacy compatibility)
+  var nk = normKey(s);
+  if (nk !== limpio && ALIAS_CURSOS[nk]) return ALIAS_CURSOS[nk];
+  // Paso 2: Busqueda parcial: alias key contenido en nombre (mayor a menor)
+  var aliasKeys = Object.keys(ALIAS_CURSOS).sort(function(a,b) { return b.length - a.length; });
+  for (var i = 0; i < aliasKeys.length; i++) {
+    var key = aliasKeys[i];
+    if (limpio.indexOf(key) >= 0) return ALIAS_CURSOS[key];
+  }
+  // Paso 3: Limpiar sufijos de nivel (C, D, etc.) y devolver
+  var final = limpio.replace(/[^A-Z0-9 &]/g, '').trim();
+  final = final.replace(/\s+[A-Z]$/, '').trim();
+  return final || limpio;
+}
+
+/**
+ * parseDias: Parsing robusto de la columna DAYS.
+ * Maneja: numeros, strings con espacios/sufijos ("90d", "90 dias"), guiones, vacios.
+ * Retorna numero o null.
+ */
+function parseDias(rawValue) {
+  if (rawValue === null || rawValue === undefined) return null;
+  if (typeof rawValue === 'number') {
+    if (isNaN(rawValue) || Math.abs(rawValue) > 3650) return null;
+    return Math.floor(rawValue);
+  }
+  var s = String(rawValue).trim();
+  if (!s || s === '-' || s === 'N/A' || s === 'n/a' || s === '#N/A') return null;
+  // Extraer primer grupo de digitos (opcionalmente con signo negativo)
+  var match = s.match(/^(-?\d+)/);
+  if (match) {
+    var d = parseInt(match[1], 10);
+    if (!isNaN(d) && Math.abs(d) <= 3650) return d;
+  }
+  return null;
+}
+
+function normalizarStatus(status, dias, ventana) {
+  if (ventana === undefined || ventana === null) ventana = 120;
+  var s = normKey(status).replace(/_/g, ' ').replace(/\s+/g, ' ').trim();
+  var d = (typeof dias === 'number') ? dias : null;
+  if (d === null && dias !== null && dias !== undefined && dias !== '') {
+    var parsed = parseInt(dias, 10);
+    if (!isNaN(parsed)) d = parsed;
+  }
+  var tieneD = (d !== null);
+
+  // === COMPLETADO: Estado independiente (V22b: NO se convierte a HABILITADO) ===
+  if (s === 'COMPLETADO' || s === 'DONE' || s === 'COMPLETE' || s === 'REALIZADO') {
+    if (tieneD) {
+      if (d < 0) return 'VENCIDO';
+      if (d <= ventana) return 'POR VENCER';
+    }
+    return 'COMPLETADO';
+  }
+  // === APROBADO/OK: Tratar como HABILITADO (vigente) ===
+  if (s === 'OK' || s === 'APROBADO') {
+    if (tieneD) {
+      if (d < 0) return 'VENCIDO';
+      if (d <= ventana) return 'POR VENCER';
+    }
+    return 'HABILITADO';
+  }
+  // Vencidos
+  if (s === 'VENCIDO' || s === 'EXPIRED' || s === 'V' || s === 'CADUCADO' || s === 'NO COMPLIANT' || s === 'OVERDUE') return 'VENCIDO';
+  // Por vencer (status explicito del backend)
+  // V21: Si dice POR VENCER pero la fecha ya paso (dias < 0), es VENCIDO real
+  if (s === 'POR VENCER' || s === 'ABOUT TO EXPIRE' || s === 'PV' || 
+      s === 'PROXIMO A VENCER' || s === 'PENDIENTE' || s === 'PORVENCER' || s === 'WARNING') {
+    if (tieneD && d < 0) return 'VENCIDO';
+    return 'POR VENCER';
+  }
+  // Programar: STATUS separado, NO es POR VENCER
+  if (s === 'PROGRAMAR' || s === 'TO SCHEDULE' || s === 'PENDIENTE PROGRAMAR') return 'PROGRAMAR';
+  // Habilitados / Al dia - PERO verificar dias para reclasificar
+  if (s === 'HABILITADO' || s === 'H' || s === 'VIGENTE' || 
+      s === 'COMPLIANT' || s === 'ACTIVO' || s === 'AL DIA' || s === 'SI') {
+    if (tieneD) {
+      if (d < 0) return 'VENCIDO';
+      if (d <= ventana) return 'POR VENCER';
+    }
+    return 'HABILITADO';
+  }
+  // Sin dato / No aplicable (excluir de KPIs)
+  if (s === '-' || s === 'SD' || s === 'SIN DATO' || s === '0') return 'SIN DATO';
+  // NO APLICA: curso que explícitamente no aplica a la persona (diferente de SIN DATO)
+  if (s === 'N/A' || s === 'NO APLICA' || s === 'DOES NOT APPLY' || s === 'DOESNT APPLY' || s === 'NA' || s === 'NOT APPLICABLE' || s === 'NO CORRESPONDE' || s === 'EXEMPT') return 'NO_APLICA';
+  
+  // FALLBACK: Si no hay status reconocido pero hay dias, INFERIR status
+  if (!s || s === '') {
+    if (tieneD) {
+      if (d < 0) return 'VENCIDO';
+      if (d <= ventana) return 'POR VENCER';
+      if (d > ventana) return 'HABILITADO';
+    }
+  }
+  
+  return 'SIN DATO';
+}
+function calcularSemaforo(vencidos, porVencer) {
+  if (vencidos > 0) return 'ROJO';
+  if (porVencer > 0) return 'AMARILLO';
+  return 'VERDE';
+}
+
+/**
+ * Normaliza un nombre para comparaciones: MAYUSCULAS + trim + sin acentos.
+ * Esencial para comparar nombres de Jefes de Area.
+ */
+function normNombre(n) {
+  return normKey(n);
+}
+
+/**
+ * Normaliza nombre de jefe para comparación flexible.
+ * Maneja ambos formatos:
+ *   "VILA SERGIO Y"  (APELLIDO NOMBRE INICIAL) → "SERGIO VILA"
+ *   "Sergio Vila"    (Nombre Apellido)          → "SERGIO VILA"
+ * 
+ * MEJORA: Usa TODAS las palabras significativas (>1 char) en orden alfabético
+ * para crear una clave canónica más robusta.
+ * Antes solo usaba 2 palabras, lo que fallaba con nombres compuestos.
+ */
+function normalizarNombreJefe(nombre) {
+  if (!nombre) return '';
+  var partes = normKey(nombre).split(/\s+/).filter(function(p) { return p.length > 1; });
+  if (partes.length === 0) return '';
+  if (partes.length === 1) return partes[0];
+  // Usar TODAS las palabras significativas, ordenadas, para clave canónica
+  return partes.sort().join(' ');
+}

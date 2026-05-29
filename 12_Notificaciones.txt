@@ -1,0 +1,265 @@
+// ===================== V78: NOTIFICACIONES IN-APP =====================
+// V80: CURSOS CRITICOS — Configuración de alertas por curso/categoría
+// Match por ID (sigla) Y por nombre completo del curso
+var CURSOS_CRITICOS = [
+  { key: 'FORKLIFT', label: 'Montacarga / Forklift', patterns: ['FORKLIFT', 'MONTACARGA', 'MONTACARGAS', 'MONTCARGA', 'GRUA', 'GRUA HORQUILLA', 'OPERADOR DE MONTACARGA', 'OPERADORES DE MONTACARGA', 'LICENCIA MONTACARGA', 'EQUIPOS MOVILES'] },
+  { key: 'MMPP', label: 'Mercancias Peligrosas / DG', patterns: ['MERCANCIAS PELIGROSAS', 'MERCANCIA PELIGROSA', 'DANGEROUS GOODS', 'MMPP'] }
+];
+// Match por regex para DG + digito (DG6, DG7, DG8, etc.)
+var CURSOS_CRITICOS_REGEX = [
+  { key: 'MMPP', label: 'Mercancias Peligrosas / DG', regex: /\bDG\d?/ }
+];
+
+function getNotificacionesJefe(email) {
+  var t0 = new Date().getTime();
+  try {
+    var usr = getUsuarioActual();
+    if (!usr) return { success: false, alertas: [] };
+    var rolU = (usr.rol || '').toUpperCase();
+
+    var bases = usr.basesDisponibles || [usr.base || 'CHILE'];
+    var userBP = (usr.bp || '').trim();
+    var userEmail = (email || usr.email || '').toLowerCase();
+    Logger.log('[V80-NOTIF] Inicio: email=' + userEmail + ' bp=' + userBP + ' rol=' + rolU + ' bases=' + bases.join(','));
+
+    var misVencidos = 0;
+    var misPorVencer = 0;
+    var misSinPlan = 0;
+    var misDetalleVenc = [];
+    var misDetallePorV = [];
+    var equipoVencidos = 0;
+    var equipoPorVencer = 0;
+    var equipoSinPlan = 0;
+    var eqDetalleVenc = [];
+    var eqDetallePorV = [];
+    
+    // V80: Cursos críticos tracking
+    var criticalOwn = {};  // { key: { count: N, personas: [], cursos: [] } }
+    var criticalTeam = {}; // idem
+
+    // Funcion auxiliar para detectar cursos críticos de un empleado
+    function detectarCriticos(emp, destino) {
+      var empNom = emp.nombre || emp.bp || '?';
+      var cursos = emp.cursos || [];
+      for (var ci = 0; ci < cursos.length; ci++) {
+        var c = cursos[ci];
+        var st = (c.status || '').toUpperCase();
+        if (st !== 'VENCIDO' && st !== 'POR VENCER') continue;
+        var sigla = (c.sigla || '').toUpperCase();
+        var nombreCurso = (c.nombre || c.sigla || '').toUpperCase();
+        // Normalizar: quitar tildes para matching
+        function quitarTildes(s) { return s.replace(/[\u00C1]/g,'A').replace(/[\u00C9]/g,'E').replace(/[\u00CD]/g,'I').replace(/[\u00D3]/g,'O').replace(/[\u00DA]/g,'U'); }
+        var siglaNorm = quitarTildes(sigla);
+        var nombreNorm = quitarTildes(nombreCurso);
+        // Check substring patterns contra sigla Y nombre
+        for (var ri = 0; ri < CURSOS_CRITICOS.length; ri++) {
+          var rule = CURSOS_CRITICOS[ri];
+          var matched = false;
+          for (var pi = 0; pi < rule.patterns.length; pi++) {
+            var pat = rule.patterns[pi];
+            if (siglaNorm === pat || siglaNorm.indexOf(pat) >= 0 || nombreNorm.indexOf(pat) >= 0) { matched = true; break; }
+          }
+          if (matched) {
+            if (!destino[rule.key]) destino[rule.key] = { label: rule.label, count: 0, personas: {}, cursos: {} };
+            destino[rule.key].count++;
+            destino[rule.key].personas[empNom] = true;
+            destino[rule.key].cursos[sigla + ' (' + st + ')'] = true;
+          }
+        }
+        // Check regex contra sigla Y nombre (DG6, DG7, DG8...)
+        for (var rri = 0; rri < CURSOS_CRITICOS_REGEX.length; rri++) {
+          var rRule = CURSOS_CRITICOS_REGEX[rri];
+          if (rRule.regex.test(siglaNorm) || rRule.regex.test(nombreNorm)) {
+            if (!destino[rRule.key]) destino[rRule.key] = { label: rRule.label, count: 0, personas: {}, cursos: {} };
+            destino[rRule.key].count++;
+            destino[rRule.key].personas[empNom] = true;
+            destino[rRule.key].cursos[sigla + ' (' + st + ')'] = true;
+          }
+        }
+      }
+    }
+
+    // V80: Funcion auxiliar para analizar cursos de un empleado
+    // Usa emp.cursos[] (array de {sigla, status, vencimiento, dias}) generado por leerHojaBase
+    function analizarCursos(emp) {
+      var result = { venc: 0, porV: 0, sinP: 0, detVenc: [], detPorV: [] };
+      var empNom = emp.nombre || emp.bp || '?';
+      var cursos = emp.cursos || [];
+      for (var ci = 0; ci < cursos.length; ci++) {
+        var c = cursos[ci];
+        var st = (c.status || '').toUpperCase();
+        var sigla = c.sigla || '?';
+        // Ignorar cursos sin dato o no aplicables
+        if (st === 'SIN DATO' || st === 'NO_APLICA' || st === 'COMPLETADO') continue;
+        if (st === 'VENCIDO') {
+          result.venc++;
+          if (result.detVenc.length < 5) result.detVenc.push(empNom + ' - ' + sigla);
+        } else if (st === 'POR VENCER') {
+          result.porV++;
+          if (result.detPorV.length < 5) result.detPorV.push(empNom + ' - ' + sigla);
+        } else if (st === 'PROGRAMAR' || st === 'SIN_PLAN' || st === 'SIN PLAN') {
+          result.sinP++;
+        }
+      }
+      return result;
+    }
+
+    for (var bi = 0; bi < bases.length; bi++) {
+      var bk = bases[bi];
+      try {
+        var emps = leerHoja(bk, 'base');
+        if (!emps || emps.length === 0) continue;
+
+        // 1) Buscar MIS cursos propios
+        var foundMe = false;
+        for (var mi = 0; mi < emps.length; mi++) {
+          var empBP = (emps[mi].bp || '').trim();
+          var empEmail = (emps[mi].correo || emps[mi].email || '').toLowerCase();
+          if (empBP === userBP || empEmail === userEmail) {
+            foundMe = true;
+            var miRes = analizarCursos(emps[mi]);
+            Logger.log('[V80-NOTIF] MIS cursos en ' + bk + ': BP=' + empBP + ' venc=' + miRes.venc + ' porV=' + miRes.porV + ' sinP=' + miRes.sinP + ' totalCursos=' + (emps[mi].cursos || []).length);
+            misVencidos += miRes.venc;
+            misPorVencer += miRes.porV;
+            misSinPlan += miRes.sinP;
+            misDetalleVenc = misDetalleVenc.concat(miRes.detVenc);
+            misDetallePorV = misDetallePorV.concat(miRes.detPorV);
+            // V80: Detectar cursos críticos propios
+            detectarCriticos(emps[mi], criticalOwn);
+            break; // Solo 1 registro propio por base
+          }
+        }
+        if (!foundMe) {
+          Logger.log('[V80-NOTIF] NO encontrado en base ' + bk + ': buscando bp=' + userBP + ' o email=' + userEmail + ' entre ' + emps.length + ' empleados');
+        }
+
+        // 2) Si es JEFE/EJECUTIVO/ADMIN: analizar equipo
+        if (rolU === 'JEFE' || rolU === 'EJECUTIVO' || rolU === 'ADMIN' || rolU.indexOf('JEFE') >= 0) {
+          var equipo = [];
+          if (rolU === 'ADMIN') {
+            equipo = emps;
+          } else {
+            var eqResult = getEquipoRealBPs(userEmail, bk, { noClimb: true });
+            if (eqResult && eqResult.success && eqResult.equipoPersonas && eqResult.equipoPersonas.length > 0) {
+              var eqBPs = {};
+              for (var ei = 0; ei < eqResult.equipoPersonas.length; ei++) eqBPs[(eqResult.equipoPersonas[ei].bp || '').trim()] = true;
+              equipo = emps.filter(function(e) { return eqBPs[(e.bp || '').trim()] && (e.bp || '').trim() !== userBP; });
+            }
+          }
+          for (var pi = 0; pi < equipo.length; pi++) {
+            var eqRes = analizarCursos(equipo[pi]);
+            equipoVencidos += eqRes.venc;
+            equipoPorVencer += eqRes.porV;
+            equipoSinPlan += eqRes.sinP;
+            eqDetalleVenc = eqDetalleVenc.concat(eqRes.detVenc);
+            eqDetallePorV = eqDetallePorV.concat(eqRes.detPorV);
+            // V80: Detectar cursos críticos del equipo
+            detectarCriticos(equipo[pi], criticalTeam);
+          }
+          if (equipo.length > 0) {
+            Logger.log('[V80-NOTIF] Equipo en ' + bk + ': ' + equipo.length + ' personas | venc=' + equipoVencidos + ' porV=' + equipoPorVencer);
+          }
+        }
+      } catch(baseErr) {
+        Logger.log('[V78-NOTIF] Error base ' + bk + ': ' + baseErr.message);
+      }
+    }
+
+    var alertas = [];
+    // Alertas personales primero
+    if (misVencidos > 0) {
+      alertas.push({
+        tipo: 'critico',
+        icono: 'warning-circle',
+        titulo: 'Tienes ' + misVencidos + ' curso' + (misVencidos > 1 ? 's' : '') + ' vencido' + (misVencidos > 1 ? 's' : ''),
+        detalle: misDetalleVenc.slice(0, 3).join(', '),
+        count: misVencidos,
+        personal: true
+      });
+    }
+    if (misPorVencer > 0) {
+      alertas.push({
+        tipo: 'alerta',
+        icono: 'clock',
+        titulo: misPorVencer + ' de tus cursos vence' + (misPorVencer > 1 ? 'n' : '') + ' en 30 dias',
+        detalle: misDetallePorV.slice(0, 3).join(', '),
+        count: misPorVencer,
+        personal: true
+      });
+    }
+    // Alertas de equipo
+    if (equipoVencidos > 0) {
+      alertas.push({
+        tipo: 'critico',
+        icono: 'users',
+        titulo: equipoVencidos + ' curso' + (equipoVencidos > 1 ? 's' : '') + ' vencido' + (equipoVencidos > 1 ? 's' : '') + ' en tu equipo',
+        detalle: eqDetalleVenc.slice(0, 5).join(', ') + (equipoVencidos > 5 ? ' y ' + (equipoVencidos - 5) + ' mas...' : ''),
+        count: equipoVencidos,
+        personal: false
+      });
+    }
+    if (equipoPorVencer > 0) {
+      alertas.push({
+        tipo: 'alerta',
+        icono: 'users',
+        titulo: equipoPorVencer + ' curso' + (equipoPorVencer > 1 ? 's' : '') + ' de tu equipo vence' + (equipoPorVencer > 1 ? 'n' : '') + ' en 30 dias',
+        detalle: eqDetallePorV.slice(0, 5).join(', ') + (equipoPorVencer > 5 ? ' y ' + (equipoPorVencer - 5) + ' mas...' : ''),
+        count: equipoPorVencer,
+        personal: false
+      });
+    }
+    // V80: "sin plan" eliminado de notificaciones (confuso para usuarios)
+
+    // V80: Alertas de cursos CRITICOS
+    function addCriticalAlerts(criticos, personal) {
+      var keys = Object.keys(criticos);
+      for (var ki = 0; ki < keys.length; ki++) {
+        var k = keys[ki];
+        var data = criticos[k];
+        var numPersonas = Object.keys(data.personas).length;
+        var cursosLista = Object.keys(data.cursos).slice(0, 3).join(', ');
+        var personasLista = Object.keys(data.personas).slice(0, 3).join(', ');
+        alertas.push({
+          tipo: 'critico_curso',
+          icono: 'warning-diamond',
+          titulo: (personal ? '' : '') + data.label + ': ' + (personal ? data.count + ' pendiente' + (data.count > 1 ? 's' : '') : numPersonas + ' persona' + (numPersonas > 1 ? 's' : '')),
+          detalle: personal ? cursosLista : personasLista + (numPersonas > 3 ? ' y ' + (numPersonas - 3) + ' mas...' : ''),
+          count: personal ? data.count : numPersonas,
+          personal: personal,
+          criticalKey: k
+        });
+      }
+    }
+    addCriticalAlerts(criticalOwn, true);
+    addCriticalAlerts(criticalTeam, false);
+
+    // V102: Alertas de pendientes de planificacion (participantes esperando decision del jefe)
+    try {
+      var _pendPlan = _contarPendientesJefe(userEmail, usr.nombre);
+      if (_pendPlan > 0) {
+        alertas.push({
+          tipo: 'alerta',
+          icono: 'clipboard-text',
+          titulo: _pendPlan + ' participante' + (_pendPlan > 1 ? 's' : '') + ' pendiente' + (_pendPlan > 1 ? 's' : '') + ' de aprobacion',
+          detalle: 'Ingresa a Mi Equipo > Pendientes para aprobar o rechazar',
+          count: _pendPlan,
+          personal: false,
+          accion: 'pendientes_plan'
+        });
+      }
+    } catch(_pendErr) {
+      Logger.log('[V102-NOTIF] Error contando pendientes plan: ' + _pendErr.message);
+    }
+
+    var totalAlertas = misVencidos + misPorVencer + equipoVencidos + equipoPorVencer;
+    // V102: Include planning pendientes in total badge count
+    try { if (_pendPlan > 0) totalAlertas += _pendPlan; } catch(_) {}
+    Logger.log('[V78-NOTIF] ' + (email || '?') + ' | misVenc=' + misVencidos + ' misPorV=' + misPorVencer + ' eqVenc=' + equipoVencidos + ' eqPorV=' + equipoPorVencer + ' | ' + (new Date().getTime() - t0) + 'ms');
+    return { success: true, alertas: alertas, totalAlertas: totalAlertas };
+  } catch(e) {
+    Logger.log('[V78-NOTIF] ERROR: ' + e.message);
+    return { success: false, alertas: [], error: e.message };
+  }
+}
+
+

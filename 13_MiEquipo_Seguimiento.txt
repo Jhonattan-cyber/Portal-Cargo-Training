@@ -1,0 +1,357 @@
+/**
+ * Obtiene el equipo de subordinados de un jefe.
+ * V47: Acepta parámetro fuente (PHH, RAMPA, CONSOLIDADO).
+ * @param {string} email - Email del usuario
+ * @param {string} fuente - Fuente de datos: PHH, RAMPA, CONSOLIDADO (default)
+ * @returns {Object} { success, equipo, total }
+ */
+
+function getMiEquipo(email, fuente) {
+  email = (email || '').toString().trim().toLowerCase();
+  fuente = (fuente || 'CONSOLIDADO').toString().toUpperCase().trim();
+  if (fuente !== 'PHH' && fuente !== 'RAMPA' && fuente !== 'PLAN_SINGLE') fuente = 'CONSOLIDADO';
+  
+  // ═══ CACHE V47: incluir fuente en cacheKey ═══
+  var cacheKey = 'MIEQUIPO_' + fuente + '_' + email.replace(/[^a-z0-9]/g, '_');
+  try {
+    var cached = CacheService.getScriptCache().get(cacheKey);
+    if (cached) {
+      Logger.log('getMiEquipo: CACHE HIT para ' + email);
+      return JSON.parse(cached);
+    }
+  } catch(ce) { /* cache miss */ }
+  Logger.log('getMiEquipo: CACHE MISS, calculando para ' + email + ' fuente=' + fuente);
+  
+  // V47: Usar getEquipoRealBPs con fuente
+  // V65: noClimb=true para Mi Equipo — NO subir en jerarquía, mantener rootBP = BP del usuario
+  var equipoReal = getEquipoRealBPs(email, fuente, { noClimb: true });
+  if (!equipoReal.success) {
+    Logger.log('getMiEquipo: DIAGNOSTICO | user=' + email + ' | razon=' + (equipoReal.error || 'Usuario no encontrado'));
+    return { success: true, equipo: [], total: 0, mensaje: equipoReal.error || 'Usuario no encontrado' };
+  }
+  
+  var equipo = equipoReal.equipoPersonas;
+  var allEmpleados = equipoReal.allEmpleados;
+
+  // ═══ DEDUPLICAR y FILTRAR cursos por cada empleado ═══
+  // ═══ SEMÁFORO POR CURSOS (no por Estatus Funcionario) ═══
+  // V60: Mi Equipo NO filtra por año — muestra todo el historial vigente del colaborador.
+  // El filtro de año solo aplica al Forecast agregado.
+  equipo.forEach(function(e) {
+    var statusRealizMap = {};
+    try { statusRealizMap = leerStatusRealizacionPlan(e.baseRegion); } catch(srErr) {}
+    
+    e.cursos = deduplicarCursos(e.cursos || [], e.bp, statusRealizMap);
+    
+    // Filtrar: excluir SIN DATO, COMPLETADO, NO_APLICA
+    var cursosVisibles = [];
+    var hab = 0, pv = 0, venc = 0, prog = 0;
+    (e.cursos || []).forEach(function(c) {
+      if (c.status === 'SIN DATO' || c.status === 'NO_APLICA') return;
+      // V23c: COMPLETADO se muestra como HABILITADO en UI
+      if (c.status === 'COMPLETADO') c.status = 'HABILITADO';
+      // V42: NO reclasificar PROGRAMAR → mantener separado para % correcto
+      if (c.dias === undefined || c.dias === null) c.dias = '';
+      if (!c.vencimiento) c.vencimiento = '-';
+      cursosVisibles.push(c);
+
+      // V60: Contar TODOS los cursos sin filtro de año
+      // V60: Reclasificar POR VENCER → PROGRAMAR cuando no tiene fecha válida
+      // Esto corrige el swap: "PENDIENTE" sin fecha se cuenta como PROGRAMAR, no POR VENCER
+      if (c.status === 'HABILITADO') hab++;
+      else if (c.status === 'POR VENCER') {
+        // V72: En Mi Equipo, POR VENCER se reclasifica como HABILITADO (Al día)
+        c.status = 'HABILITADO';
+        hab++;
+      }
+      else if (c.status === 'VENCIDO') venc++;
+      else if (c.status === 'PROGRAMAR') prog++;
+    });
+    e.cursos = cursosVisibles;
+    e.totalCursos = cursosVisibles.length;
+    // V60: KPIs per-person = ALL courses (sin filtro de año)
+    e.habilitados = hab;
+    e.porVencer = pv;
+    e.vencidos = venc;
+    e.programar = prog;
+    // V42: cursosAplicables = cursos que impactan el % (excluye PROGRAMAR)
+    e.cursosAplicables = hab + pv + venc;
+    e.vencidosAplicables = venc;
+    
+    // V80: Separar vencidos históricos (año vencimiento < año actual) para alinear con Notificaciones
+    var _anoActual = new Date().getFullYear();
+    var vencHist = 0;
+    var vencHistCursos = [];
+    cursosVisibles.forEach(function(c) {
+      if (c.status !== 'VENCIDO') return;
+      var vStr = (c.vencimiento || '').toString().trim();
+      if (!vStr || vStr === '-') return;
+      var parts = vStr.split('/');
+      if (parts.length === 3) {
+        var yy = parseInt(parts[2], 10) || 0;
+        if (yy > 0 && yy < 100) yy += 2000;
+        if (yy > 0 && yy < _anoActual) {
+          vencHist++;
+          vencHistCursos.push(c.sigla + ' (venc ' + vStr + ')');
+        }
+      }
+    });
+    e.vencidosHistoricos = vencHist;
+    e.vencidosAnioActual = venc - vencHist;
+    e.vencHistDetalle = vencHistCursos.join(', ');
+    
+    // ═══ NUEVO SEMÁFORO POR CURSOS V72 ═══
+    //   CRITICO   → vencidos > 0
+    //   PENDIENTE → programar > 0, vencidos == 0 (POR VENCER eliminado en V72)
+    //   OK        → solo HABILITADO (todo vigente / Al día)
+    //   SIN_CURSOS → no hay cursos aplicables
+    if (cursosVisibles.length === 0) {
+      e.estadoCursos = 'SIN_CURSOS';
+    } else if (venc > 0) {
+      e.estadoCursos = 'CRITICO';
+    } else if (prog > 0) {
+      e.estadoCursos = 'PENDIENTE';
+    } else {
+      e.estadoCursos = 'OK';
+    }
+    
+    // V60: DEBUG — Si tiene cursos visibles con status VENCIDO pero venc==0, hay un bug
+    if (e.estadoCursos === 'OK') {
+      var _anyVencRaw = cursosVisibles.filter(function(cc) { return cc.status === 'VENCIDO'; });
+      if (_anyVencRaw.length > 0) {
+        _log('[V0-BUG!] BP=' + e.bp + ' "' + (e.nombre || '').substring(0, 30) + '" estado=OK pero tiene ' + _anyVencRaw.length + ' cursos VENCIDO en cursosVisibles! venc=' + venc + ' | cursos: ' + _anyVencRaw.map(function(cc) { return cc.sigla + '(' + cc.status + '|' + (cc.vencimiento || '-') + '|dias=' + cc.dias + ')'; }).join(', '));
+      }
+    }
+    
+    // Mantener Estatus Funcionario como dato secundario (tooltip/modal)
+    e.estatusFuncionario = e.habilitacionGeneral || 'N/A';
+    
+    // V72: cumplimiento BASADO EN CURSOS = hab / (hab + venc) * 100
+    // POR VENCER ya está incluido en hab (reclasificado en V72)
+    var cursosAplic = (hab + venc);
+    e.cumplimiento = cursosAplic > 0 ? Math.round((hab / cursosAplic) * 100) : 100;
+  });
+  
+  // KPIs del equipo - NUEVO: por estado de cursos
+  // V37: Separar nuevos ingresos de activos para KPIs
+  var pOK = 0, pCritico = 0, pPendiente = 0, pSinCursos = 0;
+  var habilitados = 0, porVencer = 0, vencidos = 0;
+  var habilitados_kpi = 0, porVencer_kpi = 0, vencidos_kpi = 0; // V43: cursos excl NI
+  var totalNuevosIngresos = 0;
+  var pOK_kpi = 0, pCritico_kpi = 0, pPendiente_kpi = 0, pSinCursos_kpi = 0;
+  
+  equipo.forEach(function(e) {
+    habilitados += e.habilitados || 0;
+    porVencer += e.porVencer || 0;
+    vencidos += e.vencidos || 0;
+    
+    if (e.esNuevoIngreso) {
+      totalNuevosIngresos++;
+    } else {
+      // Solo contar activos (no nuevos ingresos) para KPIs
+      habilitados_kpi += e.habilitados || 0;
+      porVencer_kpi += e.porVencer || 0;
+      vencidos_kpi += e.vencidos || 0;
+      if (e.estadoCursos === 'OK') pOK_kpi++;
+      else if (e.estadoCursos === 'CRITICO') pCritico_kpi++;
+      else if (e.estadoCursos === 'PENDIENTE') pPendiente_kpi++;
+      else pSinCursos_kpi++;
+    }
+    
+    // Contadores totales (para display/tabla, incluye NI)
+    if (e.estadoCursos === 'OK') pOK++;
+    else if (e.estadoCursos === 'CRITICO') pCritico++;
+    else if (e.estadoCursos === 'PENDIENTE') pPendiente++;
+    else pSinCursos++;
+  });
+  
+  // V44: % cumplimiento BASADO EN PERSONAS (fórmula del usuario)
+  // % = (Activos - Activos_con_vencimiento) * 100 / Activos
+  // Activos = personas NO NI | Activos_con_vencimiento = activos con >=1 curso vencido
+  var activosConVencimiento_kpi = 0;
+  var totalActivosSinNI = 0;
+  equipo.forEach(function(e2) {
+    if (e2.esNuevoIngreso) return;
+    totalActivosSinNI++;
+    if ((e2.vencidos || 0) > 0) activosConVencimiento_kpi++;
+  });
+  var totalKPI = equipo.length - totalNuevosIngresos;
+  var pctOK = totalActivosSinNI > 0 ? Math.round(((totalActivosSinNI - activosConVencimiento_kpi) / totalActivosSinNI) * 100) : 100;
+  
+  Logger.log('getMiEquipo: DIAGNOSTICO | user=' + email + ' | base=' + equipoReal.baseUsuario + ' | matches=' + equipo.length + ' (activos=' + totalActivosSinNI + ', nuevosIngresos=' + totalNuevosIngresos + ') | KPI(sin NI): OK=' + pOK_kpi + ' CRITICO=' + pCritico_kpi + ' PENDIENTE=' + pPendiente_kpi + ' SIN_CURSOS=' + pSinCursos_kpi + ' | TOTAL(con NI): OK=' + pOK + ' CRITICO=' + pCritico + ' | pctOK(personas)=(' + totalActivosSinNI + '-' + activosConVencimiento_kpi + ')/' + totalActivosSinNI + '=' + pctOK + '%');
+  
+  // V46b: DIAGNÓSTICO PER-BASE — para verificar que TODAS las bases calculan bien
+  var _diagBases = {};
+  equipo.forEach(function(ed) {
+    var bk = ed.baseRegion || 'DESCONOCIDA';
+    if (!_diagBases[bk]) _diagBases[bk] = { personas: 0, cursos: 0, conVencParseable: 0, enAnio: 0, hab: 0, pv: 0, venc: 0, prog: 0, noAplica: 0, sinDato: 0, sinVenc: 0, merged: 0 };
+    var db = _diagBases[bk];
+    db.personas++;
+    if (ed._mergedFromBases) db.merged++;
+    (ed.cursos || []).forEach(function(c) {
+      db.cursos++;
+      if (c.status === 'HABILITADO') db.hab++;
+      else if (c.status === 'POR VENCER') db.pv++;
+      else if (c.status === 'VENCIDO') db.venc++;
+      else if (c.status === 'PROGRAMAR') db.prog++;
+      var hasVenc = c.vencimiento && c.vencimiento !== '-' && String(c.vencimiento).trim() !== '';
+      if (hasVenc) {
+        db.conVencParseable++;
+        var _ps = String(c.vencimiento).split('/');
+        if (_ps.length === 3) {
+          var _av = parseInt(_ps[2], 10) || 0;
+          if (_av > 0 && _av < 100) _av += 2000;
+          if (_av === new Date().getFullYear()) db.enAnio++;
+        }
+      } else {
+        db.sinVenc++;
+      }
+    });
+  });
+  var _diagBasesArr = [];
+  Object.keys(_diagBases).forEach(function(bk) {
+    var d = _diagBases[bk];
+    _diagBasesArr.push({ base: bk, personas: d.personas, cursos: d.cursos, conVenc: d.conVencParseable, sinVenc: d.sinVenc, enAnio: d.enAnio, hab: d.hab, pv: d.pv, venc: d.venc, prog: d.prog, merged: d.merged });
+    _log('[V6b-DIAG-BASE] ' + bk + ' | Personas=' + d.personas + ' Cursos=' + d.cursos + ' | ConVenc=' + d.conVencParseable + ' SinVenc=' + d.sinVenc + ' EnAño' + new Date().getFullYear() + '=' + d.enAnio + ' | HAB=' + d.hab + ' PV=' + d.pv + ' VENC=' + d.venc + ' PROG=' + d.prog + (d.merged > 0 ? ' MERGED=' + d.merged : ''));
+  });
+  // V43: Log detallado de BPs para comparar con Forecast
+  var _niBPs = [], _actBPs = [];
+  equipo.forEach(function(e3) {
+    if (e3.esNuevoIngreso) _niBPs.push(e3.bp);
+    else _actBPs.push(e3.bp);
+  });
+  _log('[V3-MI-EQUIPO] BPs ACTIVOS (' + _actBPs.length + '): ' + _actBPs.join(', '));
+  _log('[V3-MI-EQUIPO] BPs NI (' + _niBPs.length + '): ' + _niBPs.join(', '));
+  // V45c: Log BPs CRÍTICO con MOTIVO (curso + fecha) para comparar con Forecast
+  var _criticoBPs = [];
+  var _criticoDetalle = []; // V47b: Detalle para debug
+  equipo.forEach(function(e3b) {
+    if (!e3b.esNuevoIngreso && e3b.estadoCursos === 'CRITICO') {
+      var _motivos = [];
+      (e3b.cursos || []).forEach(function(cc) {
+        if (cc.status === 'VENCIDO') _motivos.push(cc.nombre + '|venc=' + cc.vencimiento + '|dias=' + cc.dias);
+      });
+      _criticoBPs.push(e3b.bp);
+      _criticoDetalle.push({
+        bp: e3b.bp,
+        nombre: (e3b.nombre || '').substring(0, 40),
+        baseRegion: e3b.baseRegion || '?',
+        mergedFrom: e3b._mergedFromBases || null,
+        motivos: _motivos
+      });
+      _log('[V7b-CRITICO] BP=' + e3b.bp + ' base=' + (e3b.baseRegion || '?') + ' merged=' + JSON.stringify(e3b._mergedFromBases || null) + ' MOTIVO: ' + (_motivos.join('; ') || 'sin detalle'));
+    }
+  });
+  _log('[V7b-MI-EQUIPO] BPs CRITICO (sinNI): ' + _criticoBPs.length + ' → ' + _criticoBPs.join(', '));
+  // V47c: Log detallado por persona con base, merge y cursos
+  equipo.forEach(function(e4) {
+    if (e4.esNuevoIngreso) return;
+    var cursosStr = (e4.cursos || []).map(function(cc) { return cc.sigla + '(' + cc.status + '|' + (cc.vencimiento || '-') + '|d=' + (cc.dias !== undefined ? cc.dias : '?') + ')'; }).join(', ');
+    _log('[V7c-PERSONA] BP=' + e4.bp + ' "' + (e4.nombre || '').substring(0, 35) + '" | base=' + (e4.baseRegion || '?') + ' merged=' + JSON.stringify(e4._mergedFromBases || null) + ' | estado=' + e4.estadoCursos + ' hab=' + (e4.habilitados||0) + ' pv=' + (e4.porVencer||0) + ' venc=' + (e4.vencidos||0) + ' prog=' + (e4.programar||0) + ' | cursos: ' + cursosStr);
+  });
+  
+  var resultado = { success: true, equipo: equipo, total: equipo.length,
+    // V43: KPI cards = solo activos (excluyendo NI)
+    habilitados: habilitados_kpi, porVencer: porVencer_kpi, vencidos: vencidos_kpi,
+    personasOK: pOK_kpi, personasCritico: pCritico_kpi, personasPendiente: pPendiente_kpi,
+    personasSinCursos: pSinCursos_kpi, pctOKCursos: pctOK,
+    // Totales incluyendo NI (para referencia/tabla)
+    habilitadosTotal: habilitados, porVencerTotal: porVencer, vencidosTotal: vencidos,
+    personasOKTotal: pOK, personasCriticoTotal: pCritico, personasPendienteTotal: pPendiente,
+    totalNuevosIngresos: totalNuevosIngresos,
+    totalActivos: equipo.length - totalNuevosIngresos,
+    // V47: Fuente utilizada
+    fuente: fuente,
+    // V65: Build stamp
+    build: BUILD_GS,
+    // V47b: Debug clasificación multi-base y críticos
+    _v47Debug: equipoReal._v47Debug || {},
+    _criticoDetalle: _criticoDetalle,
+    // V46b: Diagnóstico per-base para debug
+    _diagBases: _diagBasesArr,
+    _anioFiltro: 'ALL' };
+  
+  // ═══ CACHE SET V23c: guardar resultado por 10 minutos ═══
+  try {
+    var jsonStr = JSON.stringify(resultado);
+    if (jsonStr.length < 90000) { // Límite de cache GAS: ~100KB
+      CacheService.getScriptCache().put(cacheKey, jsonStr, 600);
+      Logger.log('getMiEquipo: CACHE SET OK (' + jsonStr.length + ' bytes, TTL=600s)');
+    } else {
+      Logger.log('getMiEquipo: CACHE SKIP (payload=' + jsonStr.length + ' bytes, excede límite)');
+    }
+  } catch(cacheErr) {
+    Logger.log('getMiEquipo: CACHE SET ERROR: ' + cacheErr.message);
+  }
+  
+  return resultado;
+}
+
+function getSeguimiento(filtro) {
+  try {
+    var bases = (filtro && filtro !== 'TODO') ? [filtro] : ['CHILE', 'RAMPA', 'LATAM', 'NAM'];
+    var registros = [];
+    bases.forEach(function(bk) {
+      try {
+        leerHoja(bk, 'base').forEach(function(e) {
+          e.cursos.forEach(function(c) {
+            // Incluir VENCIDO, POR VENCER, PROGRAMAR y HABILITADO
+            if (c.status === 'VENCIDO' || c.status === 'POR VENCER' || c.status === 'PROGRAMAR' || c.status === 'HABILITADO') {
+              // Validar dias: si es mayor a 3650 o menor a -3650, descartar
+              var diasVal = c.dias;
+              if (typeof diasVal === 'number' && Math.abs(diasVal) > 3650) diasVal = '';
+              registros.push({
+                bp: e.bp, nombre: e.nombre, correo: e.correo || '',
+                pais: e.pais || '', area: e.area || '',
+                jefeDirecto: e.jefeDirecto || '', jefeArea: e.jefeArea || '', gerente: e.gerente || '',
+                ejecutivo: e.gerente || '',
+                curso: c.sigla, cursoNombre: c.nombre,
+                status: c.status, vencimiento: c.vencimiento || '', dias: diasVal,
+                planDate: c.planDate || '', habilitacion: c.habilitacion || '',
+                base: bk,
+                habilitacionGeneral: e.habilitacionGeneral || '',
+                inhabilitacionMotivo: e.inhabilitacionMotivo || ''
+              });
+            }
+          });
+        });
+      } catch(e) {}
+    });
+    registros.sort(function(a, b) { return (typeof a.dias === 'number' ? a.dias : 9999) - (typeof b.dias === 'number' ? b.dias : 9999); });
+    return { success: true, registros: registros, total: registros.length };
+  } catch(e) { return { success: false, error: e.message }; }
+}
+
+function getResumenAdmin() {
+  try {
+    var resumen = { bases: [], totalGeneral: 0, habGeneral: 0, inhabGeneral: 0, alertaGeneral: 0, sinKPIGeneral: 0, niGeneral: 0 };
+    ['CHILE', 'RAMPA', 'LATAM', 'NAM'].forEach(function(bk) {
+      try {
+        var emps = leerHoja(bk, 'base');
+        var hab = 0, inhab = 0, alerta = 0, sinKPI = 0, niCount = 0;
+        emps.forEach(function(e) {
+          // V69: UNIFICADO — crítico basado en CURSOS (no habilitacionGeneral)
+          if (e.cuentaKPI === false) {
+            niCount++;
+          } else if ((e.vencidosAplicables || e.vencidos) > 0) {
+            inhab++;
+          } else {
+            hab++;
+            if (e.tieneAlerta) alerta++;
+          }
+        });
+        var denom = hab + inhab;
+        var activosSinNI = emps.length - niCount; // V75: activos = total - NI
+        resumen.bases.push({ base: bk, total: emps.length, activos: activosSinNI, habilitados: hab, inhabilitados: inhab, alerta: alerta, sinKPI: sinKPI, ni: niCount,
+          cumplimiento: denom > 0 ? Math.round((hab / denom) * 100) : 0 });
+        resumen.totalGeneral += emps.length; resumen.habGeneral += hab; resumen.inhabGeneral += inhab; resumen.alertaGeneral += alerta; resumen.sinKPIGeneral += sinKPI; resumen.niGeneral += niCount;
+      } catch(e) { resumen.bases.push({ base: bk, total: 0, habilitados: 0, inhabilitados: 0, alerta: 0, sinKPI: 0, cumplimiento: 0, error: e.message }); }
+    });
+    var denomG = resumen.habGeneral + resumen.inhabGeneral;
+    resumen.cumplimientoGeneral = denomG > 0 ? Math.round((resumen.habGeneral / denomG) * 100) : 0;
+    resumen.activosGeneral = resumen.totalGeneral - resumen.niGeneral; // V75: Activos = Total - NI
+    return { success: true, resumen: resumen };
+  } catch(e) { return { success: false, error: e.message }; }
+}
+
+// V47e: ENVÍO DE CORREOS "A NOMBRE DEL GRUPO"

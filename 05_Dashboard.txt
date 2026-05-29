@@ -1,0 +1,280 @@
+function getDashboardStats(filtro) {
+  try {
+    // AISLAMIENTO POR PAÍS: No-Admin solo ve datos de su base
+    var usr = getUsuarioActual();
+    Logger.log('[getDashboardStats] START filtro=' + filtro + ' | usr=' + (usr ? (usr.email + ' rol=' + usr.rol) : 'NULL'));
+    if (usr && usr.rol !== 'ADMIN') {
+      var baseUsuario = usr.base || '';
+      // Si el filtro es un grupo especifico diferente a la base del usuario, rechazar
+      // HCC es un area: solo visible para usuarios del area HCC
+      if (filtro === 'HCC') {
+        var usrArea = normKey(usr.area || '');
+        if (usrArea.indexOf('HCC') < 0) {
+          Logger.log('SEGURIDAD: Usuario ' + usr.email + ' (area=' + usrArea + ') intento acceder a HCC');
+          return { success: true, total: 0, totalCursos: 0, cumplimiento: 0, alDia: 0, porVencer: 0, vencidos: 0, verde: 0, amarillo: 0, rojo: 0, paisData: {}, topJefes: [], cursoStats: [], errores: [], hccCount: 0 };
+        }
+      } else if (filtro && filtro !== 'TODO' && filtro !== baseUsuario) {
+        Logger.log('SEGURIDAD: Usuario ' + usr.email + ' (base=' + baseUsuario + ') intento acceder a datos de ' + filtro);
+        return { success: true, total: 0, totalCursos: 0, cumplimiento: 0, alDia: 0, porVencer: 0, vencidos: 0, verde: 0, amarillo: 0, rojo: 0, paisData: {}, topJefes: [], cursoStats: [], errores: [], hccCount: 0 };
+      }
+      // Si pide TODO, restringir a su base solamente
+      if (!filtro || filtro === 'TODO') {
+        filtro = baseUsuario || 'TODO';
+        Logger.log('AISLAMIENTO: Usuario ' + usr.email + ' filtrado a base ' + filtro);
+      }
+    }
+
+    // Cache de estadísticas del dashboard (30 seg para respuesta rápida)
+    // IMPORTANTE: La cache debe ser per-rol. ADMIN ve todo, JEFE ve filtrado por nombre.
+    // Si usamos la misma clave, un JEFE contamina la cache del ADMIN.
+    var rolSuffix = (usr && usr.rol === 'JEFE' && usr.nombre) ? '_J_' + normNombre(usr.nombre).substring(0,20) : (usr && usr.rol === 'ADMIN') ? '_ADM' : '_U_' + (usr ? (usr.base || 'X') : 'ANON');
+    var cacheKey = 'CARGO_DASH_V69_' + (filtro || 'TODO') + rolSuffix;
+    var cache = CacheService.getScriptCache();
+    var cached = cache.get(cacheKey);
+    if (cached) {
+      return JSON.parse(cached);
+    }
+    
+    // HCC es un AREA (no transversal). Cuando filtro=TODO, incluir TODOS.
+    // Cuando filtro=HCC, filtrar por area. Cuando filtro=base, incluir todos de esa base.
+    var esFiltroPorBase = (filtro && filtro !== 'TODO' && filtro !== 'HCC');
+    var bases = esFiltroPorBase ? [filtro] : ['CHILE', 'RAMPA', 'LATAM', 'NAM'];
+    var todos = [], hccBucket = [], errores = [];
+    
+    bases.forEach(function(b) {
+      try {
+        var baseEmps = leerHoja(b, 'base');
+        Logger.log('[BASE-READ] ' + b + ': baseEmps=' + (Array.isArray(baseEmps) ? baseEmps.length : 'ERROR'));
+        baseEmps.forEach(function(e) {
+          todos.push(e);
+          if (e.esHCC) hccBucket.push(e);
+        });
+      }
+      catch(e) { errores.push(b + ': ' + e.message); }
+    });
+    
+    var empleados = (filtro === 'HCC') ? hccBucket : todos;
+    
+    // V22c: FILTRO JEFE usando función unificada buildArbolJerarquico
+    var esJefe = usr && usr.nombre && (usr.rol === 'JEFE' || (usr.rol || '').indexOf('JEFE') === 0);
+    if (esJefe && usr.rol !== 'ADMIN') {
+      var _ntbDash2 = {};
+      for (var _d2i = 0; _d2i < empleados.length; _d2i++) {
+        var _d2n = normKey(empleados[_d2i].nombre || '');
+        var _d2b = String(empleados[_d2i].bp || '').trim();
+        if (_d2n && _d2b && !_ntbDash2[_d2n]) _ntbDash2[_d2n] = _d2b;
+      }
+      // V96: Agregar JEFEs de hoja Jefes
+      try {
+        var _ssJ2 = getSpreadsheet('MAESTRO');
+        var _shJ2 = _ssJ2 ? _ssJ2.getSheetByName('Jefes') : null;
+        if (_shJ2) {
+          var _jd2 = _shJ2.getDataRange().getDisplayValues();
+          for (var _j2i = 1; _j2i < _jd2.length; _j2i++) {
+            var _jn2 = normKey(_jd2[_j2i][1] || '');
+            var _jb2 = String(_jd2[_j2i][2] || '').trim();
+            if (_jn2 && _jb2 && !_ntbDash2[_jn2]) _ntbDash2[_jn2] = _jb2;
+          }
+        }
+      } catch(e) {}
+      var arbol = buildArbolJerarquico(usr.nombre, empleados, {email: usr.email || '', bp: usr.bp || '', nombreToBP: _ntbDash2});
+      if (arbol && arbol.personas) {
+        empleados = arbol.personas;
+        Logger.log('FILTRO JEFE getDashboardStats: ' + (arbol.total || arbol.personas.length) + ' subordinados');
+      }
+    }
+    
+    var total = empleados.length, totalCursos = 0, verde = 0, amarillo = 0, rojo = 0;
+    var habilitadosTotal = 0, porVencerTotal = 0, vencidosTotal = 0;
+    var paisCount = {}, baseCount = {}, jefeVenc = {}, cursoStats = {};
+    var kpiEmpleados = 0, cntNuevoIngreso = 0, cntSinKPI = 0;
+    // PERSON-FIRST: Habilitacion General (Looker)
+    var personasHabilitadas = 0, personasInhabilitadas = 0, personasConAlerta = 0, personasSinKPI = 0;
+    var totalCursosAplicables = 0, cursosAplicablesOK = 0, cursosAplicablesPV = 0, cursosAplicablesVenc = 0, cursosAplicablesProgramar = 0;
+    
+    empleados.forEach(function(e) {
+      totalCursos += e.totalCursos;
+      habilitadosTotal += e.habilitados;
+      porVencerTotal += e.porVencer;
+      vencidosTotal += e.vencidos;
+      if (e.cuentaKPI === false) {
+        cntNuevoIngreso++;
+        // V49: NI NO afectan KPIs, cursos ni habilitación — solo contamos
+      } else {
+        kpiEmpleados++;
+        // V69: UNIFICADO — crítico basado en CURSOS (no habilitacionGeneral)
+        // Esto coincide con la lógica de Forecast: persona con ≥1 curso vencido = crítico
+        if ((e.vencidosAplicables || e.vencidos) > 0) {
+          personasInhabilitadas++; // reuse var name for backwards compat
+        } else if (e.habilitacionGeneral === 'HABILITADO') {
+          personasHabilitadas++;
+          if (e.tieneAlerta) personasConAlerta++;
+        } else {
+          personasSinKPI++;
+        }
+        // Cursos aplicables aggregation — SOLO para KPI employees
+        totalCursosAplicables += (e.cursosAplicables || 0);
+        cursosAplicablesOK += (e.okAplicables || 0);
+        cursosAplicablesPV += (e.pvAplicables || 0);
+        cursosAplicablesVenc += (e.vencidosAplicables || 0);
+        cursosAplicablesProgramar += (e.programarAplicables || 0);
+      }
+      if (e.semaforo === 'VERDE' || e.semaforo === 'verde') verde++;
+      else if (e.semaforo === 'AMARILLO' || e.semaforo === 'amarillo') amarillo++;
+      else rojo++;
+      
+      paisCount[e.pais || 'Sin Pais'] = (paisCount[e.pais || 'Sin Pais'] || 0) + 1;
+      // Conteo por BASE (CHILE, RAMPA, LATAM, NAM) para grafico de distribucion
+      var baseLabel = e.baseRegion || 'Sin Base';
+      if (!baseCount) baseCount = {};
+      baseCount[baseLabel] = (baseCount[baseLabel] || 0) + 1;
+      // V21f: Top jefes por PERSONAS con vencidos (no por cursos vencidos)
+      // V30c: CASCADE jefeOperativo: SUP→JA→JDPTO→SG→G→GSR→DIR. Solo "Sin Jefe" si TODOS vacíos.
+      if ((e.vencidosAplicables || e.vencidos) > 0) {
+        var _jOp = (e.jefeDirecto || '').trim()
+                || (e.jefeArea || '').trim()
+                || (e.jefeDepartamento || '').trim()
+                || (e.subgerente || '').trim()
+                || (e.gerente || '').trim()
+                || (e.gerenteSr || '').trim()
+                || (e.director || '').trim()
+                || '';
+        var _jLabel = _jOp || 'Sin Jefe';
+        if (!jefeVenc[_jLabel]) jefeVenc[_jLabel] = { personas: 0, cursos: 0, campoUsado: '', ejemplos: [] };
+        jefeVenc[_jLabel].personas++;
+        jefeVenc[_jLabel].cursos += (e.vencidosAplicables || e.vencidos);
+        if (!jefeVenc[_jLabel].campoUsado && _jOp) {
+          jefeVenc[_jLabel].campoUsado = e.jefeDirecto ? 'SUP' : e.jefeArea ? 'JA' : e.jefeDepartamento ? 'JDPTO' : e.subgerente ? 'SG' : e.gerente ? 'G' : e.gerenteSr ? 'GSR' : 'DIR';
+        }
+        if (_jLabel === 'Sin Jefe' && jefeVenc['Sin Jefe'].ejemplos.length < 10) {
+          jefeVenc['Sin Jefe'].ejemplos.push({
+            bp: e.bp, nombre: (e.nombre || '').substring(0, 30), baseRegion: e.baseRegion || '',
+            SUP: e.jefeDirecto || '', JA: e.jefeArea || '', JDPTO: e.jefeDepartamento || '',
+            SG: e.subgerente || '', G: e.gerente || '', GSR: e.gerenteSr || '', DIR: e.director || ''
+          });
+        }
+      }
+      // Course stats: agrupados por SIGLA normalizada
+      // FIX V22: Solo excluir NO_APLICA del denominador. SIN DATO cuenta en total (como PROGRAMAR)
+      // para evitar denominadores artificialmente bajos (ej: "1/2" en SCCA)
+      e.cursos.forEach(function(c) {
+        if (c.status === 'NO_APLICA') return;
+        var cursoKey = normalizarSigla(c.sigla) || c.sigla || c.nombre;
+        if (!cursoStats[cursoKey]) cursoStats[cursoKey] = { sigla: cursoKey, nombre: c.nombre || cursoKey, total: 0, hab: 0, pv: 0, programar: 0, venc: 0, sinDato: 0, completado: 0 };
+        cursoStats[cursoKey].total++;
+        if (c.status === 'HABILITADO') cursoStats[cursoKey].hab++;
+        else if (c.status === 'COMPLETADO') cursoStats[cursoKey].completado++;
+        else if (c.status === 'POR VENCER') cursoStats[cursoKey].pv++;
+        else if (c.status === 'PROGRAMAR') cursoStats[cursoKey].programar++;
+        else if (c.status === 'VENCIDO') cursoStats[cursoKey].venc++;
+        else cursoStats[cursoKey].sinDato++;
+      });
+    });
+    
+    // ═══════════════════════════════════════════════════════════════
+    // AUDIT LOG getDashboardStats: Para comparar con Looker/Sheets
+    // ═══════════════════════════════════════════════════════════════
+    // % Habilitacion General = habilitados / (habilitados + inhabilitados) - SIN_KPI fuera del denominador
+    var denomHab = personasHabilitadas + personasInhabilitadas;
+    var pctHabilitacion = denomHab > 0 ? Math.round((personasHabilitadas / denomHab) * 100) : 0;
+
+    // V31: LOG DETALLADO DEL CÁLCULO DE % PARA DIAGNÓSTICO
+    _log(3, '[V31-PCT] ══════════════════════════════════════');
+    _log(3, '[V31-PCT] CALCULO % HABILITACION');
+    _log(3, '[V31-PCT]   total (todos los empleados)    = ' + total);
+    _log(3, '[V31-PCT]   personasHabilitadas (HABILITADO) = ' + personasHabilitadas);
+    _log(3, '[V31-PCT]   personasInhabilitadas (INHABILITADO) = ' + personasInhabilitadas);
+    _log(3, '[V31-PCT]   personasSinKPI (excluidas del %)   = ' + personasSinKPI + ' (nuevos ingresos, sin cursos aplicables, etc.)');
+    _log(3, '[V31-PCT]   denominador = hab + inhab = ' + denomHab + ' (NO incluye SinKPI)');
+    _log(3, '[V31-PCT]   formula: ' + personasHabilitadas + ' / ' + denomHab + ' * 100 = ' + pctHabilitacion + '%');
+    _log(3, '[V31-PCT]   Si usaramos total como denominador: ' + (total > 0 ? Math.round((personasHabilitadas / total) * 100) : 0) + '%');
+    _log(3, '[V31-PCT]   ATENCION: UI muestra total=' + total + ' como "Colaboradores" pero % usa denom=' + denomHab);
+    _log(3, '[V31-PCT] ══════════════════════════════════════');
+
+    Logger.log('═══ AUDIT getDashboardStats filtro=' + filtro + ' ═══');
+    _log('  Activos=' + total + ' | Hab=' + personasHabilitadas + ' | Inhab=' + personasInhabilitadas + ' | SinKPI=' + personasSinKPI + ' | Alerta=' + personasConAlerta);
+    _log('  CHECK: ' + total + ' = ' + personasHabilitadas + ' + ' + personasInhabilitadas + ' + ' + personasSinKPI + ' = ' + (personasHabilitadas + personasInhabilitadas + personasSinKPI));
+    _log('  Chart usara: hab=' + personasHabilitadas + ' inhab=' + personasInhabilitadas + ' => denom=' + denomHab + ' => %=' + pctHabilitacion + '%');
+    for (var ck in cursoStats) {
+      var cs = cursoStats[ck];
+      _log('  AUDIT CURSO ' + ck + ': total=' + cs.total + ' | hab=' + cs.hab + ' | pv=' + cs.pv + ' | programar=' + cs.programar + ' | venc=' + cs.venc + ' | sinDato=' + (cs.sinDato || 0));
+    }
+    
+    // V21f: Ranking por personas con vencidos (dato secundario: cursos)
+    var topJefes = Object.keys(jefeVenc).map(function(k) { 
+      return { nombre: k, personas: jefeVenc[k].personas, vencidos: jefeVenc[k].cursos, campoUsado: jefeVenc[k].campoUsado || '' }; 
+    });
+    topJefes.sort(function(a, b) { return b.personas - a.personas; });
+    
+    // V30c: AUDIT "Sin Jefe" — loggear ejemplos de filas que caen ahí
+    if (jefeVenc['Sin Jefe'] && jefeVenc['Sin Jefe'].ejemplos.length > 0) {
+      Logger.log('[AUDIT-SINJEFE] ' + jefeVenc['Sin Jefe'].personas + ' personas con vencidos caen en "Sin Jefe" (7 niveles vacios). Ejemplos:');
+      jefeVenc['Sin Jefe'].ejemplos.forEach(function(ej, idx) {
+        _log('  [' + (idx+1) + '] BP=' + ej.bp + ' "' + ej.nombre + '" base=' + ej.baseRegion + ' | SUP=' + ej.SUP + ' JA=' + ej.JA + ' JDPTO=' + ej.JDPTO + ' SG=' + ej.SG + ' G=' + ej.G + ' GSR=' + ej.GSR + ' DIR=' + ej.DIR);
+      });
+    } else {
+      Logger.log('[AUDIT-SINJEFE] 0 personas con vencidos en "Sin Jefe" — CASCADE OK');
+    }
+    var cursoArr = Object.keys(cursoStats).map(function(k) {
+      var cs = cursoStats[k];
+      cs.porcentaje = cs.total > 0 ? Math.round(((cs.hab + (cs.completado || 0) + (cs.pv || 0)) / cs.total) * 100) : 0;
+      return cs;
+    });
+    cursoArr.sort(function(a, b) { return a.porcentaje - b.porcentaje; });
+    
+    var _cumplimiento = totalCursosAplicables > 0 ? Math.round(((cursosAplicablesOK + cursosAplicablesPV) / totalCursosAplicables) * 100) : 0;
+    
+    // V69: % Cumplimiento basado en cursos (unificado con Forecast)
+    // criticos = personas con ≥1 curso vencido (aplicable), SOLO KPI employees
+    var activosKPI = kpiEmpleados;
+    var criticos = personasInhabilitadas;
+    var alDiaKPI = activosKPI - criticos;
+    var pctCumplimientoKPI = activosKPI > 0 ? Math.round((alDiaKPI / activosKPI) * 100) : 100;
+    
+    _log('[V9-KPI] activosKPI=' + activosKPI + ' | NI=' + cntNuevoIngreso + ' | criticos(cursos)=' + criticos + ' | alDia=' + alDiaKPI + ' | %=' + pctCumplimientoKPI + ' | total_hoja=' + total);
+    Logger.log('[AUDIT-KPI] base=' + filtro + ' totalColab=' + total + ' activosKPI=' + activosKPI + ' NI=' + cntNuevoIngreso + ' colabCritico=' + criticos + ' cursosVencidos=' + cursosAplicablesVenc + ' alDia=' + alDiaKPI + ' pct=' + pctCumplimientoKPI);
+    
+    var result = { success: true, total: total, totalCursos: totalCursos,
+      // V49-FINAL: KPIs EXPLÍCITOS para Dashboard Admin
+      activosKPI: activosKPI,
+      nuevosIngresos: cntNuevoIngreso,
+      criticos: criticos,
+      alDiaKPI: alDiaKPI,
+      pctCumplimientoKPI: pctCumplimientoKPI,
+      // PERSON-FIRST KPIs (Looker)
+      personasHabilitadas: personasHabilitadas, personasInhabilitadas: personasInhabilitadas,
+      personasConAlerta: personasConAlerta, personasSinKPI: personasSinKPI,
+      pctHabilitacion: pctHabilitacion,
+      denomHabilitacion: denomHab,
+      // ALIASES legacy
+      totalActivos: activosKPI,
+      totalNuevosIngresos: cntNuevoIngreso,
+      personasCritico: criticos,
+      pctOKCursos: pctCumplimientoKPI,
+      // COURSE-level KPIs (secondary)
+      totalCursosAplicables: totalCursosAplicables,
+      cursosAlDia: cursosAplicablesOK, cursosPorVencer: cursosAplicablesPV, cursosProgramar: cursosAplicablesProgramar, cursosVencidos: cursosAplicablesVenc,
+      cumplimiento: _cumplimiento,
+      alDia: habilitadosTotal, porVencer: porVencerTotal, vencidos: vencidosTotal,
+      verde: verde, amarillo: amarillo, rojo: rojo, paisData: paisCount, baseData: baseCount,
+      topJefes: topJefes.slice(0, 10), cursoStats: cursoArr, errores: errores,
+      hccCount: hccBucket.length, universoKPI: kpiEmpleados,
+      cntNuevoIngreso: cntNuevoIngreso, cntSinKPI: cntSinKPI };
+    
+    // DEBUG LOG: Verificar datos antes del return
+    Logger.log('getDashboardStats RETURN: rol=' + (usr ? usr.rol : 'null') + ' filtro=' + filtro + ' total=' + total + ' totalCursos=' + totalCursos + ' bases=' + bases.join(',') + ' errores=' + errores.length + ' cacheKey=' + cacheKey);
+    Logger.log('[SUMMARY] personas=' + total + ' | critico=' + cursosAplicablesVenc + ' | programar=' + cursosAplicablesProgramar + ' | alDia=' + cursosAplicablesOK + ' | pv=' + cursosAplicablesPV);
+    
+    // Solo cachear si hay datos válidos (evitar cachear resultados vacíos por errores transitorios)
+    if (total > 0) {
+      try {
+        var json = JSON.stringify(result);
+        if (json.length < CHUNK_SIZE) cache.put(cacheKey, json, 60);
+      } catch(ce) {}
+    } else {
+      Logger.log('getDashboardStats: NO se cachea resultado vacío (total=0). Errores: ' + errores.join('; '));
+    }
+    
+    return result;
+  } catch(e) { return { success: false, error: e.message }; }
+}

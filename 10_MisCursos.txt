@@ -1,0 +1,414 @@
+function getStudentDashboard(bp, tipoBase) {
+  try {
+    var baseKey = tipoBase;
+    if (tipoBase === 'LATAM_SUR') baseKey = 'LATAM';
+    else if (tipoBase === 'CL') baseKey = 'CHILE';
+    else if (tipoBase === 'NAM_EU') baseKey = 'NAM';
+    else if (tipoBase === 'HCC') baseKey = null; // Buscar en todas
+    
+    var empleado = null;
+    var basesABuscar = baseKey ? [baseKey] : ['CHILE', 'RAMPA', 'LATAM', 'NAM'];
+    
+    for (var i = 0; i < basesABuscar.length; i++) {
+      var bk = basesABuscar[i];
+      try {
+        var emps = leerHoja(bk, 'base');
+        for (var j = 0; j < emps.length; j++) {
+          if (emps[j].bp === bp) {
+            empleado = emps[j];
+            empleado.baseEncontrada = bk;
+            break;
+          }
+        }
+        if (empleado) break;
+      } catch(e) {}
+    }
+    
+    if (!empleado) {
+      return { error: 'Colaborador no encontrado' };
+    }
+    
+    return {
+      estudiante: {
+        nombre: empleado.nombre,
+        correo: empleado.correo,
+        pais: empleado.pais,
+        jefe: empleado.jefeDirecto
+      },
+      cursos: empleado.cursos.filter(function(c) {
+        // V21e: Excluir SIN DATO y NO_APLICA del modal
+        return c.status !== 'SIN DATO' && c.status !== 'NO_APLICA';
+      }).map(function(c) {
+        return {
+          siglas: c.sigla,
+          nombre: c.nombre,
+          habilitacion: c.habilitacion,
+          vencimiento: c.vencimiento,
+          diasRestantes: c.dias,
+          status: c.status
+        };
+      })
+    };
+  } catch(e) {
+    return { error: e.message };
+  }
+}
+
+/**
+ * Obtiene equipo de un jefe
+ */
+function getJefeTeamData(nombreJefe) {
+  try {
+    var estudiantes = [];
+    var habilitados = 0, programar = 0, vencidos = 0;
+    var nombreJefeNorm = normNombre(nombreJefe);
+    var nombreJefeNormFlex = normalizarNombreJefe(nombreJefe);
+    var logCampos = {};
+    
+    ['CHILE', 'RAMPA', 'LATAM', 'NAM'].forEach(function(bk) {
+      try {
+        var emps = leerHoja(bk, 'base');
+        var matchesBase = 0;
+        emps.forEach(function(e) {
+          var jd = normNombre(e.jefeDirecto);
+          var ja = normNombre(e.jefeArea);
+          var ge = normNombre(e.gerente);
+          // Match exacto o por normalización flexible (Nombre + 1er Apellido)
+          var jdFlex = normalizarNombreJefe(e.jefeDirecto);
+          var jaFlex = normalizarNombreJefe(e.jefeArea);
+          var geFlex = normalizarNombreJefe(e.gerente);
+          if (jd === nombreJefeNorm || ja === nombreJefeNorm || ge === nombreJefeNorm ||
+              jdFlex === nombreJefeNormFlex || jaFlex === nombreJefeNormFlex || geFlex === nombreJefeNormFlex) {
+            estudiantes.push({
+              bp: e.bp,
+              nombre: e.nombre,
+              pais: e.pais,
+              cursosActivos: e.totalCursos,
+              cursosPendientes: e.pendientes,
+              cumplimiento: e.cumplimiento
+            });
+            habilitados += e.habilitados;
+            programar += e.porVencer;
+            vencidos += e.vencidos;
+            matchesBase++;
+          }
+        });
+        logCampos[bk] = matchesBase;
+      } catch(e) {}
+    });
+    
+    Logger.log('getJefeTeamData: jefe="' + nombreJefe + '" norm="' + nombreJefeNorm + '" total=' + estudiantes.length + ' porBase=' + JSON.stringify(logCampos));
+    
+    return {
+      estudiantes: estudiantes,
+      total: estudiantes.length,
+      habilitados: habilitados,
+      programar: programar,
+      vencidos: vencidos
+    };
+  } catch(e) {
+    return { error: e.message, estudiantes: [] };
+  }
+}
+
+// ===================== OTROS ENDPOINTS =====================
+
+/**
+ * BASE-ONLY V26: PLANIFICACIÓN ya no se usa. Esta función retorna vacío.
+ */
+function leerStatusRealizacionPlan(baseKey) {
+  Logger.log('[BASE-ONLY] leerStatusRealizacionPlan ignorado (' + baseKey + '): retorna {}');
+  return {};
+}
+
+/**
+ * V46: Merge inteligente de cursos cuando un BP aparece en múltiples bases.
+ * Reglas de prioridad:
+ *   1. NO_APLICA / SIN DATO pierde contra cualquier status con datos reales
+ *   2. Preferir registro con vencimiento parseable
+ *   3. Si ambos tienen vencimiento, preferir el más cercano a expirar (más urgente)
+ *   4. Si ambos son iguales, preferir el que tiene más datos (habilitacion, dias, etc.)
+ * @param {Array} cursosA - Cursos de la primera base (ya existente)
+ * @param {Array} cursosB - Cursos de la segunda base (a mergear)
+ * @param {string} bp - BP de la persona (para logging)
+ * @returns {Array} Cursos mergeados sin duplicados
+ */
+function mergeCursosMultiBase(cursosA, cursosB, bp) {
+  var map = {};
+  var statusReal = { 'COMPLETADO': 6, 'HABILITADO': 5, 'POR VENCER': 4, 'PROGRAMAR': 3, 'VENCIDO': 2, 'SIN DATO': 1, 'NO_APLICA': 0 };
+  
+  // Indexar todos los cursos de A por sigla normalizada
+  (cursosA || []).forEach(function(c) {
+    var sigla = normalizarSigla(c.sigla || c.nombre || '');
+    var key = sigla || ('_raw_' + (c.nombre || c.sigla || Math.random()));
+    if (!map[key]) map[key] = c;
+  });
+  
+  // Mergear cursos de B
+  var mergeLog = [];
+  (cursosB || []).forEach(function(c) {
+    var sigla = normalizarSigla(c.sigla || c.nombre || '');
+    var key = sigla || ('_raw_' + (c.nombre || c.sigla || Math.random()));
+    
+    if (!map[key]) {
+      // Curso nuevo, no existe en A → agregar
+      map[key] = c;
+      mergeLog.push(key + ':NUEVO(' + c.status + ')');
+      return;
+    }
+    
+    var existing = map[key];
+    var existSt = (existing.status || '').toUpperCase().replace(/\s+/g, '_');
+    var newSt = (c.status || '').toUpperCase().replace(/\s+/g, '_');
+    var existPrio = statusReal[existing.status] || 0;
+    var newPrio = statusReal[c.status] || 0;
+    
+    // Regla 1: NO_APLICA/SIN_DATO pierde contra datos reales
+    if (existPrio <= 1 && newPrio > 1) {
+      map[key] = c;
+      mergeLog.push(key + ':' + existing.status + '->' + c.status + '(real>noaplica)');
+      return;
+    }
+    if (newPrio <= 1 && existPrio > 1) {
+      mergeLog.push(key + ':KEEP_' + existing.status + '(noaplica_descartado)');
+      return;
+    }
+    
+    // Regla 2: Preferir registro con vencimiento parseable
+    var existHasVenc = existing.vencimiento && existing.vencimiento !== '-' && String(existing.vencimiento).trim() !== '';
+    var newHasVenc = c.vencimiento && c.vencimiento !== '-' && String(c.vencimiento).trim() !== '';
+    if (!existHasVenc && newHasVenc) {
+      map[key] = c;
+      mergeLog.push(key + ':sin_venc->' + c.status + '(con_venc)');
+      return;
+    }
+    if (existHasVenc && !newHasVenc) {
+      return; // Keep existing
+    }
+    
+    // Regla 3: Si ambos tienen vencimiento, preferir más cercano (más urgente)
+    if (typeof c.dias === 'number' && typeof existing.dias === 'number') {
+      if (c.dias < existing.dias) {
+        map[key] = c;
+        mergeLog.push(key + ':dias_' + existing.dias + '->' + c.dias + '(mas_urgente)');
+        return;
+      }
+    }
+    
+    // Regla 4: Mayor prioridad de status gana
+    if (newPrio > existPrio) {
+      map[key] = c;
+      mergeLog.push(key + ':' + existing.status + '->' + c.status + '(mejor_status)');
+      return;
+    }
+    // Default: mantener existente
+  });
+  
+  if (mergeLog.length > 0) {
+    _log('[V6-MERGE] BP=' + bp + ' | ' + mergeLog.join(' | '));
+  }
+  
+  var result = [];
+  for (var k in map) result.push(map[k]);
+  return result;
+}
+
+function deduplicarCursos(cursos, bp, statusRealizMap) {
+  var grupos = {};
+  var prioStatus = { 'HABILITADO': 4, 'POR VENCER': 3, 'PROGRAMAR': 2, 'VENCIDO': 1, 'SIN DATO': 0, 'COMPLETADO': 5 };
+  
+  cursos.forEach(function(c) {
+    var sigla = normalizarSigla(c.sigla || c.nombre || '');
+    if (!sigla) return;
+    if (!grupos[sigla]) grupos[sigla] = [];
+    
+    // Cross-reference con PLANIFICACION
+    var keyPlan = bp + '|' + sigla;
+    var srPlan = statusRealizMap ? statusRealizMap[keyPlan] : null;
+    if (srPlan) {
+      c.statusRealizacion = srPlan;
+      c.status = 'COMPLETADO';
+    }
+    
+    grupos[sigla].push(c);
+  });
+  
+  var resultado = [];
+  for (var sigla in grupos) {
+    var lista = grupos[sigla];
+    if (lista.length === 1) {
+      resultado.push(lista[0]);
+      continue;
+    }
+    // Elegir el "winner": prioridad COMPLETADO > datos mas completos > status mas alto
+    lista.sort(function(a, b) {
+      var pa = prioStatus[a.status] || 0;
+      var pb = prioStatus[b.status] || 0;
+      if (pa !== pb) return pb - pa; // COMPLETADO primero
+      // Datos mas completos: vencimiento no vacio
+      var vaA = a.vencimiento ? 1 : 0;
+      var vaB = b.vencimiento ? 1 : 0;
+      if (vaA !== vaB) return vaB - vaA;
+      // Dias mas recientes
+      var dA = typeof a.dias === 'number' ? a.dias : -99999;
+      var dB = typeof b.dias === 'number' ? b.dias : -99999;
+      return dB - dA;
+    });
+    resultado.push(lista[0]);
+  }
+  return resultado;
+}
+
+function getMisCursos(email) {
+  var _t0 = new Date().getTime();
+  email = (email || '').toString().trim().toLowerCase();
+  Logger.log('[MISCURSOS] START email="' + email + '"');
+  if (!email) {
+    Logger.log('[MISCURSOS] ERROR: email vacio o undefined');
+    return { success: false, error: 'Email de usuario no disponible. Intenta cerrar sesion y volver a ingresar.' };
+  }
+  var bases = ['CHILE', 'RAMPA', 'LATAM', 'NAM'];
+  
+  // V46: Buscar en TODAS las bases y mergear cursos
+  var empFinal = null;
+  var baseFinal = '';
+  var basesEncontradas = [];
+  var _diagBasesLeidas = [];
+  var _diagErrores = [];
+  
+  for (var b = 0; b < bases.length; b++) {
+    try {
+      var emps = leerHoja(bases[b], 'base');
+      _diagBasesLeidas.push(bases[b] + ':' + (emps ? emps.length : 0) + 'emps');
+      for (var i = 0; i < emps.length; i++) {
+        if ((emps[i].correo || '').toLowerCase() === email) {
+          var emp = emps[i];
+          var bk = bases[b];
+          basesEncontradas.push(bk);
+          
+          if (!empFinal) {
+            // Primera base donde se encuentra → base principal
+            empFinal = emp;
+            baseFinal = bk;
+          } else {
+            // Base adicional → merge cursos
+            _log('[V6-MISCURSOS] BP=' + emp.bp + ' encontrado en base adicional: ' + bk + ' (principal: ' + baseFinal + ')');
+            empFinal.cursos = mergeCursosMultiBase(empFinal.cursos || [], emp.cursos || [], String(emp.bp));
+            if (!empFinal.habilitacionGeneral && emp.habilitacionGeneral) {
+              empFinal.habilitacionGeneral = emp.habilitacionGeneral;
+            }
+          }
+          break; // No buscar más en esta base, pasar a la siguiente
+        }
+      }
+    } catch(e) {
+      _diagErrores.push(bases[b] + ':' + (e.message || String(e)));
+      Logger.log('[MISCURSOS] ERROR en base ' + bases[b] + ': ' + e.message);
+    }
+  }
+  
+  Logger.log('[MISCURSOS] Bases leidas: ' + _diagBasesLeidas.join(' | ') + ' | Encontrado en: ' + (basesEncontradas.length > 0 ? basesEncontradas.join(',') : 'NINGUNA'));
+  if (_diagErrores.length > 0) {
+    Logger.log('[MISCURSOS] Errores: ' + _diagErrores.join(' | '));
+  }
+  
+  if (!empFinal) {
+    var errMsg = 'No se encontraron cursos para ' + email + '.';
+    if (_diagErrores.length > 0) {
+      errMsg += ' (Errores en bases: ' + _diagErrores.map(function(e) { return e.split(':')[0]; }).join(', ') + ')';
+    }
+    return { success: false, error: errMsg };
+  }
+  
+  if (basesEncontradas.length > 1) {
+    _log('[V6-MISCURSOS] BP=' + empFinal.bp + ' consolidado de ' + basesEncontradas.length + ' bases: ' + basesEncontradas.join(', '));
+  }
+  
+  var emp = empFinal;
+  var bk = baseFinal;
+  
+  // Cross-reference con PLANIFICACION: leer STATUS REALIZACION
+  var statusRealizMap = leerStatusRealizacionPlan(bk);
+  
+  (emp.cursos || []).forEach(function(c) {
+    var sigla = normalizarSigla(c.sigla || '');
+    var key = emp.bp + '|' + sigla;
+    var srVal = statusRealizMap[key];
+    if (srVal) {
+      c.statusRealizacion = srVal;
+    }
+  });
+  
+  // Deduplicar cursos (dentro de la persona, post-merge)
+  emp.cursos = deduplicarCursos(emp.cursos, emp.bp, statusRealizMap);
+  
+  // Mostrar cursos relevantes (excluir SIN DATO y NO_APLICA)
+  var cursosVisibles = [];
+  (emp.cursos || []).forEach(function(c) {
+    if (c.status === 'SIN DATO' || c.status === 'NO_APLICA') return;
+    if (c.status === 'COMPLETADO') c.status = 'HABILITADO';
+    if (c.status === 'PROGRAMAR') c.status = 'POR VENCER';
+    if (c.dias === undefined || c.dias === null) c.dias = '';
+    if (!c.vencimiento) c.vencimiento = '-';
+    cursosVisibles.push(c);
+  });
+  emp.cursos = cursosVisibles;
+  
+  // Recalcular conteos
+  var hab = 0, pv = 0, venc = 0;
+  cursosVisibles.forEach(function(c) {
+    if (c.status === 'HABILITADO') hab++;
+    else if (c.status === 'POR VENCER') pv++;
+    else if (c.status === 'VENCIDO') venc++;
+  });
+  emp.totalCursos = cursosVisibles.length;
+  emp.habilitados = hab;
+  emp.porVencer = pv;
+  emp.vencidos = venc;
+  emp.programar = 0;
+  emp.cumplimiento = cursosVisibles.length > 0 ? Math.round(((hab + pv) / cursosVisibles.length) * 100) : 100;
+  
+  if (emp.habilitacionGeneral === 'INHABILITADO' && venc === 0) {
+    emp.inhabilitacionMotivo = 'Estatus de Funcionario (columna de la hoja base)';
+  }
+  
+  Logger.log('[MISCURSOS] OK: ' + cursosVisibles.length + ' cursos visibles (' + (new Date().getTime() - _t0) + 'ms)');
+  return { success: true, empleado: emp, base: bk, basesConsolidadas: basesEncontradas };
+}
+
+/**
+ * DIAGNOSTICO: Ejecutar desde el editor de GAS para verificar getMisCursos.
+ * Uso: Seleccionar esta funcion en el editor y dar Run.
+ * Verifica que leerHoja funcione y que el email del usuario se encuentre en las bases.
+ */
+function diagnosticoMisCursos() {
+  var email = Session.getActiveUser().getEmail().toLowerCase();
+  Logger.log('=== DIAGNOSTICO MIS CURSOS ===');
+  Logger.log('Email sesion: ' + email);
+  var bases = ['CHILE', 'RAMPA', 'LATAM', 'NAM'];
+  for (var b = 0; b < bases.length; b++) {
+    try {
+      var emps = leerHoja(bases[b], 'base');
+      var encontrado = false;
+      var totalConCorreo = 0;
+      for (var i = 0; i < emps.length; i++) {
+        if (emps[i].correo) totalConCorreo++;
+        if ((emps[i].correo || '').toLowerCase() === email) {
+          encontrado = true;
+          Logger.log('[' + bases[b] + '] ENCONTRADO: BP=' + emps[i].bp + ' Nombre=' + emps[i].nombre + ' Cursos=' + (emps[i].cursos ? emps[i].cursos.length : 0));
+        }
+      }
+      Logger.log('[' + bases[b] + '] Total empleados: ' + emps.length + ' | Con correo: ' + totalConCorreo + ' | Usuario encontrado: ' + encontrado);
+    } catch(e) {
+      Logger.log('[' + bases[b] + '] ERROR: ' + e.message);
+    }
+  }
+  Logger.log('=== Ahora probando getMisCursos() ===');
+  var resultado = getMisCursos(email);
+  Logger.log('Resultado: success=' + resultado.success + ' | error=' + (resultado.error || 'ninguno'));
+  if (resultado.success && resultado.empleado) {
+    Logger.log('Empleado: ' + resultado.empleado.nombre + ' | Cursos: ' + (resultado.empleado.cursos ? resultado.empleado.cursos.length : 0) + ' | Base: ' + resultado.base);
+  }
+  Logger.log('=== FIN DIAGNOSTICO ===');
+  return resultado;
+}

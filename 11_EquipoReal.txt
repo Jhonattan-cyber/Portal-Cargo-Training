@@ -1,0 +1,609 @@
+/**
+ * V44: FUENTE ÚNICA DE VERDAD — Construye el equipo real de un jefe.
+ * Tanto getMiEquipo como getForecastDataByBase DEBEN usar esta función
+ * para garantizar que el universo de personas sea idéntico.
+ * 
+ * @param {string} email - Email del usuario
+ * @returns {Object} { success, equipoPersonas, equipoBPs, totalEquipo, totalActivos, totalNI,
+ *                      niBPsList, actBPsList, nombreUsuario, bpUsuario, baseUsuario, allEmpleados }
+ */
+function getEquipoRealBPs(email, fuente, opciones) {
+  email = (email || '').toString().trim().toLowerCase();
+  if (!email) return { success: false, error: 'Email vacío' };
+  opciones = opciones || {};
+  
+  // V47: Normalizar parámetro fuente → PHH, RAMPA o CONSOLIDADO (default)
+  fuente = (fuente || 'CONSOLIDADO').toString().toUpperCase().trim();
+  if (fuente !== 'PHH' && fuente !== 'RAMPA' && fuente !== 'PLAN_SINGLE') fuente = 'CONSOLIDADO';
+  
+  _auditLog('[V7-EQUIPO-REAL] START email="' + email + '" fuente="' + fuente + '" BUILD=' + BUILD_GS);
+  
+  var nombreUsuario = '';
+  var usuarioEncontrado = false;
+  var baseUsuario = '';
+  var bpUsuario = '';
+  
+  var bases = ['CHILE', 'RAMPA', 'LATAM', 'NAM'];
+  var allEmpleados = {};
+  
+  // Paso 1: Leer todas las bases y buscar usuario por email
+  for (var b = 0; b < bases.length; b++) {
+    var bk = bases[b];
+    try {
+      var empleados = leerHoja(bk, 'base');
+      allEmpleados[bk] = empleados;
+      if (!usuarioEncontrado) {
+        for (var i = 0; i < empleados.length; i++) {
+          var e = empleados[i];
+          if ((e.correo || '').toString().trim().toLowerCase() === email) {
+            nombreUsuario = (e.nombre || '').toString().trim();
+            baseUsuario = bk;
+            bpUsuario = String(e.bp || '').trim();
+            usuarioEncontrado = true;
+            break;
+          }
+        }
+      }
+    } catch(err) {
+      _log('[V4-EQUIPO-REAL] Error leyendo ' + bk + ': ' + err.message);
+    }
+  }
+  
+  // Paso 2: Buscar en Admins/Jefes si no se encontró en bases
+  if (!usuarioEncontrado) {
+    try {
+      var ss = getSpreadsheet('MAESTRO');
+      var shAdmin = ss.getSheetByName('Admins');
+      if (shAdmin) {
+        var admins = shAdmin.getDataRange().getDisplayValues();
+        for (var i = 1; i < admins.length; i++) {
+          var aEmail = (admins[i][1] || '').toString().trim().toLowerCase();
+          if (aEmail === email) {
+            nombreUsuario = (admins[i][2] || '').toString().trim();
+            bpUsuario = String(admins[i][0] || '').trim();
+            usuarioEncontrado = true;
+            // V100-FIX: Inferir baseUsuario
+            if (!baseUsuario && bpUsuario) {
+              for (var abk = 0; abk < bases.length; abk++) {
+                var aEmps = allEmpleados[bases[abk]] || [];
+                for (var ae = 0; ae < aEmps.length; ae++) {
+                  if (String(aEmps[ae].bp || '').trim() === bpUsuario) { baseUsuario = bases[abk]; break; }
+                }
+                if (baseUsuario) break;
+              }
+            }
+            break;
+          }
+          var cEmail = (admins[i][11] || '').toString().trim().toLowerCase();
+          if (cEmail === email) {
+            nombreUsuario = (admins[i][12] || '').toString().trim();
+            bpUsuario = String(admins[i][10] || '').trim();
+            usuarioEncontrado = true;
+            // V100-FIX: Inferir baseUsuario
+            if (!baseUsuario && bpUsuario) {
+              for (var cbk = 0; cbk < bases.length; cbk++) {
+                var cEmps = allEmpleados[bases[cbk]] || [];
+                for (var ce = 0; ce < cEmps.length; ce++) {
+                  if (String(cEmps[ce].bp || '').trim() === bpUsuario) { baseUsuario = bases[cbk]; break; }
+                }
+                if (baseUsuario) break;
+              }
+            }
+            break;
+          }
+        }
+      }
+      if (!usuarioEncontrado) {
+        var shJefes = ss.getSheetByName('Jefes');
+        if (shJefes) {
+          var jefesData = shJefes.getDataRange().getDisplayValues();
+          for (var j = 1; j < jefesData.length; j++) {
+            var jEmail = (jefesData[j][0] || '').toString().trim().toLowerCase(); // V88: col A = Mail
+            if (jEmail === email) {
+              nombreUsuario = (jefesData[j][1] || '').toString().trim(); // V88: col B = Nombre
+              bpUsuario = String(jefesData[j][2] || '').trim();          // V88: col C = BP
+              usuarioEncontrado = true;
+              // V100-FIX: Inferir baseUsuario buscando el BP o email en allEmpleados
+              if (!baseUsuario && bpUsuario) {
+                for (var jbk = 0; jbk < bases.length; jbk++) {
+                  var jEmps = allEmpleados[bases[jbk]] || [];
+                  for (var je = 0; je < jEmps.length; je++) {
+                    if (String(jEmps[je].bp || '').trim() === bpUsuario || (jEmps[je].correo || '').toString().trim().toLowerCase() === email) {
+                      baseUsuario = bases[jbk];
+                      break;
+                    }
+                  }
+                  if (baseUsuario) break;
+                }
+              }
+              break;
+            }
+          }
+        }
+      }
+    } catch(err) {
+      _log('[V4-EQUIPO-REAL] Error leyendo Admins/Jefes: ' + err.message);
+    }
+  }
+  
+  // Paso 3: Fallback a getUsuarioActual
+  if (!nombreUsuario) {
+    try {
+      var usr = getUsuarioActual();
+      if (usr && usr.nombre) {
+        nombreUsuario = usr.nombre;
+        baseUsuario = usr.base || '';
+        bpUsuario = usr.bp || '';
+        usuarioEncontrado = true;
+      }
+    } catch(e) {}
+  }
+  
+  if (!nombreUsuario) {
+    _log('[V4-EQUIPO-REAL] Usuario no encontrado: ' + email);
+    return { success: false, error: 'Usuario no encontrado', equipoPersonas: [], equipoBPs: {}, totalEquipo: 0, totalActivos: 0, totalNI: 0, niBPsList: [], actBPsList: [], allEmpleados: allEmpleados };
+  }
+  
+  // Paso 4: Construir lista de todos los empleados y llamar buildArbolJerarquico
+  var todosEmps = [];
+  for (var b = 0; b < bases.length; b++) {
+    var bk = bases[b];
+    var emps = allEmpleados[bk] || [];
+    emps.forEach(function(e) { e.baseRegion = e.baseRegion || bk; });
+    todosEmps = todosEmps.concat(emps);
+  }
+  
+  // V99-REGLA-NEGOCIO: WC SAFETY solo aplica a empleados de NAM.
+  // PHH/LATAM, RAMPA, CHILE no usan concepto WC.
+  // Verificar statusRaw y statusBase por "WC" SOLO para baseRegion=NAM.
+  var _wcSafetyBefore = todosEmps.length;
+  var _wcSafetyRemoved = [];
+  todosEmps = todosEmps.filter(function(e) {
+    var base = (e.baseRegion || '').toUpperCase();
+    if (base !== 'NAM') return true; // V99: Solo filtrar NAM
+    var st = String(e.statusRaw || e.status || '').toUpperCase();
+    var stBase = String(e.statusBase || '').toUpperCase();
+    if (st.indexOf('WC') >= 0 || stBase.indexOf('WC') >= 0) {
+      _wcSafetyRemoved.push(String(e.bp));
+      _wcBPsSession[String(e.bp)] = true;
+      return false;
+    }
+    return true;
+  });
+  if (_wcSafetyRemoved.length > 0) {
+    _auditLog('[V99-WC-SAFETY-NAM] Removidos ' + _wcSafetyRemoved.length + ' WC de todosEmps NAM (de ' + _wcSafetyBefore + '). BPs: ' + _wcSafetyRemoved.slice(0, 20).join(','));
+  }
+  
+  // ═══ V47b: PRE-PROCESO según FUENTE ═══
+  // Paso 4a: Clasificar BPs por base (solo LATAM vs RAMPA)
+  var bpsPorBase = { LATAM: {}, RAMPA: {} };
+  todosEmps.forEach(function(e) {
+    var bp = String(e.bp || '').trim();
+    var base = (e.baseRegion || '').toUpperCase();
+    if (bp && (base === 'LATAM' || base === 'RAMPA')) {
+      bpsPorBase[base][bp] = e;
+    }
+  });
+  
+  // Paso 4b: Identificar duplicados (BPs que existen en AMBAS bases)
+  var duplicadosBPs = {};
+  var _soloPHH = [], _soloRAMPA = [], _duplicados = [];
+  for (var dpKey in bpsPorBase.LATAM) {
+    if (bpsPorBase.RAMPA[dpKey]) {
+      duplicadosBPs[dpKey] = true;
+      _duplicados.push(dpKey);
+    } else {
+      _soloPHH.push(dpKey);
+    }
+  }
+  for (var drKey in bpsPorBase.RAMPA) {
+    if (!bpsPorBase.LATAM[drKey]) {
+      _soloRAMPA.push(drKey);
+    }
+  }
+  
+  _log('[V7b-CLASIF] soloPHH=' + _soloPHH.length + ' soloRAMPA=' + _soloRAMPA.length + ' duplicados=' + _duplicados.length);
+  if (_duplicados.length > 0) {
+    _log('[V7b-CLASIF] duplicados: ' + _duplicados.slice(0, 20).join(', '));
+  }
+  
+  // Paso 4c: Pre-filtrar todosEmps según FUENTE (para PHH/RAMPA)
+  // Esto se hace ANTES de buildArbolJerarquico para que el árbol
+  // solo contenga la versión correcta de cada BP duplicado.
+  if (fuente === 'PHH') {
+    var _beforeCount = todosEmps.length;
+    todosEmps = todosEmps.filter(function(e) {
+      var bp = String(e.bp || '').trim();
+      var base = (e.baseRegion || '').toUpperCase();
+      // Remover entradas RAMPA de BPs que también existen en LATAM
+      if (base === 'RAMPA' && duplicadosBPs[bp]) return false;
+      return true;
+    });
+    _log('[V7b-PREFILTRO] fuente=PHH: removidos ' + (_beforeCount - todosEmps.length) + ' registros RAMPA duplicados');
+  } else if (fuente === 'RAMPA') {
+    var _beforeCount2 = todosEmps.length;
+    todosEmps = todosEmps.filter(function(e) {
+      var bp = String(e.bp || '').trim();
+      var base = (e.baseRegion || '').toUpperCase();
+      // Remover entradas LATAM de BPs que también existen en RAMPA
+      if (base === 'LATAM' && duplicadosBPs[bp]) return false;
+      return true;
+    });
+    _log('[V7b-PREFILTRO] fuente=RAMPA: removidos ' + (_beforeCount2 - todosEmps.length) + ' registros LATAM duplicados');
+  }
+  // CONSOLIDADO: mantener TODOS → el merge se hace en Paso 5
+  
+  _log('[V7b-EQUIPO-REAL] user="' + nombreUsuario + '" email=' + email + ' bp=' + bpUsuario + ' base=' + baseUsuario + ' | totalEmpleados=' + todosEmps.length + ' fuente=' + fuente + ' noClimb=' + (opciones.noClimb ? 'SI' : 'NO'));
+
+  // V92: Construir mapa nombreToBP para matching preciso por BP
+  // Esto ELIMINA falsos positivos del fuzzy name matching
+  var _nombreToBP = {};
+  for (var ntbi = 0; ntbi < todosEmps.length; ntbi++) {
+    var _ntbNom = normKey(todosEmps[ntbi].nombre || '');
+    var _ntbBP = String(todosEmps[ntbi].bp || '').trim();
+    if (_ntbNom && _ntbBP && !_nombreToBP[_ntbNom]) {
+      _nombreToBP[_ntbNom] = _ntbBP;
+    }
+  }
+  _log('[V92-BP-MAP] nombreToBP: ' + Object.keys(_nombreToBP).length + ' entries');
+
+  // V96: Agregar JEFEs de hoja Jefes al nombreToBP map (mismo fix que en getEquipoRealBPs)
+  try {
+    var _ssJef96 = getSpreadsheet('MAESTRO');
+    var _shJef96 = _ssJef96 ? _ssJef96.getSheetByName('Jefes') : null;
+    if (_shJef96) {
+      var _jd96 = _shJef96.getDataRange().getDisplayValues();
+      var _jc96 = 0;
+      for (var _ji96 = 1; _ji96 < _jd96.length; _ji96++) {
+        var _jn96 = normKey(_jd96[_ji96][1] || '');
+        var _jb96 = String(_jd96[_ji96][2] || '').trim();
+        if (_jn96 && _jb96 && !_nombreToBP[_jn96]) {
+          _nombreToBP[_jn96] = _jb96;
+          _jc96++;
+        }
+      }
+      _log('[V96-BP-MAP] Agregados ' + _jc96 + ' JEFEs desde hoja Jefes | total entries: ' + Object.keys(_nombreToBP).length);
+    }
+  } catch(e) { _log('[V96-BP-MAP] Error leyendo Jefes: ' + e.message); }
+
+  var arbol = buildArbolJerarquico(nombreUsuario, todosEmps, {email: email, bp: bpUsuario, preferLowestRole: !!opciones.noClimb, nombreToBP: _nombreToBP});
+  var equipo = (arbol && arbol.personas) ? arbol.personas : [];
+  // Paso 4d (CONSOLIDADO): Inyectar versiones faltantes de BPs duplicados
+  // buildArbolJerarquico deduplica por BP internamente (solo guarda 1ra ocurrencia).
+  // Para CONSOLIDADO necesitamos AMBAS versiones para que el merge en Paso 5 funcione.
+  if (fuente === 'CONSOLIDADO' && _duplicados.length > 0) {
+    var equipoBPSet = {};
+    equipo.forEach(function(e) {
+      var bp = String(e.bp || '').trim();
+      var base = (e.baseRegion || '').toUpperCase();
+      equipoBPSet[bp] = base;
+    });
+    
+    var inyectados = 0;
+    for (var di = 0; di < _duplicados.length; di++) {
+      var dBP = _duplicados[di];
+      if (equipoBPSet[dBP]) {
+        var existBase = equipoBPSet[dBP];
+        var missingBase = (existBase === 'LATAM') ? 'RAMPA' : 'LATAM';
+        var missingEntry = bpsPorBase[missingBase][dBP];
+        if (missingEntry) {
+          equipo.push(missingEntry);
+          inyectados++;
+          _log('[V7b-INJECT] BP=' + dBP + ' inyectado desde ' + missingBase + ' (existía en ' + existBase + ')');
+        }
+      }
+    }
+    _log('[V7b-INJECT] Total inyectados para merge: ' + inyectados + ' de ' + _duplicados.length + ' duplicados');
+  }
+  
+  // Paso 5: V47 — Deduplicar por BP según FUENTE seleccionada
+  // Modos:
+  //   CONSOLIDADO → merge inteligente (mergeCursosMultiBase) — comportamiento anterior
+  //   PHH → Si BP duplicado en LATAM y RAMPA, mantener SOLO el registro LATAM (PHH)
+  //   RAMPA → Si BP duplicado en LATAM y RAMPA, mantener SOLO el registro RAMPA
+  var bpVisto = {};
+  var equipoDedup = [];
+  equipo.forEach(function(e) {
+    var bpKey = String(e.bp).trim();
+    var baseNueva = (e.baseRegion || '').toUpperCase();
+    
+    if (bpVisto[bpKey] !== undefined) {
+      var existingIdx = bpVisto[bpKey];
+      var existing = equipoDedup[existingIdx];
+      var baseExist = (existing.baseRegion || '').toUpperCase();
+      
+      _log('[V7-DEDUP] BP=' + bpKey + ' duplicado: ' + baseExist + ' + ' + baseNueva + ' | fuente=' + fuente);
+      
+      if (fuente === 'PHH') {
+        // Modo PHH: mantener registro LATAM, descartar RAMPA
+        if (baseExist === 'LATAM' && baseNueva === 'RAMPA') {
+          _log('[V7-PHH] KEEP LATAM, SKIP RAMPA para BP=' + bpKey);
+          return; // Mantener existing (LATAM)
+        }
+        if (baseExist === 'RAMPA' && baseNueva === 'LATAM') {
+          _log('[V7-PHH] REPLACE RAMPA → LATAM para BP=' + bpKey);
+          equipoDedup[existingIdx] = e; // Reemplazar con LATAM
+          return;
+        }
+      } else if (fuente === 'RAMPA') {
+        // Modo RAMPA: mantener registro RAMPA, descartar LATAM (PHH)
+        if (baseExist === 'RAMPA' && baseNueva === 'LATAM') {
+          _log('[V7-RAMPA] KEEP RAMPA, SKIP LATAM para BP=' + bpKey);
+          return; // Mantener existing (RAMPA)
+        }
+        if (baseExist === 'LATAM' && baseNueva === 'RAMPA') {
+          _log('[V7-RAMPA] REPLACE LATAM → RAMPA para BP=' + bpKey);
+          equipoDedup[existingIdx] = e; // Reemplazar con RAMPA
+          return;
+        }
+      }
+      
+      // Modo CONSOLIDADO (o duplicado entre bases que no son PHH/RAMPA): merge inteligente
+      var _beforeCursos = (existing.cursos || []).map(function(cc) { return cc.sigla + '(' + cc.status + '|' + (cc.vencimiento || '-') + ')'; });
+      var _newCursos = (e.cursos || []).map(function(cc) { return cc.sigla + '(' + cc.status + '|' + (cc.vencimiento || '-') + ')'; });
+      _log('[V7-MERGE] BEFORE base1(' + baseExist + '): ' + _beforeCursos.join(', '));
+      _log('[V7-MERGE] NEW base2(' + baseNueva + '): ' + _newCursos.join(', '));
+      existing.cursos = mergeCursosMultiBase(existing.cursos || [], e.cursos || [], bpKey);
+      var _afterCursos = (existing.cursos || []).map(function(cc) { return cc.sigla + '(' + cc.status + '|' + (cc.vencimiento || '-') + ')'; });
+      _log('[V7-MERGE] AFTER merge: ' + _afterCursos.join(', '));
+      if (!existing.habilitacionGeneral && e.habilitacionGeneral) {
+        existing.habilitacionGeneral = e.habilitacionGeneral;
+      }
+      if (!existing._mergedFromBases) existing._mergedFromBases = [existing.baseRegion];
+      existing._mergedFromBases.push(e.baseRegion || '?');
+      return;
+    }
+    bpVisto[bpKey] = equipoDedup.length;
+    equipoDedup.push(e);
+  });
+  equipo = equipoDedup;
+  
+  // V49: Paso 5b — Filtrar equipo según fuente seleccionada
+  // Para RAMPA: solo personas que existen en hoja RAMPA
+  // Para PHH: solo personas que existen en hoja LATAM (o no son exclusivas de RAMPA)
+  if (fuente === 'RAMPA') {
+    var _beforeFuente = equipo.length;
+    equipo = equipo.filter(function(e) {
+      var bp = String(e.bp || '').trim();
+      return !!bpsPorBase.RAMPA[bp];
+    });
+    _log('[V9-FILTER] fuente=RAMPA: ' + _beforeFuente + ' → ' + equipo.length + ' personas (solo con datos RAMPA)');
+  } else if (fuente === 'PHH') {
+    var _beforeFuente2 = equipo.length;
+    equipo = equipo.filter(function(e) {
+      var bp = String(e.bp || '').trim();
+      return !!bpsPorBase.LATAM[bp] || !bpsPorBase.RAMPA[bp];
+    });
+    _log('[V9-FILTER] fuente=PHH: ' + _beforeFuente2 + ' → ' + equipo.length + ' personas (sin RAMPA-only)');
+  }
+  
+  // Paso 6: Enriquecer con JAs para ejecutivos
+  // V65: Saltar este paso para Mi Equipo (noClimb) — no agregar jefes superiores al equipo
+  // Solo aplica para Forecast/vistas ejecutivas donde se necesita ver la cadena completa
+  if (!opciones.noClimb) {
+  var nombreJefeNorm = normNombre(nombreUsuario);
+  var jasUnicas = {};
+  equipo.forEach(function(e) {
+    var jaN = normNombre(e.jefeArea);
+    if (jaN && jaN !== nombreJefeNorm && jaN !== normNombre(e.nombre)) {
+      if (!jasUnicas[jaN]) jasUnicas[jaN] = { nombre: e.jefeArea, count: 0 };
+      jasUnicas[jaN].count++;
+    }
+  });
+  var bpEnEquipo = {};
+  equipo.forEach(function(e) { bpEnEquipo[e.bp] = true; });
+  var jasAgregados = 0;
+  for (var b2 = 0; b2 < bases.length; b2++) {
+    var bk2 = bases[b2];
+    var emps2 = allEmpleados[bk2] || [];
+    for (var i2 = 0; i2 < emps2.length; i2++) {
+      var emp2 = emps2[i2];
+      if (bpEnEquipo[emp2.bp]) continue;
+      // V44-FIX: NUNCA re-agregar al propio jefe (por BP o por email)
+      if (bpUsuario && String(emp2.bp) === bpUsuario) continue;
+      if (email && (emp2.correo || '').toLowerCase().trim() === email) continue;
+      var nN2 = normNombre(emp2.nombre);
+      if (jasUnicas[nN2]) {
+        emp2.baseRegion = bk2;
+        emp2.esJefeArea = true;
+        equipo.push(emp2);
+        bpEnEquipo[emp2.bp] = true;
+        jasAgregados++;
+      }
+    }
+  }
+  if (jasAgregados > 0) {
+    _log('[V4-EQUIPO-REAL] JAs agregados: ' + jasAgregados);
+  }
+  } else {
+    _log('[V5-MI-EQUIPO] Paso 6 OMITIDO (noClimb=true): no agregar JefeArea superior al equipo');
+  }
+  
+  // ═══ V44-FIX: SANITY CHECK FINAL — Excluir BP del jefe si tiene subordinados ═══
+  // El jefe NUNCA debe contarse como parte de su propio equipo.
+  // Solo se permite si tiene 0 subordinados (SELF-AS-SUBORDINATE).
+  if (bpUsuario) {
+    var jefeDentro = false;
+    for (var sc = 0; sc < equipo.length; sc++) {
+      if (String(equipo[sc].bp) === bpUsuario) { jefeDentro = true; break; }
+    }
+    if (jefeDentro && equipo.length > 1) {
+      _log('[V4-FIX] REMOVIENDO al jefe BP=' + bpUsuario + ' del equipo (tiene ' + (equipo.length - 1) + ' subordinados)');
+      equipo = equipo.filter(function(e) { return String(e.bp) !== bpUsuario; });
+    } else if (jefeDentro && equipo.length === 1) {
+      _log('[V4-FIX] Jefe BP=' + bpUsuario + ' es SELF-AS-SUBORDINATE (0 subordinados, se mantiene)');
+    } else {
+      _log('[V4-FIX] Jefe BP=' + bpUsuario + ' NO está en el equipo (correcto)');
+    }
+  }
+  
+  // Paso 7: Calcular tieneEquipo/equipoCount
+  var jefeSubMap = {};
+  for (var b3 = 0; b3 < bases.length; b3++) {
+    var bk3 = bases[b3];
+    var emps3 = allEmpleados[bk3] || [];
+    for (var i3 = 0; i3 < emps3.length; i3++) {
+      var emp3 = emps3[i3];
+      var jdN3 = normNombre(emp3.jefeDirecto);
+      var jaN3 = normNombre(emp3.jefeArea);
+      if (jdN3) jefeSubMap[jdN3] = (jefeSubMap[jdN3] || 0) + 1;
+      if (jaN3 && jaN3 !== jdN3) jefeSubMap[jaN3] = (jefeSubMap[jaN3] || 0) + 1;
+    }
+  }
+  equipo.forEach(function(e) {
+    var nNombre = normNombre(e.nombre);
+    var subCount = jefeSubMap[nNombre] || 0;
+    e.tieneEquipo = subCount > 0;
+    e.equipoCount = subCount;
+  });
+  
+  // Paso 8: V66 — Filtro WC definitivo ANTES de contar colaboradores
+  // Excluir BPs marcados como WC (cross-base o sesión) del equipo final
+  var wcSet = {};
+  var wcFromSession = Object.keys(_wcBPsSession).length;
+  Object.keys(_wcBPsSession).forEach(function(bp) { wcSet[bp] = true; });
+  // También cargar WC BPs del caché de cada base
+  var wcPerBase = {};
+  bases.forEach(function(bk) {
+    try {
+      var cachedWC = getFromCache(bk, 'wcBPs');
+      if (cachedWC && Array.isArray(cachedWC)) {
+        wcPerBase[bk] = cachedWC.length;
+        cachedWC.forEach(function(bp) { wcSet[bp] = true; });
+      } else {
+        wcPerBase[bk] = 0;
+      }
+    } catch(e) { wcPerBase[bk] = -1; }
+  });
+  var wcBPsList = Object.keys(wcSet);
+  // V66: Logear detalle de fuentes WC por base para debug NAM
+  var wcPerBaseStr = Object.keys(wcPerBase).map(function(bk) { return bk + '=' + wcPerBase[bk]; }).join(', ');
+  _auditLog('[V66-WC-AUDIT] session=' + wcFromSession + ' | perBase=[' + wcPerBaseStr + '] | totalWCSet=' + wcBPsList.length + ' | equipoSize=' + equipo.length + ' | BUILD=' + BUILD_GS);
+  if (wcBPsList.length > 0) {
+    var equipoAntes = equipo.length;
+    // V99-REGLA-NEGOCIO: WC solo aplica a empleados de NAM.
+    // No excluir empleados de PHH/LATAM/RAMPA/CHILE por WC de Control Norte.
+    equipo = equipo.filter(function(e) {
+      var eBase = (e.baseRegion || '').toUpperCase();
+      if (eBase !== 'NAM') return true; // V99: Solo filtrar NAM
+      return !wcSet[String(e.bp)];
+    });
+    var removidosWC = equipoAntes - equipo.length;
+    if (removidosWC > 0) {
+      _auditLog('[V99-WC-EQUIPO-NAM] Excluidos ' + removidosWC + ' WC NAM del equipo (de ' + equipoAntes + ' a ' + equipo.length + ').');
+    } else {
+      _auditLog('[V99-WC-EQUIPO-NAM] 0 WC NAM en equipo (wcSet=' + wcBPsList.length + ', equipo=' + equipo.length + ').');
+    }
+  } else {
+    _auditLog('[V66-WC-EQUIPO] WARNING: wcSet vacío — _wcBPsSession vacío y cache sin wcBPs. Forzar clearAllCache() para re-leer hojas.');
+  }
+  
+  // Paso 9: Construir resultado con BPs, NI y activos — por BP único
+  var equipoBPs = {};
+  var niBPsList = [];
+  var actBPsList = [];
+  var totalNI = 0;
+  equipo.forEach(function(e) {
+    var bpStr = String(e.bp);
+    if (equipoBPs[bpStr]) return; // V65: BP único — no contar duplicados
+    equipoBPs[bpStr] = true;
+    if (e.esNuevoIngreso) {
+      totalNI++;
+      niBPsList.push(e.bp);
+    } else {
+      actBPsList.push(e.bp);
+    }
+  });
+  
+  _log('[V7-EQUIPO-REAL] RESULTADO: total=' + equipo.length + ' activos=' + actBPsList.length + ' NI=' + totalNI + ' fuente=' + fuente);
+  _log('[V7-EQUIPO-REAL] BPs ACTIVOS (' + actBPsList.length + '): ' + actBPsList.join(', '));
+  _log('[V7-EQUIPO-REAL] BPs NI (' + niBPsList.length + '): ' + niBPsList.join(', '));
+
+  // V100-CLEAN: Log resultado con _auditLog para que siempre sea visible
+  _auditLog('[V100-EQUIPO] email=' + email + ' user="' + nombreUsuario + '" bp=' + bpUsuario + ' base=' + baseUsuario +
+    ' | equipo=' + equipo.length + ' activos=' + actBPsList.length + ' NI=' + totalNI +
+    ' fuente=' + fuente + ' | rol=' + (arbol ? arbol.rolAutoDetectado : 'N/A') +
+    ' | BUILD=' + BUILD_GS);
+  
+  // V47c: Verificar cuáles BPs de soloRAMPA y soloPHH están en el equipo final
+  var equipoFinalBPs = {};
+  equipo.forEach(function(e) { equipoFinalBPs[String(e.bp || '').trim()] = (e.baseRegion || '?'); });
+  var _soloRampaEnEquipo = _soloRAMPA.filter(function(bp) { return equipoFinalBPs[bp]; });
+  var _soloRampaFuera = _soloRAMPA.filter(function(bp) { return !equipoFinalBPs[bp]; });
+  var _soloPHHEnEquipo = _soloPHH.filter(function(bp) { return equipoFinalBPs[bp]; });
+  var _soloPHHFuera = _soloPHH.filter(function(bp) { return !equipoFinalBPs[bp]; });
+  _log('[V7c-EQUIPO] soloRAMPA: ' + _soloRampaEnEquipo.length + ' en equipo, ' + _soloRampaFuera.length + ' FUERA');
+  if (_soloRampaFuera.length > 0) {
+    _log('[V7c-EQUIPO] soloRAMPA FUERA del equipo (NO encontrados en jerarquía): ' + _soloRampaFuera.slice(0, 30).join(', '));
+  }
+  _log('[V7c-EQUIPO] soloPHH: ' + _soloPHHEnEquipo.length + ' en equipo, ' + _soloPHHFuera.length + ' FUERA');
+  if (_soloPHHFuera.length > 0) {
+    _log('[V7c-EQUIPO] soloPHH FUERA del equipo: ' + _soloPHHFuera.slice(0, 30).join(', '));
+  }
+  _log('[V7-EQUIPO-REAL] ══════ END getEquipoRealBPs ══════');
+  
+  // V47b: Debug de clasificación multi-base
+  var _v47Debug = {
+    fuente: fuente,
+    soloPHH_BPs: _soloPHH,
+    soloRAMPA_BPs: _soloRAMPA,
+    duplicados_BPs: _duplicados,
+    totalSoloPHH: _soloPHH.length,
+    totalSoloRAMPA: _soloRAMPA.length,
+    totalDuplicados: _duplicados.length,
+    soloRampaEnEquipo: _soloRampaEnEquipo.length,
+    soloRampaFuera: _soloRampaFuera.length,
+    soloPHHEnEquipo: _soloPHHEnEquipo.length,
+    soloPHHFuera: _soloPHHFuera.length,
+    equipoFinal_BPs_length: equipo.length
+  };
+  
+  // V47b: Para duplicados, detallar qué aportó cada base (solo si hay duplicados y fuente=CONSOLIDADO)
+  if (fuente === 'CONSOLIDADO' && _duplicados.length > 0) {
+    var mergeDetalle = [];
+    equipo.forEach(function(e) {
+      var bp = String(e.bp || '').trim();
+      if (duplicadosBPs[bp] && e._mergedFromBases) {
+        var detCursos = (e.cursos || []).map(function(c) {
+          return c.sigla + '(' + c.status + '|' + (c.vencimiento || '-') + '|dias=' + (c.dias !== undefined ? c.dias : '?') + ')';
+        });
+        mergeDetalle.push({
+          bp: bp,
+          nombre: (e.nombre || '').substring(0, 40),
+          mergedFromBases: e._mergedFromBases,
+          cursosResult: detCursos
+        });
+      }
+    });
+    _v47Debug.mergeDetalle = mergeDetalle;
+  }
+  
+  return {
+    success: true,
+    equipoPersonas: equipo,
+    equipoBPs: equipoBPs,
+    totalEquipo: equipo.length,
+    totalActivos: actBPsList.length,
+    totalNI: totalNI,
+    niBPsList: niBPsList,
+    actBPsList: actBPsList,
+    nombreUsuario: nombreUsuario,
+    bpUsuario: bpUsuario,
+    baseUsuario: baseUsuario,
+    allEmpleados: allEmpleados,
+    arbol: arbol,
+    fuente: fuente,
+    _v47Debug: _v47Debug,
+    _wcAudit: {
+      beforeWC: (typeof equipoAntes !== 'undefined') ? equipoAntes : equipo.length,
+      wcSetSize: wcBPsList.length,
+      removidos: (typeof removidosWC !== 'undefined') ? removidosWC : 0,
+      afterWC: equipo.length,
+      wcPerBase: wcPerBase,
+      sampleWC: wcBPsList.slice(0, 5),
+      sampleEquipo: equipo.slice(0, 5).map(function(e) { return e.bp; }),
+      sessionCount: wcFromSession,
+      build: BUILD_GS
+    }
+  };
+}

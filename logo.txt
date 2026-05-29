@@ -1,0 +1,36 @@
+<!-- logo.html - Logo LATAM Cargo con avión de colores -->
+<script>
+// URL del logo correcto - Icono de avión con colores degradados
+var LOGO_SRC = "https://customer-assets.emergentagent.com/job_dashboard-debugger-2/artifacts/5yee4t90_Icono%20Color.png";
+</script>
+<style>
+/* Estilos para el logo */
+.logo-latam-login {
+  width: 180px;
+  height: auto;
+  max-height: 180px;
+  object-fit: contain;
+}
+.logo-latam-sidebar {
+  width: 40px;
+  height: 40px;
+  object-fit: contain;
+}
+</style>
+<script>
+// Aplicar el logo cuando el DOM esté listo
+document.addEventListener('DOMContentLoaded', function() {
+  // Logo en la pantalla de login
+  var loginLogo = document.getElementById('login-logo');
+  if (loginLogo) {
+    loginLogo.src = LOGO_SRC;
+    loginLogo.style.filter = 'none'; // Mostrar colores originales en login también
+  }
+  
+  // Logo en el sidebar
+  var sidebarLogo = document.getElementById('sidebar-logo');
+  if (sidebarLogo) {
+    sidebarLogo.src = LOGO_SRC;
+  }
+});
+</script>

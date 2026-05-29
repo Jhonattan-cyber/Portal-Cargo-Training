@@ -1,0 +1,60 @@
+<!-- ======= RESUMEN GENERAL (con tabs regionales integrados) ======= -->
+<div id="section-dashboard" class="module-section">
+
+  <!-- FILTRO + TABS REGIONALES (se generan DINÁMICAMENTE desde JavaScript) -->
+  <div id="dash-filter-container" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px;align-items:center;">
+    <span style="font-weight:700;color:#374151;font-size:13px;margin-right:4px;">Region:</span>
+    <!-- Los botones se insertan dinámicamente por generarTabsDashboard() -->
+  </div>
+
+  <!-- CONTROL DE MANDO PARA JEFES -->
+  <div id="jefe-toggle-panel" style="display:none;margin-bottom:16px;">
+    <div style="display:flex;gap:12px;align-items:center;">
+      <span style="font-weight:700;color:#374151;font-size:13px;">Vista:</span>
+      <button id="btn-mi-equipo" class="filter-btn active" onclick="toggleVistaJefe('equipo',this)" data-testid="btn-mi-equipo" style="padding:12px 24px;font-size:14px;">
+        <i class="ph ph-users-three" style="margin-right:6px;"></i> Mi Equipo Directo
+      </button>
+      <button id="btn-mi-area" class="filter-btn" onclick="toggleVistaJefe('area',this)" data-testid="btn-mi-area" style="padding:12px 24px;font-size:14px;">
+        <i class="ph ph-buildings" style="margin-right:6px;"></i> Toda mi Area
+      </button>
+    </div>
+  </div>
+
+  <!-- KPIs PRINCIPALES: Personas (Habilitacion General - Looker) -->
+  <div id="dash-kpis" data-testid="dash-kpis-personas" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:16px;"></div>
+
+  <!-- CHARTS ROW -->
+  <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:16px;">
+    <div class="card-container" style="padding:20px;">
+      <h3 style="font-size:13px;font-weight:700;color:#374151;margin-bottom:16px;text-align:center;">% HABILITACION GENERAL</h3>
+      <div style="display:flex;justify-content:center;"><canvas id="chart-semaforo" width="200" height="200"></canvas></div>
+      <div id="legend-semaforo" style="display:flex;justify-content:center;gap:14px;margin-top:12px;font-size:11px;"></div>
+    </div>
+    <div class="card-container" style="padding:20px;">
+      <h3 style="font-size:13px;font-weight:700;color:#374151;margin-bottom:16px;text-align:center;">DISTRIBUCION POR BASE</h3>
+      <div id="dash-pais-bars"></div>
+    </div>
+    <div class="card-container" style="padding:20px;">
+      <h3 style="font-size:13px;font-weight:700;color:#374151;margin-bottom:16px;text-align:center;">TOP JEFES - PERSONAS CON VENCIDOS</h3>
+      <div id="dash-jefes-bars"></div>
+    </div>
+  </div>
+
+  <!-- DONUT CURSOS -->
+  <div class="card-container" style="margin-bottom:16px;">
+    <div class="card-header" style="display:flex;justify-content:space-between;align-items:center;">
+      <h3 style="font-weight:700;color:#1e293b;">% HABILITACION POR CURSO</h3>
+    </div>
+    <div id="dash-cursos-donuts" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;padding:16px;"></div>
+  </div>
+
+  <!-- ENLACE A MI EQUIPO (sin tabla duplicada en Resumen General) -->
+  <div id="dash-regional-section" style="display:none;">
+    <div class="card-container" style="padding:20px;text-align:center;">
+      <p style="color:#64748b;font-size:13px;margin-bottom:12px;">Para ver el listado detallado de colaboradores, usa la seccion <strong>Mi Equipo</strong>.</p>
+      <button onclick="switchTab('mi-equipo',document.getElementById('nav-mi-equipo'))" data-testid="btn-ir-mi-equipo" style="padding:10px 24px;background:#4f46e5;color:white;border:none;border-radius:8px;font-weight:700;font-size:13px;cursor:pointer;">
+        <i class="ph ph-users-three" style="margin-right:6px;"></i> Ver detalle en Mi Equipo
+      </button>
+    </div>
+  </div>
+</div>

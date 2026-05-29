@@ -1,0 +1,25 @@
+<!-- ======= RAMPA SECTION ======= -->
+<div id="section-rampa" class="module-section" style="display:none;">
+  <div id="rampa-kpis" style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px;"></div>
+  <div class="card-container" style="padding:16px;margin-bottom:12px;">
+    <div style="display:flex;flex-wrap:wrap;gap:12px;align-items:center;">
+      <h3 id="rampa-title" style="font-weight:700;color:#374151;">Rampa</h3>
+      <input type="text" id="rampa-search" class="input-search" placeholder="Buscar nombre o BP..." oninput="filtrarTablaRegional('rampa')">
+      <select id="rampa-status-filter" class="select-filter" onchange="filtrarTablaRegional('rampa')">
+        <option value="">Todos</option><option value="VERDE">Verde</option><option value="AMARILLO">Amarillo</option><option value="ROJO">Rojo</option>
+      </select>
+    </div>
+  </div>
+  <div class="card-container">
+    <div style="overflow-x:auto;">
+      <table class="tabla-regional">
+        <thead><tr>
+          <th>Colaborador</th><th class="text-center">Pais</th><th class="text-center">Base</th><th class="text-center">Cursos</th>
+          <th class="text-center">Pend.</th><th class="text-center">Semaforo</th><th class="text-center">%</th><th class="text-center">Accion</th>
+        </tr></thead>
+        <tbody id="rampa-tbody"></tbody>
+      </table>
+    </div>
+    <div id="rampa-footer" class="card-footer"></div>
+  </div>
+</div>

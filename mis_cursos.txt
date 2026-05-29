@@ -1,0 +1,45 @@
+<!-- ======= MIS CURSOS SECTION ======= -->
+<div id="section-mis-cursos" class="module-section" style="display:none;">
+  <!-- Header gradient -->
+  <div style="background:linear-gradient(135deg,#1e3a8a 0%,#3b82f6 100%);border-radius:14px;padding:20px 28px;margin-bottom:16px;display:flex;justify-content:space-between;align-items:center;">
+    <div>
+      <h2 style="color:white;font-weight:800;font-size:20px;margin:0;"><i class="ph ph-notebook" style="margin-right:8px;"></i>Mis Cursos</h2>
+      <p style="color:rgba(255,255,255,0.75);font-size:13px;margin:4px 0 0;">Estado de tus habilitaciones y capacitaciones</p>
+    </div>
+    <button onclick="cargarMisCursos()" style="background:rgba(255,255,255,0.15);border:none;border-radius:50%;width:36px;height:36px;cursor:pointer;display:flex;align-items:center;justify-content:center;" title="Recargar">
+      <i class="ph ph-arrows-clockwise" style="color:white;font-size:18px;"></i>
+    </button>
+  </div>
+
+  <!-- 4 KPI cards -->
+  <div id="mis-cursos-kpis" style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px;"></div>
+
+  <!-- Filtros simplificados -->
+  <div style="background:white;border-radius:12px;padding:16px 20px;margin-bottom:16px;box-shadow:0 1px 3px rgba(0,0,0,0.06);display:flex;gap:16px;align-items:flex-end;flex-wrap:wrap;">
+    <div>
+      <label style="font-size:11px;font-weight:700;color:#64748b;display:block;margin-bottom:4px;">BUSCAR CURSO</label>
+      <input id="mc-buscar" type="text" placeholder="Nombre del curso..." oninput="filtrarMisCursosTabla()" data-testid="mc-search-input" style="padding:8px 14px;border-radius:8px;border:1px solid #e2e8f0;font-size:13px;width:220px;color:#374151;" />
+    </div>
+    <div>
+      <label style="font-size:11px;font-weight:700;color:#64748b;display:block;margin-bottom:4px;">STATUS</label>
+      <select id="mc-filtro-status" onchange="filtrarMisCursosTabla()" data-testid="mc-status-filter" style="padding:8px 14px;border-radius:8px;border:1px solid #e2e8f0;font-size:13px;color:#374151;">
+        <option value="">Todos</option>
+        <option value="HABILITADO">Habilitado</option>
+        <option value="PENDIENTE">Programar</option>
+        <option value="VENCIDO">Vencido</option>
+      </select>
+    </div>
+    <button onclick="document.getElementById('mc-buscar').value='';document.getElementById('mc-filtro-status').value='';filtrarMisCursosTabla();" style="padding:8px 18px;border-radius:8px;border:1px solid #e2e8f0;background:#f8fafc;font-size:13px;color:#64748b;cursor:pointer;font-weight:600;">
+      <i class="ph ph-x" style="margin-right:4px;"></i> Limpiar
+    </button>
+  </div>
+
+  <!-- Tabla -->
+  <div class="card-container" style="border-radius:12px;overflow:hidden;">
+    <div id="mis-cursos-content" style="padding:0;">
+      <div style="text-align:center;padding:30px;">
+        <div style="display:inline-block;width:32px;height:32px;border:4px solid #6366f1;border-top-color:transparent;border-radius:50%;animation:spin 1s linear infinite;"></div>
+      </div>
+    </div>
+  </div>
+</div>

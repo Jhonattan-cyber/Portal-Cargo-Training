@@ -1,0 +1,272 @@
+// ═══════════════════════════════════════════════════════════════
+// Configuración del remitente del grupo
+var EMAIL_CONFIG = {
+  groupEmail: 'grp_entrenamientos_cgo-grh@latam.com',
+  groupName: 'Entrenamientos CGO-GRH',
+  // Si el owner del script tiene "Enviar como" configurado para groupEmail,
+  // GmailApp usará ese alias. Si no, se usa como replyTo.
+  fallbackToReplyTo: true
+};
+
+/**
+ * Envía un correo a nombre del grupo de entrenamientos.
+ * 
+ * REQUISITOS PREVIOS (configurar UNA VEZ):
+ * Opción A (preferida): El deployment del script corre bajo la cuenta del grupo
+ *   → El From sale automáticamente como la cuenta del grupo.
+ * 
+ * Opción B: Alias "Enviar como" en Gmail del owner del script
+ *   → En Gmail del owner: Configuración → Cuentas → "Enviar como" → Agregar grp_entrenamientos_cgo-grh@latam.com
+ *   → Verificar el alias (Google envía un código de confirmación)
+ *   → Después de verificar, el parámetro {from: "grp_entrenamientos_cgo-grh@latam.com"} funciona.
+ * 
+ * Opción C (fallback): Si ninguna opción anterior está disponible
+ *   → From = cuenta del owner (personal)
+ *   → replyTo = grp_entrenamientos_cgo-grh@latam.com
+ *   → Body incluye "Generado por: Entrenamientos CGO-GRH"
+ *
+ * @param {string} destinatario - Email del destinatario
+ * @param {string} asunto - Asunto del correo
+ * @param {string} cuerpoHTML - Cuerpo del correo en HTML
+ * @param {Object} opciones - Opciones adicionales {cc, bcc, adjuntos}
+ * @returns {Object} {success, message, metodo}
+ */
+function enviarCorreoGrupo(destinatario, asunto, cuerpoHTML, opciones) {
+  opciones = opciones || {};
+  
+  try {
+    var emailOpts = {
+      htmlBody: cuerpoHTML,
+      name: EMAIL_CONFIG.groupName,
+      replyTo: EMAIL_CONFIG.groupEmail
+    };
+    
+    // Intentar enviar con alias "from" del grupo
+    emailOpts.from = EMAIL_CONFIG.groupEmail;
+    
+    if (opciones.cc) emailOpts.cc = opciones.cc;
+    if (opciones.bcc) emailOpts.bcc = opciones.bcc;
+    
+    // GmailApp.sendEmail: si el alias está configurado, usa el From del grupo.
+    // Si no está configurado, Gmail ignora el parámetro "from" y usa la cuenta del owner,
+    // pero replyTo sí funciona siempre.
+    GmailApp.sendEmail(destinatario, asunto, '', emailOpts);
+    
+    _log('[V7e-EMAIL] Enviado a: ' + destinatario + ' | asunto: ' + asunto + ' | from: ' + EMAIL_CONFIG.groupEmail);
+    
+    return {
+      success: true,
+      message: 'Correo enviado a ' + destinatario,
+      metodo: 'GmailApp con alias grupo',
+      from: EMAIL_CONFIG.groupEmail,
+      replyTo: EMAIL_CONFIG.groupEmail
+    };
+    
+  } catch (e) {
+    _log('[V7e-EMAIL] ERROR: ' + e.message);
+    return {
+      success: false,
+      message: 'Error al enviar correo: ' + e.message,
+      error: e.message
+    };
+  }
+}
+
+/**
+ * Verifica si el alias del grupo está configurado como "Enviar como".
+ * Útil para diagnóstico.
+ * @returns {Object} {aliasDisponible, aliases}
+ */
+function verificarAliasGrupo() {
+  try {
+    var aliases = GmailApp.getAliases();
+    var tieneAlias = aliases.indexOf(EMAIL_CONFIG.groupEmail) >= 0;
+    _log('[V7e-EMAIL] Aliases disponibles: ' + JSON.stringify(aliases));
+    _log('[V7e-EMAIL] Alias grupo (' + EMAIL_CONFIG.groupEmail + '): ' + (tieneAlias ? 'CONFIGURADO' : 'NO CONFIGURADO'));
+    
+    return {
+      success: true,
+      aliasDisponible: tieneAlias,
+      aliases: aliases,
+      groupEmail: EMAIL_CONFIG.groupEmail,
+      recomendacion: tieneAlias 
+        ? 'Alias configurado. Los correos saldrán como: ' + EMAIL_CONFIG.groupEmail
+        : 'Alias NO configurado. Los correos saldrán como la cuenta del owner con replyTo=' + EMAIL_CONFIG.groupEmail + '. Para configurar: Gmail → Configuración → Cuentas → Enviar como → Agregar ' + EMAIL_CONFIG.groupEmail
+    };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+}
+
+
+// ═══════════════════════════════════════════════════════════════
+// CONTROL TOWER ADMIN -- V73
+// ═══════════════════════════════════════════════════════════════
+// Sistema basado en REGLAS (sin IA externa).
+// Detecta intencion por keywords → ejecuta reporte → retorna datos estructurados.
+
+/**
+ * Punto de entrada del Control Tower. Recibe pregunta + base, detecta intencion, ejecuta reporte.
+ * Solo ADMIN puede invocar.
+ */
+
+// ═══ Bot/Control Tower functions moved to Codigo_Reportes.gs ═══
+
+
+
+/**
+ * V99-DIAG: Función de diagnóstico para rastrear por qué un JEFE ve 0 en Forecast.
+ * Ejecutar desde el editor de Apps Script: diagnosticoForecastJefe("email@empresa.com")
+ * Revisar resultado en Logger (Ver > Registros) o en la consola de ejecución.
+ */
+function diagnosticoForecastJefe(emailJefe) {
+  var D = function(msg) { Logger.log('[DIAG] ' + msg); };
+  D('══════════════════════════════════════════════════════');
+  D('INICIO DIAGNÓSTICO para: ' + emailJefe);
+  D('══════════════════════════════════════════════════════');
+
+  // 1. Resolver usuario
+  var bases = ['CHILE', 'RAMPA', 'LATAM', 'NAM'];
+  var allEmpleados = {};
+  var nombreUsuario = '', bpUsuario = '', baseUsuario = '';
+  for (var b = 0; b < bases.length; b++) {
+    try {
+      var emps = leerHoja(bases[b], 'base');
+      allEmpleados[bases[b]] = emps;
+      for (var i = 0; i < emps.length; i++) {
+        if ((emps[i].correo || '').toLowerCase().trim() === emailJefe.toLowerCase().trim()) {
+          nombreUsuario = emps[i].nombre || '';
+          bpUsuario = String(emps[i].bp || '');
+          baseUsuario = bases[b];
+        }
+      }
+    } catch(e) { D('Error leyendo ' + bases[b] + ': ' + e.message); }
+  }
+  if (!nombreUsuario) {
+    try {
+      var ss = getSpreadsheet('MAESTRO');
+      var shJ = ss.getSheetByName('Jefes');
+      if (shJ) {
+        var jd = shJ.getDataRange().getDisplayValues();
+        for (var j = 1; j < jd.length; j++) {
+          if ((jd[j][0] || '').toLowerCase().trim() === emailJefe.toLowerCase().trim()) {
+            nombreUsuario = jd[j][1] || '';
+            bpUsuario = String(jd[j][2] || '');
+          }
+        }
+      }
+    } catch(e) {}
+  }
+  D('USUARIO: nombre="' + nombreUsuario + '" bp=' + bpUsuario + ' base=' + baseUsuario);
+  if (!nombreUsuario) { D('ERROR: Usuario no encontrado. Verificar email.'); return; }
+
+  // 2. Construir todosEmps
+  var todosEmps = [];
+  for (var b2 = 0; b2 < bases.length; b2++) {
+    var ee = allEmpleados[bases[b2]] || [];
+    ee.forEach(function(e) { e.baseRegion = e.baseRegion || bases[b2]; });
+    todosEmps = todosEmps.concat(ee);
+  }
+  D('TOTAL EMPLEADOS: ' + todosEmps.length);
+
+  // 3. Construir nombreToBP
+  var _ntbp = {};
+  for (var n = 0; n < todosEmps.length; n++) {
+    var nk = normKey(todosEmps[n].nombre || '');
+    var nbp = String(todosEmps[n].bp || '').trim();
+    if (nk && nbp && !_ntbp[nk]) _ntbp[nk] = nbp;
+  }
+  D('NOMBRE_TO_BP: ' + Object.keys(_ntbp).length + ' entries');
+
+  // 4. Buscar presencia del jefe en las 7 columnas
+  var NIVELES = [
+    { key: 'director', label: 'DIRECTOR' },
+    { key: 'gerenteSr', label: 'GERENTE_SR' },
+    { key: 'gerente', label: 'GERENTE' },
+    { key: 'subgerente', label: 'SUBGERENTE' },
+    { key: 'jefeDepartamento', label: 'JEFE_DEPARTAMENTO' },
+    { key: 'jefeArea', label: 'JEFE_AREA' },
+    { key: 'jefeDirecto', label: 'SUPERVISOR' }
+  ];
+  var SHORT = ['DIR','GSR','G','SG','JDPTO','JA','SUP'];
+
+  // Scan manual: para cada columna, contar cuántos empleados tienen el nombre del jefe
+  var presencia = [];
+  for (var lv = 0; lv < NIVELES.length; lv++) {
+    var col = NIVELES[lv].key;
+    var matchCount = 0;
+    var matchBases = {};
+    var ejemplos = [];
+    for (var e2 = 0; e2 < todosEmps.length; e2++) {
+      var val = todosEmps[e2][col];
+      if (!val) continue;
+      var valNorm = normKey(val);
+      var userNorm = normKey(nombreUsuario);
+      // Comparación directa normalizada
+      var isMatch = (valNorm === userNorm);
+      // Si no match exacto, probar canonical
+      if (!isMatch) {
+        var tkV = valNorm.split(' ').filter(function(p){return p.length>1;});
+        var tkU = userNorm.split(' ').filter(function(p){return p.length>1;});
+        if (tkV.length >= 2 && tkU.length >= 2) {
+          isMatch = (tkV.slice().sort().join(' ') === tkU.slice().sort().join(' '));
+        }
+        if (!isMatch && tkV.length >= 2 && tkU.length >= 2) {
+          var sh = tkV.length <= tkU.length ? tkV : tkU;
+          var lo = tkV.length > tkU.length ? tkV : tkU;
+          if (lo.length - sh.length <= 1) {
+            var ok = true;
+            for (var s = 0; s < sh.length; s++) { if (lo.indexOf(sh[s]) < 0) { ok = false; break; } }
+            if (ok) isMatch = true;
+          }
+        }
+      }
+      if (isMatch) {
+        matchCount++;
+        var br = (todosEmps[e2].baseRegion || '?').toUpperCase();
+        matchBases[br] = (matchBases[br] || 0) + 1;
+        if (ejemplos.length < 3) {
+          ejemplos.push('BP=' + todosEmps[e2].bp + ' base=' + br + ' val="' + String(val).substring(0,30) + '"');
+        }
+      }
+    }
+    presencia.push({ count: matchCount, bases: matchBases });
+    var basesStr = '';
+    for (var bk in matchBases) basesStr += bk + ':' + matchBases[bk] + ' ';
+    D('NIVEL ' + SHORT[lv] + ' (' + NIVELES[lv].key + '): ' + matchCount + ' matches | bases: ' + (basesStr || 'ninguna'));
+    for (var ej = 0; ej < ejemplos.length; ej++) D('  ejemplo: ' + ejemplos[ej]);
+  }
+
+  // 5. Ejecutar buildArbolJerarquico
+  D('');
+  D('══════ EJECUTANDO buildArbolJerarquico ══════');
+  var arbol = buildArbolJerarquico(nombreUsuario, todosEmps, {
+    email: emailJefe.toLowerCase().trim(),
+    bp: bpUsuario,
+    preferLowestRole: true,
+    nombreToBP: _ntbp
+  });
+
+  D('');
+  D('══════ RESULTADO ══════');
+  D('rolAutoDetectado: ' + arbol.rolAutoDetectado);
+  D('subordinatesFound: ' + arbol.personas.length);
+  D('total BPs: ' + Object.keys(arbol.bps).length);
+  D('incluyeSiMismo: ' + arbol.incluyeSiMismo);
+
+  // Desglose por base
+  var porBase = {};
+  for (var p = 0; p < arbol.personas.length; p++) {
+    var pb = (arbol.personas[p].baseRegion || '?').toUpperCase();
+    porBase[pb] = (porBase[pb] || 0) + 1;
+  }
+  var pbStr = '';
+  for (var pbk in porBase) pbStr += pbk + ':' + porBase[pbk] + ' ';
+  D('subordinados por base: ' + (pbStr || 'ninguno'));
+
+  D('');
+  D('══════ FIN DIAGNÓSTICO ══════');
+  return arbol;
+}
+
+

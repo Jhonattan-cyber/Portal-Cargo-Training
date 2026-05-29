@@ -1,0 +1,2028 @@
+// ═══════════════════════════════════════════════════════════════
+// CODIGO_DIAGNOSTICO.gs — Funciones de Diagnostico y Auditoria
+// Responsabilidades:
+//   - debugBP: Diagnostico exhaustivo por BP
+//   - diagnosticarForecast: Validacion de datos Forecast
+//   - diagnosticarIntegridad: Validacion de integridad de bases
+//   - testDiagnosticoBases: Test completo de todas las bases
+//   - auditReadBases: Auditoria de lectura de bases
+//   - auditFindUserInBases: Busqueda de usuario en bases
+//   - auditBuildHierarchy: Auditoria de jerarquia
+//   - auditJefeAreaSubtree: Subarbol de jefe area
+//   - auditAllJefesAreaCoverage: Cobertura de jefes de area
+//   - auditHierarchyByBP: Jerarquia por BP
+//   - auditCountDelta: Delta de conteos entre bases
+// ═══════════════════════════════════════════════════════════════
+
+// ===================== DEBUG BP MEJORADO =====================
+/**
+ * Diagnostico exhaustivo para un BP especifico.
+ * Traza: activo, HCC, jerarquia, cursos aplicables vs detectados vs excluidos.
+ * Cubre Issues B (cursos faltantes) y C (persona faltante HCC).
+ */
+function debugBP(bpBuscado, baseFilter) {
+  bpBuscado = (bpBuscado || '').toString().trim();
+  if (!bpBuscado) return { success: false, error: 'BP vacio' };
+  baseFilter = (baseFilter || '').toString().trim().toUpperCase();
+  
+  var resultado = {
+    bp: bpBuscado, encontrado: false, base: '', activo: false,
+    statusRaw: '', nombre: '', correo: '', area: '',
+    jefeDirecto: '', jefeArea: '', gerente: '',
+    esHCC: false, cuentaKPI: false,
+    filtroActivo: '', // razon si no es activo
+    cursosAplicablesBiblioteca: [], // cursos que deberian aplicar segun biblioteca
+    cursosDetectadosHeaders: [], // cursos encontrados en headers de la hoja
+    cursosNoDetectados: [], // cursos de biblioteca que NO se encontraron en headers
+    cursosRendered: [], // cursos con status final (lo que veria el frontend)
+    cursosExcluidos: [], // cursos excluidos del render y por que
+    cursosEnPlan: 0,
+    statusRealizacionOverrides: [], // cursos cuyo status fue override por PLAN
+    resumenCursos: { habilitados: 0, porVencer: 0, vencidos: 0, programar: 0, sinDato: 0, completado: 0, noAplica: 0 },
+    jerarquia: {}, // info de jerarquia para diagnostico
+    detalles: []
+  };
+
+  var basesToSearch = ['CHILE', 'RAMPA', 'LATAM', 'NAM'];
+  if (baseFilter) {
+    // Si se especificó base, buscar solo en esa
+    var aliasMap = { 'CL': 'CHILE', 'CHILE': 'CHILE', 'RAMPA': 'RAMPA', 'LATAM': 'LATAM', 'NAM': 'NAM', 'LATAM_SUR': 'LATAM', 'NAM_EU': 'NAM' };
+    var mappedBase = aliasMap[baseFilter] || baseFilter;
+    if (basesToSearch.indexOf(mappedBase) >= 0) {
+      basesToSearch = [mappedBase];
+      resultado.detalles.push('Buscando solo en base: ' + mappedBase + ' (filtro: ' + baseFilter + ')');
+    } else {
+      resultado.detalles.push('ADVERTENCIA: Base "' + baseFilter + '" no reconocida, buscando en todas');
+    }
+  }
+
+  basesToSearch.forEach(function(bk) {
+    if (resultado.encontrado) return;
+    var cfg = CONFIG_BASE[bk];
+    var statusConfig = STATUS_COLUMNS[bk];
+    try {
+      var ss = getSpreadsheet(bk);
+      var sh = ss.getSheetByName(TABS[bk].base);
+      if (!sh) { resultado.detalles.push(bk + ': Pestana no encontrada'); return; }
+      var data = sh.getDataRange().getDisplayValues();
+      resultado.detalles.push(bk + ': ' + data.length + ' filas, statusCol=' + statusConfig.col + ' logic="' + statusConfig.logic + '"');
+      
+      for (var r = 1; r < data.length; r++) {
+        if (normBP(data[r][cfg.bp]) !== bpBuscado) continue;
+        
+        resultado.encontrado = true;
+        resultado.base = bk;
+        resultado.nombre = (data[r][cfg.nombre] || '').toString().trim();
+        resultado.correo = cfg.correo >= 0 ? (data[r][cfg.correo] || '').toString().trim() : '';
+        resultado.area = cfg.area >= 0 ? (data[r][cfg.area] || '').toString().trim() : '';
+        resultado.statusRaw = statusConfig.col >= 0 ? (data[r][statusConfig.col] || '').toString() : 'N/A';
+        resultado.activo = esEmpleadoActivo(data[r], bk);
+        resultado.cuentaKPI = esEmpleadoKPI(data[r], bk);
+        resultado.esHCC = resultado.area ? (normKey(resultado.area).indexOf('HCC') >= 0) : false;
+        
+        // Jerarquia
+        resultado.jefeDirecto = cfg.jefeDirecto >= 0 ? (data[r][cfg.jefeDirecto] || '').toString().trim() : '';
+        resultado.jefeArea = cfg.jefeArea >= 0 ? (data[r][cfg.jefeArea] || '').toString().trim() : '';
+        resultado.gerente = cfg.ejecutivo >= 0 ? (data[r][cfg.ejecutivo] || '').toString().trim() : '';
+        resultado.jerarquia = {
+          jefeDirectoCol: cfg.jefeDirecto,
+          jefeAreaCol: cfg.jefeArea,
+          ejecutivoCol: cfg.ejecutivo >= 0 ? cfg.ejecutivo : 'NO_DEFINIDO',
+          jefeDirectoValor: resultado.jefeDirecto,
+          jefeAreaValor: resultado.jefeArea,
+          gerenteValor: resultado.gerente
+        };
+        
+        // Razon si no esta activo
+        if (!resultado.activo) {
+          resultado.filtroActivo = 'FILTRADO: statusRaw="' + resultado.statusRaw + '" logic=' + statusConfig.logic;
+          if (statusConfig.logic === 'NOT_WC') resultado.filtroActivo += ' (requiere != WC)';
+          if (statusConfig.logic === 'WHITELIST') resultado.filtroActivo += ' (requiere ACTIVO)';
+        }
+        
+        // === DIAGNOSTICO DE CURSOS ===
+        var headerRow = data[0];
+        
+        // 0. Log TODOS los headers de la hoja para diagnostico
+        var headersRelevantes = [];
+        for (var hIdx = 0; hIdx < headerRow.length; hIdx++) {
+          var hVal = (headerRow[hIdx] || '').toString().trim();
+          if (hVal) headersRelevantes.push('[' + hIdx + ']=' + hVal);
+        }
+        resultado.detalles.push('HEADERS DE HOJA (' + headersRelevantes.length + '): ' + headersRelevantes.join(' | '));
+        
+        // 1. Cursos aplicables segun biblioteca + fallback
+        var bibPorBase = getBibliotecaPorBase();
+        var cursosBib = bibPorBase[bk] || [];
+        var cursosFallback = CURSOS_POR_BASE[bk] || [];
+        var cursosConfig = [];
+        var siglasYaVistas = {};
+        cursosBib.forEach(function(c) {
+          var key = normalizarSigla(c.id || c.header);
+          if (!siglasYaVistas[key]) { siglasYaVistas[key] = true; cursosConfig.push(c); }
+        });
+        cursosFallback.forEach(function(c) {
+          var key = normalizarSigla(c.id || c.header);
+          if (!siglasYaVistas[key]) { siglasYaVistas[key] = true; cursosConfig.push(c); }
+        });
+        resultado.cursosAplicablesBiblioteca = cursosConfig.map(function(c) { return c.id + ' (' + c.header + ')'; });
+        
+        // 2. Descubrir cursos en headers
+        var cursosDesc = descubrirColumnasCursos(headerRow, cursosConfig, bk);
+        var descIds = {};
+        cursosDesc.forEach(function(cc) {
+          descIds[cc.id] = true;
+          resultado.cursosDetectadosHeaders.push(cc.id + ': HAB=' + (cc.habCol !== null ? cc.habCol : '-') + ' VENC=' + (cc.vencCol !== null ? cc.vencCol : '-') + ' STATUS=' + (cc.statusCol !== null ? cc.statusCol : '-'));
+        });
+        
+        // 3. Cursos no detectados en headers — con sugerencias
+        cursosConfig.forEach(function(c) {
+          if (!descIds[c.id]) {
+            // Buscar headers similares para sugerir
+            var curHdr = normKey(c.header || c.id);
+            var similares = [];
+            for (var si = 0; si < headerRow.length; si++) {
+              var hNorm = normKey((headerRow[si] || '').toString());
+              if (!hNorm) continue;
+              // Match parcial: el header contiene el curso o viceversa
+              if (hNorm.indexOf(curHdr) >= 0 || curHdr.indexOf(hNorm) >= 0) {
+                similares.push('[' + si + ']=' + headerRow[si]);
+              }
+              // Match por primeras 3 letras
+              if (curHdr.length >= 3 && hNorm.length >= 3 && hNorm.substring(0, 3) === curHdr.substring(0, 3)) {
+                var ya = similares.some(function(s) { return s.indexOf('[' + si + ']') === 0; });
+                if (!ya) similares.push('[' + si + ']=' + headerRow[si]);
+              }
+            }
+            var sugerencia = similares.length > 0 
+              ? ' | HEADERS_SIMILARES: ' + similares.join(', ')
+              : ' | SIN_HEADERS_SIMILARES (verificar nombre exacto en hoja)';
+            resultado.cursosNoDetectados.push(c.id + ' (header esperado: "' + c.header + '") - HEADER_NO_ENCONTRADO' + sugerencia);
+          }
+        });
+        
+        // 4. Leer STATUS REALIZACION para override
+        var statusRealizMap = {};
+        try { statusRealizMap = leerStatusRealizacionPlan(bk); } catch(e) {}
+        
+        // 5. Procesar cada curso descubierto
+        var whitelist = COURSES_BY_BASE[bk] || [];
+        var ventanaBase = VENTANA_POR_VENCER[bk] || 90;
+        
+        for (var c = 0; c < cursosDesc.length; c++) {
+          var cc = cursosDesc[c];
+          var statusRaw = cc.statusCol !== null ? (data[r][cc.statusCol] || '').toString().trim() : '';
+          var vencRaw = cc.vencCol !== null ? (data[r][cc.vencCol] || '').toString().trim() : '';
+          var habRaw = cc.habCol !== null ? (data[r][cc.habCol] || '').toString().trim() : '';
+          var daysRaw = cc.daysCol !== null ? (data[r][cc.daysCol] || '').toString().trim() : '';
+          
+          var dias = cc.daysCol !== null ? parseDias(data[r][cc.daysCol]) : null;
+          var fp = cc.vencCol !== null ? parseFechaLatina(data[r][cc.vencCol]) : { date: null, str: '', dias: null };
+          if (dias === null && fp.dias !== null) dias = fp.dias;
+          
+          var statusNorm = normalizarStatus(normKey(statusRaw), dias, ventanaBase);
+          
+          // Check STATUS REALIZACION override
+          var srKey = bpBuscado + '|' + normalizarSigla(cc.id);
+          var overridden = false;
+          if (statusRealizMap[srKey]) {
+            resultado.statusRealizacionOverrides.push(cc.id + ': statusOriginal=' + statusNorm + ' → COMPLETADO (StatusRealizacion=' + statusRealizMap[srKey] + ')');
+            statusNorm = 'COMPLETADO';
+            overridden = true;
+          }
+          
+          // Clasificar
+          var enWhitelist = whitelist.indexOf(cc.id) >= 0;
+          var excluido = (statusNorm === 'SIN DATO' || statusNorm === 'COMPLETADO' || statusNorm === 'NO_APLICA');
+          
+          var cursoInfo = {
+            sigla: cc.id, statusRaw: statusRaw, statusNorm: statusNorm,
+            statusReal: _clasificarStatusReal(statusNorm, dias, vencRaw),
+            vencimientoRaw: vencRaw, vencimientoParsed: fp.str, dias: dias,
+            habilitacion: habRaw, daysRaw: daysRaw,
+            enWhitelist: enWhitelist, overridden: overridden,
+            excluido: excluido,
+            motivoExclusion: excluido ? 'STATUS=' + statusNorm : 'VISIBLE',
+            enForecast: !excluido
+          };
+          
+          if (excluido) {
+            resultado.cursosExcluidos.push(cc.id + ': ' + cursoInfo.motivoExclusion + ' (raw="' + statusRaw + '", venc="' + vencRaw + '", dias=' + dias + ', statusReal=' + cursoInfo.statusReal + ')');
+          } else {
+            resultado.cursosRendered.push(cc.id + ': ' + statusNorm + ' (raw="' + statusRaw + '", venc="' + fp.str + '", dias=' + dias + ', statusReal=' + cursoInfo.statusReal + ', whitelist=' + enWhitelist + ')');
+          }
+          
+          // Resumen
+          if (statusNorm === 'HABILITADO') resultado.resumenCursos.habilitados++;
+          else if (statusNorm === 'POR VENCER') resultado.resumenCursos.porVencer++;
+          else if (statusNorm === 'VENCIDO') resultado.resumenCursos.vencidos++;
+          else if (statusNorm === 'PROGRAMAR') resultado.resumenCursos.programar++;
+          else if (statusNorm === 'SIN DATO') resultado.resumenCursos.sinDato++;
+          else if (statusNorm === 'COMPLETADO') resultado.resumenCursos.completado++;
+          else if (statusNorm === 'NO_APLICA') resultado.resumenCursos.noAplica++;
+        }
+        
+        // 6. Cursos en PLAN
+        try {
+          var shP = ss.getSheetByName(TABS[bk].plan);
+          if (shP) {
+            var pd = shP.getDataRange().getDisplayValues();
+            var cfgP = CONFIG_PLAN[bk];
+            for (var p = 1; p < pd.length; p++) {
+              if (normBP(pd[p][cfgP.bp]) === bpBuscado) resultado.cursosEnPlan++;
+            }
+          }
+        } catch(pe) { resultado.detalles.push('PLAN: Error - ' + pe.message); }
+        
+        // 7. Resumen final de faltantes — con razón explícita por curso
+        resultado.resumenFaltantes = {
+          totalAplicables: cursosConfig.length,
+          totalDetectados: cursosDesc.length,
+          totalNoDetectados: resultado.cursosNoDetectados.length,
+          totalRendered: resultado.cursosRendered.length,
+          totalExcluidos: resultado.cursosExcluidos.length,
+          totalOverrides: resultado.statusRealizacionOverrides.length,
+          faltantesConRazon: []
+        };
+        
+        // Cada curso faltante con razón explícita
+        cursosConfig.forEach(function(c) {
+          if (!descIds[c.id]) {
+            resultado.resumenFaltantes.faltantesConRazon.push({
+              curso: c.id,
+              headerEsperado: c.header,
+              razon: 'HEADER_NO_ENCONTRADO',
+              detalle: 'El curso existe en biblioteca para ' + bk + ' pero su header "' + c.header + '" no fue encontrado en la hoja. Verificar nombre exacto de columna.'
+            });
+          }
+        });
+        // Cursos excluidos con razón
+        resultado.cursosExcluidos.forEach(function(excStr) {
+          var match = excStr.match(/^(\w+): STATUS=(\w+)/);
+          if (match) {
+            resultado.resumenFaltantes.faltantesConRazon.push({
+              curso: match[1],
+              razon: 'FILTRO_STATUS',
+              detalle: 'Curso detectado pero excluido por status=' + match[2]
+            });
+          }
+        });
+        
+        resultado.detalles.push('RESUMEN: ' + cursosConfig.length + ' aplicables, ' + cursosDesc.length + ' detectados en headers, ' + resultado.cursosRendered.length + ' visibles, ' + resultado.cursosExcluidos.length + ' excluidos, ' + resultado.cursosNoDetectados.length + ' sin header');
+        
+        break;
+      }
+    } catch(e) { resultado.detalles.push(bk + ': ERROR ' + e.message); }
+  });
+  
+  // Resumen final
+  if (resultado.encontrado) {
+    resultado.detalles.push('RESUMEN: base=' + resultado.base + ' activo=' + resultado.activo + ' esHCC=' + resultado.esHCC + ' cuentaKPI=' + resultado.cuentaKPI);
+    resultado.detalles.push('CURSOS: biblioteca=' + resultado.cursosAplicablesBiblioteca.length + ' detectados=' + resultado.cursosDetectadosHeaders.length + ' noDetectados=' + resultado.cursosNoDetectados.length);
+    resultado.detalles.push('RENDER: visibles=' + resultado.cursosRendered.length + ' excluidos=' + resultado.cursosExcluidos.length + ' overrides=' + resultado.statusRealizacionOverrides.length);
+    resultado.detalles.push('ESTADO: ' + JSON.stringify(resultado.resumenCursos));
+  } else {
+    resultado.detalles.push('BP ' + bpBuscado + ' NO ENCONTRADO en bases: ' + basesToSearch.join(', '));
+  }
+  
+  return { success: true, debug: resultado };
+}
+
+// ===================== DIAGNOSTICAR FORECAST =====================
+/**
+ * Funcion de diagnostico que muestra:
+ * - Filas Leidas vs Filas Activas vs Cruces Exitosos
+ * Ejecutar desde: Ejecutar > diagnosticarForecast
+ * Ver logs en: Ver > Registros de ejecucion
+ */
+function diagnosticarForecast() {
+  Logger.log('========== DIAGNOSTICO FORECAST ==========');
+  Logger.log('Columnas de Status por Base:');
+  Logger.log('- NAM (Control Norte): Col S (18) - Activo si NO dice "WC"');
+  Logger.log('- RAMPA: Col CB (79) - Activo si dice "ACTIVO"');
+  Logger.log('- LATAM (PHH RED): Col P (15) - Activo si dice "ACTIVO"');
+  Logger.log('- CHILE (Training CL): Col P (15) - Activo si dice "ACTIVO"');
+  Logger.log('');
+  
+  var totales = { leidas: 0, activas: 0, inactivas: 0, cruces: 0 };
+  
+  ['CHILE', 'RAMPA', 'LATAM', 'NAM'].forEach(function(bk) {
+    try {
+      var ss = getSpreadsheet(bk);
+      var statusConfig = STATUS_COLUMNS[bk];
+      
+      // Base
+      var shBase = ss.getSheetByName(TABS[bk].base);
+      var dataBase = shBase ? shBase.getDataRange().getValues() : [];
+      var totalBase = dataBase.length - 1;
+      var activosBase = 0;
+      var inactivosBase = 0;
+      
+      for (var i = 1; i < dataBase.length; i++) {
+        if (esEmpleadoActivo(dataBase[i], bk)) {
+          activosBase++;
+        } else {
+          inactivosBase++;
+        }
+      }
+
+      // Plan
+      var shPlan = ss.getSheetByName(TABS[bk].plan);
+      var dataPlan = shPlan ? shPlan.getDataRange().getValues() : [];
+      var totalPlan = dataPlan.length - 1;
+
+      // Cruces (BPs que estan en ambas y son activos)
+      var bpsBase = {};
+      var cfg = CONFIG_BASE[bk];
+      for (var j = 1; j < dataBase.length; j++) { 
+        var bp = (dataBase[j][cfg.bp] || '').toString().trim(); 
+        if (bp && esEmpleadoActivo(dataBase[j], bk)) bpsBase[bp] = true; 
+      }
+      var cruces = 0;
+      var cfgP = CONFIG_PLAN[bk];
+      for (var k = 1; k < dataPlan.length; k++) { 
+        var bpp = (dataPlan[k][cfgP.bp] || '').toString().trim(); 
+        if (bpsBase[bpp]) cruces++; 
+      }
+
+      Logger.log(bk + ': Leidas=' + totalBase + ' | Activas=' + activosBase + ' | Inactivas=' + inactivosBase + ' | Plan=' + totalPlan + ' | Cruces=' + cruces);
+      
+      totales.leidas += totalBase;
+      totales.activas += activosBase;
+      totales.inactivas += inactivosBase;
+      totales.cruces += cruces;
+    } catch(e) { Logger.log(bk + ': ERROR ' + e.message); }
+  });
+  
+  Logger.log('');
+  Logger.log('TOTALES: Leidas=' + totales.leidas + ' | Activas=' + totales.activas + ' | Inactivas=' + totales.inactivas + ' | Cruces=' + totales.cruces);
+  Logger.log('========== FIN DIAGNOSTICO ==========');
+}
+
+// ===================== DIAGNOSTICAR INTEGRIDAD =====================
+/**
+ * AUDITORÍA FORENSE COMPLETA
+ * 
+ * A. PRUEBA DE VOLUMEN: Total Filas Excel vs ACTIVAS
+ * B. PRUEBA DE LIMPIEZA DE CURSOS: Signos/Colores
+ * C. PRUEBA DE JERARQUÍA: Verificar columnas H,I,J / S,T,U / K,L,M / P,Q
+ * 
+ * Ejecutar: Editor de Apps Script > diagnosticarIntegridad
+ * Ver logs: Ver > Registros de ejecución
+ */
+function diagnosticarIntegridad(baseKey) {
+  baseKey = baseKey || 'CHILE'; // Cambiar a 'RAMPA', 'LATAM', 'NAM'
+  
+  Logger.log('');
+  Logger.log('╔════════════════════════════════════════════════════════════════════════════╗');
+  Logger.log('║          DIAGNÓSTICO DE INTEGRIDAD - BASE: ' + baseKey.padEnd(30) + '║');
+  Logger.log('╚════════════════════════════════════════════════════════════════════════════╝');
+  Logger.log('');
+  
+  try {
+    var ss = getSpreadsheet(baseKey);
+    var cfg = CONFIG_BASE[baseKey];
+    var cfgPlan = CONFIG_PLAN[baseKey];
+    var statusConfig = STATUS_COLUMNS[baseKey];
+    
+    // ═══════════════════════════════════════════════════════════════════════
+    // A. PRUEBA DE VOLUMEN (FILTROS)
+    // ═══════════════════════════════════════════════════════════════════════
+    Logger.log('┌──────────────────────────────────────────────────────────────────────────┐');
+    Logger.log('│  A. PRUEBA DE VOLUMEN (FILTROS)                                          │');
+    Logger.log('└──────────────────────────────────────────────────────────────────────────┘');
+    
+    var shBase = ss.getSheetByName(TABS[baseKey].base);
+    if (!shBase) { Logger.log('❌ ERROR: Hoja BASE no encontrada'); return; }
+    
+    var dataBase = shBase.getDataRange().getValues();
+    var totalFilasExcel = dataBase.length - 1;
+    var filasActivas = 0;
+    var filasInactivas = 0;
+    var filasSinBP = 0;
+    
+    for (var i = 1; i < dataBase.length; i++) {
+      var bp = (dataBase[i][cfg.bp] || '').toString().trim();
+      if (!bp) { filasSinBP++; continue; }
+      
+      if (esEmpleadoActivo(dataBase[i], baseKey)) {
+        filasActivas++;
+      } else {
+        filasInactivas++;
+      }
+    }
+    
+    Logger.log('');
+    Logger.log('📊 HOJA BASE: "' + TABS[baseKey].base + '"');
+    _log('   ┌────────────────────────────────────────┐');
+    _log('   │ Total Filas Excel:        ' + String(totalFilasExcel).padStart(8) + '   │');
+    _log('   │ Total Filas ACTIVAS:      ' + String(filasActivas).padStart(8) + '   │');
+    _log('   │ Total Filas INACTIVAS:    ' + String(filasInactivas).padStart(8) + '   │');
+    _log('   │ Filas sin BP:             ' + String(filasSinBP).padStart(8) + '   │');
+    _log('   └────────────────────────────────────────┘');
+    
+    var descartadas = totalFilasExcel - filasActivas - filasSinBP;
+    if (descartadas > 0) {
+      Logger.log('');
+      Logger.log('⚠️  ALERTA: El filtro de ACTIVO está descartando ' + descartadas + ' empleados');
+      _log('   Columna de Status: ' + statusConfig.col + ' | Lógica: ' + statusConfig.logic);
+    }
+    Logger.log('');
+    
+    // ═══════════════════════════════════════════════════════════════════════
+    // B. PRUEBA DE LIMPIEZA DE CURSOS (Signos y Colores)
+    // ═══════════════════════════════════════════════════════════════════════
+    Logger.log('┌──────────────────────────────────────────────────────────────────────────┐');
+    Logger.log('│  B. PRUEBA DE LIMPIEZA DE CURSOS (Signos/Colores)                        │');
+    Logger.log('└──────────────────────────────────────────────────────────────────────────┘');
+    Logger.log('');
+    
+    // Cargar biblioteca
+    var biblioteca = {};
+    try {
+      var ssMaestro = getSpreadsheet('MAESTRO');
+      var shBib = ssMaestro.getSheetByName('BIBLIOTECA FINAL');
+      if (shBib) {
+        var bibData = shBib.getDataRange().getValues();
+        for (var b = 1; b < bibData.length; b++) {
+          var sigla = (bibData[b][0] || '').toString().trim().toUpperCase();
+          var nombre = (bibData[b][1] || '').toString().trim();
+          if (sigla) {
+            biblioteca[sigla] = nombre;
+            // Indexar también por nombre normalizado (con & permitido)
+            var nombreNorm = nombre.replace(/[^a-zA-Z0-9 &.-]/g, '').trim().toUpperCase();
+            if (nombreNorm) biblioteca[nombreNorm] = nombre;
+          }
+        }
+        Logger.log('📚 Biblioteca cargada: ' + Object.keys(biblioteca).length + ' entradas');
+      }
+    } catch(e) {
+      Logger.log('⚠️ Error cargando biblioteca: ' + e.message);
+    }
+    
+    // Leer planificación y extraer cursos únicos
+    var shPlan = ss.getSheetByName(TABS[baseKey].plan);
+    var cursosUnicos = {};
+    
+    if (shPlan) {
+      var dataPlan = shPlan.getDataRange().getValues();
+      Logger.log('📊 HOJA PLANIFICACIÓN: "' + TABS[baseKey].plan + '" (' + (dataPlan.length-1) + ' filas)');
+      
+      // MOSTRAR COLUMNA DE CURSO CONFIGURADA
+      var cursoColIndex = cfgPlan.cursoCol || 14; // Por defecto columna O
+      Logger.log('📌 Columna de CURSO configurada: ' + String.fromCharCode(65 + cursoColIndex) + ' (índice ' + cursoColIndex + ')');
+      Logger.log('');
+      
+      // Extraer siglas de cursos desde CURSOS_POR_BASE
+      var cursosBase = CURSOS_POR_BASE[baseKey] || [];
+      cursosBase.forEach(function(cc) {
+        if (cc.sigla) cursosUnicos[cc.sigla] = true;
+      });
+      
+      // LEER CURSOS DESDE LA COLUMNA CORRECTA (cursoCol)
+      for (var i = 1; i < Math.min(dataPlan.length, 100); i++) {
+        var valorCurso = (dataPlan[i][cursoColIndex] || '').toString().trim();
+        if (valorCurso && valorCurso.length > 1 && valorCurso.length < 50) {
+          cursosUnicos[valorCurso] = true;
+        }
+      }
+      
+      // También buscar valores con signos especiales en otras columnas
+      for (var i = 1; i < Math.min(dataPlan.length, 50); i++) {
+        for (var col = 0; col < Math.min(dataPlan[i].length, 30); col++) {
+          var valor = (dataPlan[i][col] || '').toString().trim();
+          // Detectar valores que parecen cursos con signos: *, +, &, etc.
+          if (valor && valor.length > 1 && valor.length < 30) {
+            if (/[\*\+\&]/.test(valor) && /[A-Z]/i.test(valor)) {
+              cursosUnicos[valor] = true;
+            }
+          }
+        }
+      }
+    } else {
+      Logger.log('⚠️ Hoja de Planificación no encontrada');
+    }
+    
+    // Mostrar tabla de limpieza
+    Logger.log('┌───────────────────────────────────────────────────────────────────────────────────────────────────┐');
+    Logger.log('│ [ORIGINAL]              │ [LIMPIO]                │ [¿ENCONTRADO?]   │ [NOMBRE OFICIAL]         │');
+    Logger.log('├───────────────────────────────────────────────────────────────────────────────────────────────────┤');
+    
+    var encontrados = 0;
+    var noEncontrados = 0;
+    var cursosKeys = Object.keys(cursosUnicos).sort();
+    
+    Logger.log('📝 Regex de limpieza: .replace(/[^a-zA-Z0-9 &.-]/g, "")');
+    _log('   (Permite: letras, números, espacios, &, punto, guión)');
+    Logger.log('');
+    
+    for (var k = 0; k < cursosKeys.length; k++) {
+      var original = cursosKeys[k];
+      // REGEX CORREGIDA: Permite & . -
+      var limpio = original.replace(/[^a-zA-Z0-9 &.-]/g, '').trim().toUpperCase();
+      
+      var enBiblioteca = false;
+      var nombreOficial = limpio + ' (No Catalogado)';
+      
+      if (biblioteca[limpio]) {
+        enBiblioteca = true;
+        nombreOficial = biblioteca[limpio];
+        encontrados++;
+      } else if (biblioteca[original.toUpperCase()]) {
+        enBiblioteca = true;
+        nombreOficial = biblioteca[original.toUpperCase()];
+        encontrados++;
+      } else {
+        // Buscar coincidencia parcial
+        for (var bibKey in biblioteca) {
+          if (bibKey.includes(limpio) || limpio.includes(bibKey)) {
+            enBiblioteca = true;
+            nombreOficial = biblioteca[bibKey] + ' (parcial)';
+            encontrados++;
+            break;
+          }
+        }
+        if (!enBiblioteca) noEncontrados++;
+      }
+      
+      var origPad = ('"' + original + '"').substring(0, 22).padEnd(23);
+      var limpPad = ('"' + limpio + '"').substring(0, 22).padEnd(23);
+      var bibPad = (enBiblioteca ? '✅ SÍ' : '❌ NO').padEnd(17);
+      var nomPad = ('"' + nombreOficial.substring(0, 24) + '"');
+      
+      Logger.log('│ ' + origPad + ' │ ' + limpPad + ' │ ' + bibPad + ' │ ' + nomPad);
+    }
+    
+    Logger.log('└───────────────────────────────────────────────────────────────────────────────────────────────────┘');
+    Logger.log('');
+    Logger.log('📊 RESUMEN: ' + encontrados + ' encontrados ✅ | ' + noEncontrados + ' no encontrados ❌');
+    Logger.log('');
+    
+    // ═══════════════════════════════════════════════════════════════════════
+    // C. PRUEBA DE JERARQUÍA
+    // ═══════════════════════════════════════════════════════════════════════
+    Logger.log('┌──────────────────────────────────────────────────────────────────────────┐');
+    Logger.log('│  C. PRUEBA DE JERARQUÍA (3 usuarios aleatorios)                          │');
+    Logger.log('└──────────────────────────────────────────────────────────────────────────┘');
+    Logger.log('');
+    
+    // BÚSQUEDA DINÁMICA PARA CHILE
+    var colJefeDirecto = cfg.jefeDirecto;
+    var colJefeArea = cfg.jefeArea;
+    var esRampa = (baseKey === 'RAMPA');
+    var esNAM = (baseKey === 'NAM');
+    var colGerente = cfg.ejecutivo >= 0 ? cfg.ejecutivo : -1;
+    _log('   Jefe Directo: col ' + colJefeDirecto + ', Jefe Area: col ' + colJefeArea);
+    {
+      Logger.log('CONFIGURACION DE COLUMNAS FIJAS PARA ' + baseKey + ':');
+      _log('   Jefe Directo: Columna ' + String.fromCharCode(65 + colJefeDirecto) + ' (indice ' + colJefeDirecto + ')');
+      _log('   Jefe Area:    Columna ' + String.fromCharCode(65 + colJefeArea) + ' (indice ' + colJefeArea + ')');
+      if (esRampa) {
+        _log('   Ejecutivo:    Columna ' + String.fromCharCode(65 + cfg.ejecutivo) + ' (indice ' + cfg.ejecutivo + ')');
+      } else if (colGerente >= 0) {
+        _log('   Gerente:      Columna ' + String.fromCharCode(65 + colGerente) + ' (indice ' + colGerente + ')');
+      } else {
+        _log('   Gerente:      No definido para esta base');
+      }
+    }
+    Logger.log('');
+    
+    // Seleccionar 3 usuarios aleatorios
+    var empleadosValidos = [];
+    for (var i = 1; i < dataBase.length; i++) {
+      var bp = (dataBase[i][cfg.bp] || '').toString().trim();
+      if (bp && esEmpleadoActivo(dataBase[i], baseKey)) {
+        empleadosValidos.push(i);
+      }
+    }
+    
+    // Tomar 3 aleatorios
+    var seleccionados = [];
+    var cantidad = Math.min(3, empleadosValidos.length);
+    while (seleccionados.length < cantidad && empleadosValidos.length > 0) {
+      var idx = Math.floor(Math.random() * empleadosValidos.length);
+      seleccionados.push(empleadosValidos.splice(idx, 1)[0]);
+    }
+    
+    Logger.log('📊 VERIFICACIÓN DE JERARQUÍA:');
+    Logger.log('');
+    
+    for (var s = 0; s < seleccionados.length; s++) {
+      var row = dataBase[seleccionados[s]];
+      var bpEmp = (row[cfg.bp] || '').toString().trim();
+      var nombreEmp = '';
+      if (esRampa) {
+        nombreEmp = (row[cfg.nombre] || '').toString().trim();
+      } else {
+        nombreEmp = (row[cfg.nombre] || '').toString().trim();
+      }
+      
+      // USAR COLUMNAS DINÁMICAS
+      var jefeDir = colJefeDirecto >= 0 ? (row[colJefeDirecto] || '').toString().trim() : '(no encontrado)';
+      var jefeAreaVal = colJefeArea >= 0 ? (row[colJefeArea] || '').toString().trim() : '(no encontrado)';
+      var gerente = '';
+      if (esRampa) {
+        gerente = (row[cfg.ejecutivo] || '').toString().trim() || '(vacío)';
+      } else if (colGerente >= 0) {
+        gerente = (row[colGerente] || '').toString().trim() || '(vacío)';
+      } else {
+        gerente = 'N/A';
+      }
+      
+      if (!jefeDir) jefeDir = '(vacío)';
+      if (!jefeAreaVal) jefeAreaVal = '(vacío)';
+      
+      _log('   ┌─────────────────────────────────────────────────────────────────────┐');
+      _log('   │ BP: ' + bpEmp.padEnd(64) + '│');
+      _log('   │ Nombre: ' + nombreEmp.substring(0, 58).padEnd(60) + '│');
+      _log('   │ Jefe Directo: ' + jefeDir.substring(0, 52).padEnd(54) + '│');
+      _log('   │ Jefe Área: ' + jefeAreaVal.substring(0, 55).padEnd(57) + '│');
+      _log('   │ Gerente/Ejecutivo: ' + gerente.substring(0, 46).padEnd(48) + '│');
+      _log('   └─────────────────────────────────────────────────────────────────────┘');
+      Logger.log('');
+    }
+    
+    Logger.log('╔════════════════════════════════════════════════════════════════════════════╗');
+    Logger.log('║                         FIN DEL DIAGNÓSTICO                                ║');
+    Logger.log('╚════════════════════════════════════════════════════════════════════════════╝');
+    
+  } catch(e) {
+    Logger.log('ERROR CRÍTICO: ' + e.message);
+    Logger.log('Stack: ' + e.stack);
+  }
+}
+
+// Funciones auxiliares para ejecutar diagnostico rapido por base
+function diagnosticarIntegridadCHILE() { diagnosticarIntegridad('CHILE'); }
+function diagnosticarIntegridadRAMPA() { diagnosticarIntegridad('RAMPA'); }
+function diagnosticarIntegridadLATAM() { diagnosticarIntegridad('LATAM'); }
+function diagnosticarIntegridadNAM() { diagnosticarIntegridad('NAM'); }
+
+// ===================== DIAGNOSTICO PRINCIPAL (EJECUTAR ESTO) =====================
+/**
+ * FUNCION DE DIAGNOSTICO COMPLETA.
+ * Ejecutar desde el Editor GAS: Seleccionar "testDiagnosticoBases" > Ejecutar > Ver Registros
+ * 
+ * Imprime para CADA base:
+ * - Nombre de la hoja y total de filas leidas
+ * - Muestra de la Fila 2 (valores crudos de Status, Jefe, BP)
+ * - Conteo de filtrado: Total | Aceptados | Rechazados
+ * - Motivo de rechazo: el VALOR EXACTO del status que provoco el rechazo
+ */
+function testDiagnosticoBases() {
+  Logger.log('========================================================================');
+  _log('  DIAGNOSTICO COMPLETO DE BASES - ' + new Date().toLocaleString());
+  Logger.log('========================================================================');
+  
+  var bases = ['CHILE', 'LATAM', 'RAMPA', 'NAM'];
+  var resumenGlobal = { totalLeidos: 0, totalAceptados: 0, totalRechazados: 0 };
+  
+  for (var b = 0; b < bases.length; b++) {
+    var baseKey = bases[b];
+    var cfg = CONFIG_BASE[baseKey];
+    var statusCfg = STATUS_COLUMNS[baseKey];
+    var tabName = TABS[baseKey].base;
+    
+    Logger.log('');
+    Logger.log('================================================================');
+    _log('  BASE: ' + baseKey + ' | Hoja: "' + tabName + '"');
+    if (statusCfg.col >= 0) {
+      _log('  Status Col: ' + statusCfg.col + ' | Logica: ' + statusCfg.logic);
+    } else {
+      _log('  Status Col: N/A (ALL_ACTIVE) | Logica: ' + statusCfg.logic);
+    }
+    if (statusCfg.whitelist) _log('  Whitelist: ' + statusCfg.whitelist.join(', '));
+    if (statusCfg.blacklist) _log('  Blacklist: ' + statusCfg.blacklist.join(', '));
+    Logger.log('================================================================');
+    
+    try {
+      var ss = getSpreadsheet(baseKey);
+      var sh = ss.getSheetByName(tabName);
+      if (!sh) {
+        _log('  ERROR: Pestana "' + tabName + '" NO ENCONTRADA');
+        _log('  Pestanas disponibles: ' + ss.getSheets().map(function(s) { return s.getName(); }).join(', '));
+        continue;
+      }
+      var data = sh.getDataRange().getValues();
+      _log('  Total Filas: ' + data.length + ' | Columnas: ' + data[0].length);
+      
+      // DESCUBRIR COLUMNA ACTIVO si es DISCOVER_WHITELIST (RAMPA)
+      if (statusCfg.logic === 'DISCOVER_WHITELIST') {
+        var discoveredCol = descubrirColumnaEstadoActivo(data[0], data, baseKey);
+        if (discoveredCol >= 0) {
+          STATUS_COLUMNS[baseKey] = { col: discoveredCol, logic: 'WHITELIST', whitelist: statusCfg.whitelist || ['ACTIVO'] };
+          statusCfg = STATUS_COLUMNS[baseKey];
+          _log('  STATUS ACTIVO descubierta: col=' + discoveredCol + ' -> WHITELIST ACTIVO');
+        } else {
+          _log('  WARNING: No se descubrio columna activo, fallback ALL_ACTIVE');
+          STATUS_COLUMNS[baseKey] = { col: -1, logic: 'ALL_ACTIVE' };
+          statusCfg = STATUS_COLUMNS[baseKey];
+        }
+      }
+      
+      // MUESTRA FILA 2: valores crudos
+      if (data.length > 1) {
+        var row2 = data[1];
+        Logger.log('');
+        _log('  --- MUESTRA FILA 2 (valores crudos) ---');
+        _log('    BP (idx ' + cfg.bp + '): "' + (row2[cfg.bp] || '') + '"');
+        _log('    Nombre (idx ' + cfg.nombre + '): "' + (row2[cfg.nombre] || '') + '"');
+        _log('    Correo (idx ' + cfg.correo + '): "' + (cfg.correo >= 0 ? (row2[cfg.correo] || '') : 'N/A') + '"');
+        _log('    Status (idx ' + statusCfg.col + '): "' + (row2[statusCfg.col] || '') + '"');
+        _log('    JefeDirecto (idx ' + cfg.jefeDirecto + '): "' + (cfg.jefeDirecto >= 0 ? (row2[cfg.jefeDirecto] || '') : 'N/A') + '"');
+        _log('    JefeArea (idx ' + cfg.jefeArea + '): "' + (cfg.jefeArea >= 0 ? (row2[cfg.jefeArea] || '') : 'N/A') + '"');
+        _log('    Ejecutivo (idx ' + (cfg.ejecutivo || -1) + '): "' + (cfg.ejecutivo >= 0 ? (row2[cfg.ejecutivo] || '') : 'N/A') + '"');
+        _log('    Area (idx ' + cfg.area + '): "' + (cfg.area >= 0 ? (row2[cfg.area] || '') : 'N/A') + '"');
+      }
+      
+      // CONTEO DE FILTRADO con motivos de rechazo
+      var aceptados = 0, rechazados = 0, sinBP = 0;
+      var motivosRechazo = {};
+      var statusDistribucion = {};
+      var areaCount = {};
+      var hccCount = 0;
+      
+      for (var r = 1; r < data.length; r++) {
+        var row = data[r];
+        var bp = String(row[cfg.bp]).trim();
+        if (!bp || bp === '0' || bp.length < 3) { sinBP++; continue; }
+        
+        // Distribucion completa de status (ANTES de filtrar)
+        var statusRaw = statusCfg.col >= 0 ? normKey(row[statusCfg.col]) : '(NO_COL)';
+        statusDistribucion[statusRaw || '(VACIO)'] = (statusDistribucion[statusRaw || '(VACIO)'] || 0) + 1;
+        
+        var activo = esEmpleadoActivo(row, baseKey);
+        if (activo) {
+          aceptados++;
+          // Contar areas
+          var areaVal = cfg.area >= 0 ? (row[cfg.area] || '').toString().trim() : '';
+          if (areaVal) {
+            areaCount[areaVal] = (areaCount[areaVal] || 0) + 1;
+            if (areaVal.toUpperCase().indexOf('HCC') >= 0) hccCount++;
+          }
+        } else {
+          rechazados++;
+          var statusVal = (row[statusCfg.col] || '').toString().trim();
+          motivosRechazo[statusVal] = (motivosRechazo[statusVal] || 0) + 1;
+        }
+      }
+      
+      Logger.log('');
+      _log('  --- RESULTADO DEL FILTRADO ---');
+      _log('    Total filas con BP valido: ' + (aceptados + rechazados));
+      _log('    ACEPTADOS (activos): ' + aceptados);
+      _log('    RECHAZADOS (inactivos): ' + rechazados);
+      _log('    Sin BP valido: ' + sinBP);
+      _log('    HCC detectados: ' + hccCount);
+      
+      resumenGlobal.totalLeidos += (aceptados + rechazados);
+      resumenGlobal.totalAceptados += aceptados;
+      resumenGlobal.totalRechazados += rechazados;
+      
+      if (rechazados > 0) {
+        Logger.log('');
+        _log('  --- MOTIVOS DE RECHAZO ---');
+        for (var motivo in motivosRechazo) {
+          _log('    Status="' + motivo + '" -> ' + motivosRechazo[motivo] + ' rechazados');
+        }
+      }
+      
+      if (aceptados === 0) {
+        Logger.log('');
+        _log('  *** ALERTA: CERO ACEPTADOS! ***');
+      }
+      
+      // Distribucion de status COMPLETA (para cruzar con COUNTIF en Excel)
+      Logger.log('');
+      _log('  --- DISTRIBUCION STATUS (todos los valores) ---');
+      var statusKeys = Object.keys(statusDistribucion).sort(function(a,b) { return statusDistribucion[b] - statusDistribucion[a]; });
+      for (var si = 0; si < statusKeys.length; si++) {
+        var sk = statusKeys[si];
+        var esAceptado = false;
+        if (statusCfg.logic === 'ALL_ACTIVE') esAceptado = true;
+        else if (statusCfg.logic === 'WHITELIST') esAceptado = (statusCfg.whitelist.indexOf(sk) >= 0);
+        else if (statusCfg.logic === 'NOT_WC') esAceptado = (sk !== 'WC' && sk !== 'SIN KPI');
+        else if (statusCfg.logic === 'BLACKLIST') esAceptado = (statusCfg.blacklist.indexOf(sk) < 0 && sk !== 'SIN KPI');
+        _log('    "' + sk + '": ' + statusDistribucion[sk] + ' -> ' + (esAceptado ? 'ENTRA' : 'EXCLUIDO'));
+      }
+      
+      // Mostrar distribucion de areas (top 10)
+      var areas = Object.keys(areaCount).sort(function(a,b) { return areaCount[b] - areaCount[a]; });
+      if (areas.length > 0) {
+        Logger.log('');
+        _log('  --- AREAS (top 10) ---');
+        for (var ai = 0; ai < Math.min(10, areas.length); ai++) {
+          _log('    "' + areas[ai] + '": ' + areaCount[areas[ai]] + ' empleados');
+        }
+      }
+      
+      // Per-course status distribution (from leerHoja result)
+      Logger.log('');
+      _log('  --- CURSOS: STATUS POR CURSO (para cruzar con Looker) ---');
+      try {
+        var cache = CacheService.getScriptCache();
+        cache.removeAll([getCacheKey(baseKey, 'base')]);
+        var empleadosTest = leerHoja(baseKey, 'base');
+        _log('    Empleados: ' + empleadosTest.length);
+        var cursoStatusMap = {};
+        empleadosTest.forEach(function(e) {
+          (e.cursos || []).forEach(function(c) {
+            var key = c.nombre || c.sigla;
+            if (!cursoStatusMap[key]) cursoStatusMap[key] = { OK: 0, PV: 0, VENC: 0, SD: 0 };
+            if (c.status === 'HABILITADO') cursoStatusMap[key].OK++;
+            else if (c.status === 'POR VENCER') cursoStatusMap[key].PV++;
+            else if (c.status === 'VENCIDO') cursoStatusMap[key].VENC++;
+            else cursoStatusMap[key].SD++;
+          });
+        });
+        var cursoKeys = Object.keys(cursoStatusMap).sort();
+        for (var ci = 0; ci < cursoKeys.length; ci++) {
+          var ck = cursoKeys[ci];
+          var cs = cursoStatusMap[ck];
+          var total = cs.OK + cs.PV + cs.VENC + cs.SD;
+          _log('    ' + ck + ': OK=' + cs.OK + ' PV=' + cs.PV + ' VENC=' + cs.VENC + ' SD=' + cs.SD + ' TOTAL=' + total);
+        }
+      } catch(cErr) {
+        _log('    Error leyendo cursos: ' + cErr.message);
+      }
+      
+      // TEST leerHoja (con cache limpio)
+      Logger.log('');
+      _log('  --- TEST leerHoja() ---');
+      try {
+        var cache = CacheService.getScriptCache();
+        cache.removeAll([getCacheKey(baseKey, 'base')]);
+        var t0 = new Date().getTime();
+        var empleados = leerHoja(baseKey, 'base');
+        var ms = new Date().getTime() - t0;
+        _log('    Empleados retornados: ' + empleados.length + ' en ' + ms + 'ms');
+        if (empleados.length > 0) {
+          var e0 = empleados[0];
+          _log('    Primer empleado: BP=' + e0.bp + ' Nombre="' + e0.nombre + '" Cursos=' + e0.totalCursos + ' Cumpl=' + e0.cumplimiento + '%');
+        }
+        // HABILITACION GENERAL DIAGNOSTICO (para comparar con Looker)
+        var habSrc = HABILITACION_SOURCE[baseKey];
+        _log('    Fuente Habilitacion: ' + habSrc.type + (habSrc.col >= 0 ? ' (col fija ' + habSrc.col + ')' : ' (descubierta por headerKeywords)'));
+        var habCount = 0, inhabCount = 0, sinKPICount = 0, alertaCount = 0;
+        empleados.forEach(function(e) {
+          if (e.habilitacionGeneral === 'HABILITADO') { habCount++; if (e.tieneAlerta) alertaCount++; }
+          else if (e.habilitacionGeneral === 'INHABILITADO') inhabCount++;
+          else sinKPICount++;
+        });
+        var denomHab = habCount + inhabCount;
+        var pctHab = denomHab > 0 ? Math.round((habCount / denomHab) * 100) : 0;
+        _log('    --- HABILITACION GENERAL (comparar con Looker) ---');
+        _log('    Activos: ' + empleados.length);
+        _log('    Personas Habilitadas: ' + habCount);
+        _log('    Personas Inhabilitadas: ' + inhabCount);
+        _log('    Personas con Alerta (PV): ' + alertaCount);
+        _log('    Sin KPI: ' + sinKPICount);
+        _log('    % Habilitacion: ' + pctHab + '%');
+      } catch(err) {
+        _log('    ERROR: ' + err.message);
+      }
+      
+    } catch(e) {
+      _log('  ERROR CRITICO: ' + e.message);
+    }
+  }
+  
+  // RESUMEN GLOBAL
+  Logger.log('');
+  Logger.log('========================================================================');
+  _log('  RESUMEN GLOBAL');
+  _log('  Total Leidos: ' + resumenGlobal.totalLeidos);
+  _log('  Total Aceptados: ' + resumenGlobal.totalAceptados);
+  _log('  Total Rechazados: ' + resumenGlobal.totalRechazados);
+  Logger.log('========================================================================');
+  
+  // TEST getDashboardStats
+  Logger.log('');
+  _log('  --- TEST getDashboardStats("TODO") ---');
+  try {
+    // Limpiar cache para forzar lectura real
+    clearAllCache();
+    var stats = getDashboardStats('TODO');
+    _log('    success=' + stats.success + ' total=' + stats.total);
+    _log('    Personas Habilitadas=' + stats.personasHabilitadas + ' Inhabilitadas=' + stats.personasInhabilitadas);
+    _log('    Con Alerta=' + stats.personasConAlerta + ' Sin KPI=' + stats.personasSinKPI);
+    _log('    % Habilitacion=' + stats.pctHabilitacion + '%');
+    if (stats.errores && stats.errores.length > 0) {
+      _log('    ERRORES: ' + stats.errores.join(', '));
+    }
+  } catch(e) {
+    _log('    ERROR: ' + e.message);
+  }
+  
+  // TEST stats por base individual
+  var basesTest = ['CHILE', 'RAMPA', 'LATAM', 'NAM'];
+  for (var bt = 0; bt < basesTest.length; bt++) {
+    try {
+      var statsBase = getDashboardStats(basesTest[bt]);
+      _log('  getDashboardStats("' + basesTest[bt] + '"): Activos=' + statsBase.total + ' Hab=' + statsBase.personasHabilitadas + ' Inhab=' + statsBase.personasInhabilitadas + ' %Hab=' + statsBase.pctHabilitacion + '%');
+    } catch(e) {
+      _log('  getDashboardStats("' + basesTest[bt] + '"): ERROR=' + e.message);
+    }
+  }
+  
+  Logger.log('');
+  Logger.log('========================================================================');
+  _log('  FIN DIAGNOSTICO');
+  Logger.log('========================================================================');
+}
+
+
+// ===================== AUDIT FUNCTIONS (V33 — cleaned) =====================
+function auditReadBases(filtro, sample) {
+  filtro = (filtro || 'TODO').toUpperCase().trim();
+  sample = sample || 10;
+  
+  var bkMap = {
+    'CHILE': ['CHILE'], 'LATAM': ['LATAM'], 'RAMPA': ['RAMPA'], 'NAM': ['NAM'],
+    'HCC': ['LATAM', 'RAMPA'],
+    'TODO': ['CHILE', 'LATAM', 'RAMPA', 'NAM']
+  };
+  // Resolver alias
+  if (BASE_ALIAS[filtro]) filtro = BASE_ALIAS[filtro];
+  var bases = bkMap[filtro] || bkMap['TODO'];
+  
+  Logger.log('╔══════════════════════════════════════════════════════════════╗');
+  Logger.log('║ [AUDIT-READ] filtro="' + filtro + '" → bases=' + JSON.stringify(bases) + ' sample=' + sample);
+  Logger.log('╚══════════════════════════════════════════════════════════════╝');
+  
+  for (var bi = 0; bi < bases.length; bi++) {
+    var bk = bases[bi];
+    Logger.log('');
+    Logger.log('═══════════════════════════════════════════════════════════');
+    Logger.log('[AUDIT-READ][BASE=' + bk + '] INICIO');
+    Logger.log('═══════════════════════════════════════════════════════════');
+    
+    // 1. Verificar config
+    var cfg = CONFIG_BASE[bk];
+    if (!cfg) {
+      Logger.log('[AUDIT-READ][BASE=' + bk + '] FAIL reason=NO EXISTE CONFIG_BASE["' + bk + '"]');
+      continue;
+    }
+    var tabInfo = TABS[bk];
+    if (!tabInfo || !tabInfo.base) {
+      Logger.log('[AUDIT-READ][BASE=' + bk + '] FAIL reason=NO EXISTE TABS["' + bk + '"].base');
+      continue;
+    }
+    var ssId = IDS[bk];
+    if (!ssId) {
+      Logger.log('[AUDIT-READ][BASE=' + bk + '] FAIL reason=NO EXISTE IDS["' + bk + '"]');
+      continue;
+    }
+    
+    Logger.log('[AUDIT-READ][BASE=' + bk + '] Spreadsheet ID=' + ssId);
+    Logger.log('[AUDIT-READ][BASE=' + bk + '] Tab="' + tabInfo.base + '"');
+    
+    // 2. Abrir hoja
+    var ss, sh, data;
+    try {
+      ss = SpreadsheetApp.openById(ssId);
+      sh = ss.getSheetByName(tabInfo.base);
+      if (!sh) {
+        Logger.log('[AUDIT-READ][BASE=' + bk + '] FAIL reason=TAB "' + tabInfo.base + '" NO ENCONTRADA en spreadsheet');
+        continue;
+      }
+      data = sh.getDataRange().getDisplayValues();
+      if (!data || data.length <= 1) {
+        Logger.log('[AUDIT-READ][BASE=' + bk + '] FAIL reason=RANGO VACIO (filas=' + (data ? data.length : 0) + ')');
+        continue;
+      }
+    } catch(errSh) {
+      Logger.log('[AUDIT-READ][BASE=' + bk + '] FAIL reason=ERROR ABRIENDO HOJA: ' + errSh.message);
+      continue;
+    }
+    
+    var headerRow = data[0];
+    var totalCols = headerRow.length;
+    Logger.log('[AUDIT-READ][BASE=' + bk + '] rowsRaw=' + data.length + ' cols=' + totalCols);
+    
+    // 3. Columnas críticas
+    Logger.log('[AUDIT-READ][BASE=' + bk + '] COLUMNAS CRITICAS:');
+    _log('  BP: idx=' + cfg.bp + ' header="' + (headerRow[cfg.bp] || 'N/A') + '"');
+    _log('  NOMBRE: idx=' + cfg.nombre + ' header="' + (headerRow[cfg.nombre] || 'N/A') + '"');
+    _log('  EMAIL: idx=' + cfg.correo + ' header="' + (cfg.correo >= 0 ? (headerRow[cfg.correo] || 'N/A') : 'NO DEFINIDO') + '"');
+    
+    // Guard: headers críticos
+    if (cfg.bp < 0 || cfg.bp >= totalCols) _log('  ⚠ GUARD: BP idx=' + cfg.bp + ' FUERA DE RANGO (totalCols=' + totalCols + ')');
+    if (cfg.correo < 0) _log('  ⚠ GUARD: EMAIL NO DEFINIDO para base ' + bk);
+    else if (cfg.correo >= totalCols) _log('  ⚠ GUARD: EMAIL idx=' + cfg.correo + ' FUERA DE RANGO');
+    
+    // 4. Status/Activo
+    var stCfg = STATUS_COLUMNS[bk];
+    _log('  STATUS/ACTIVO: col=' + (stCfg ? stCfg.col : 'N/A') + ' logic=' + (stCfg ? stCfg.logic : 'N/A') + (stCfg && stCfg.whitelist ? ' whitelist=' + stCfg.whitelist.join(',') : ''));
+    if (stCfg && stCfg.col >= 0) {
+      _log('    header="' + (headerRow[stCfg.col] || 'N/A') + '"');
+    }
+    
+    // 5. Jerarquía
+    Logger.log('[AUDIT-READ][BASE=' + bk + '] COLUMNAS JERARQUIA:');
+    var hierCols = [
+      { name: 'SUPERVISOR', idx: cfg.jefeDirecto },
+      { name: 'JEFE AREA', idx: cfg.jefeArea },
+      { name: 'JEFE DEPARTAMENTO', idx: cfg.jefeDepartamento },
+      { name: 'SUBGERENTE', idx: cfg.subgerente },
+      { name: 'GERENTE', idx: cfg.ejecutivo },
+      { name: 'GERENTE SR', idx: cfg.gerenteSr },
+      { name: 'DIRECTOR', idx: cfg.director }
+    ];
+    var maxHierCol = 0;
+    for (var hi = 0; hi < hierCols.length; hi++) {
+      var hc = hierCols[hi];
+      var hdrText = (hc.idx >= 0 && hc.idx < totalCols) ? headerRow[hc.idx] : 'FUERA_DE_RANGO';
+      _log('  ' + hc.name + ': idx=' + hc.idx + ' header="' + hdrText + '"');
+      if (hc.idx > maxHierCol) maxHierCol = hc.idx;
+      if (hc.idx >= totalCols) _log('  ⚠ GUARD: ' + hc.name + ' idx=' + hc.idx + ' FUERA DE RANGO (totalCols=' + totalCols + ')');
+    }
+    
+    // 6. Cursos descubiertos
+    var bibPorBase = getBibliotecaPorBase();
+    var cursosBib = bibPorBase[bk] || [];
+    var cursosFb = CURSOS_POR_BASE[bk] || [];
+    var cursosConfig = [];
+    var siglasVistas = {};
+    cursosBib.forEach(function(c) { var k = normalizarSigla(c.id || c.header); if (!siglasVistas[k]) { siglasVistas[k] = true; cursosConfig.push(c); } });
+    cursosFb.forEach(function(c) { var k = normalizarSigla(c.id || c.header); if (!siglasVistas[k]) { siglasVistas[k] = true; cursosConfig.push(c); } });
+    var cursosDesc = descubrirColumnasCursos(headerRow, cursosConfig, bk);
+    var whitelist = COURSES_BY_BASE[bk] || [];
+    if (whitelist.length > 0) {
+      cursosDesc = cursosDesc.filter(function(cd) { return whitelist.indexOf(cd.id) >= 0 || whitelist.indexOf(normalizarSigla(cd.id)) >= 0; });
+    }
+    Logger.log('[AUDIT-READ][BASE=' + bk + '] CURSOS DESCUBIERTOS: ' + cursosDesc.length + '/' + cursosConfig.length);
+    for (var ci = 0; ci < cursosDesc.length; ci++) {
+      var cd = cursosDesc[ci];
+      _log('  ' + cd.id + ': statusCol=' + (cd.statusCol !== null ? cd.statusCol + '("' + (headerRow[cd.statusCol]||'') + '")' : 'NULL') +
+        ' vencCol=' + (cd.vencCol !== null ? cd.vencCol + '("' + (headerRow[cd.vencCol]||'') + '")' : 'NULL') +
+        ' habCol=' + (cd.habCol !== null ? cd.habCol : 'NULL') +
+        ' daysCol=' + (cd.daysCol !== null ? cd.daysCol : 'NULL') +
+        ' planCol=' + (cd.planCol !== null ? cd.planCol : 'NULL'));
+    }
+    
+    // 7. Contar activos/inactivos + calidad de datos
+    var rowsActivos = 0, rowsInactivos = 0;
+    var emptyBP = 0, emptyEmail = 0, emptySup = 0, emptyJA = 0, emptyJD = 0, emptySG = 0, emptyG = 0, emptyGSR = 0, emptyDir = 0;
+    var totalDataRows = data.length - 1;
+    
+    for (var ri = 1; ri < data.length; ri++) {
+      var row = ri < data.length ? data[ri] : null;
+      if (!row) continue;
+      var bpVal = normBP(row[cfg.bp]);
+      if (!bpVal || bpVal === '0' || bpVal.length < 3) continue;
+      
+      if (esEmpleadoActivo(row, bk)) {
+        rowsActivos++;
+      } else {
+        rowsInactivos++;
+        continue; // Solo auditar calidad de datos de activos
+      }
+      
+      // Calidad
+      if (!bpVal) emptyBP++;
+      if (cfg.correo >= 0 && !(row[cfg.correo] || '').toString().trim()) emptyEmail++;
+      if (cfg.jefeDirecto >= 0 && !limpiarValorJerarquia(row[cfg.jefeDirecto])) emptySup++;
+      if (cfg.jefeArea >= 0 && !limpiarValorJerarquia(row[cfg.jefeArea])) emptyJA++;
+      if (cfg.jefeDepartamento >= 0 && !limpiarValorJerarquia(row[cfg.jefeDepartamento])) emptyJD++;
+      if (cfg.subgerente >= 0 && !limpiarValorJerarquia(row[cfg.subgerente])) emptySG++;
+      if (cfg.ejecutivo >= 0 && !limpiarValorJerarquia(row[cfg.ejecutivo])) emptyG++;
+      if (cfg.gerenteSr >= 0 && !limpiarValorJerarquia(row[cfg.gerenteSr])) emptyGSR++;
+      if (cfg.director >= 0 && !limpiarValorJerarquia(row[cfg.director])) emptyDir++;
+    }
+    
+    Logger.log('[AUDIT-READ][BASE=' + bk + '] rowsActivos=' + rowsActivos + ' rowsInactivos=' + rowsInactivos);
+    Logger.log('[AUDIT-READ][BASE=' + bk + '] CALIDAD DE DATOS (% vacios en activos, de ' + rowsActivos + '):');
+    var pct = function(n) { return rowsActivos > 0 ? Math.round(n/rowsActivos*100) : 0; };
+    _log('  BP vacio: ' + emptyBP + ' (' + pct(emptyBP) + '%)');
+    _log('  Email vacio: ' + emptyEmail + ' (' + pct(emptyEmail) + '%)');
+    _log('  Supervisor vacio: ' + emptySup + ' (' + pct(emptySup) + '%)');
+    _log('  Jefe Area vacio: ' + emptyJA + ' (' + pct(emptyJA) + '%)');
+    _log('  Jefe Depto vacio: ' + emptyJD + ' (' + pct(emptyJD) + '%)');
+    _log('  Subgerente vacio: ' + emptySG + ' (' + pct(emptySG) + '%)');
+    _log('  Gerente vacio: ' + emptyG + ' (' + pct(emptyG) + '%)');
+    _log('  Gerente SR vacio: ' + emptyGSR + ' (' + pct(emptyGSR) + '%)');
+    _log('  Director vacio: ' + emptyDir + ' (' + pct(emptyDir) + '%)');
+    
+    // 8. Sample de filas
+    Logger.log('[AUDIT-READ][BASE=' + bk + '] SAMPLE (' + sample + ' filas activas):');
+    var sampled = 0;
+    for (var si = 1; si < data.length && sampled < sample; si++) {
+      var srow = data[si];
+      var sBP = normBP(srow[cfg.bp]);
+      if (!sBP || sBP === '0' || sBP.length < 3) continue;
+      if (!esEmpleadoActivo(srow, bk)) continue;
+      sampled++;
+      var sNombre = (srow[cfg.nombre] || '').toString().trim();
+      var sEmail = cfg.correo >= 0 ? (srow[cfg.correo] || '').toString().trim() : '';
+      var sStatus = cfg.status >= 0 ? (srow[cfg.status] || '').toString().trim() : '';
+      var sSup = cfg.jefeDirecto >= 0 ? limpiarValorJerarquia(srow[cfg.jefeDirecto]) : '';
+      var sJA = cfg.jefeArea >= 0 ? limpiarValorJerarquia(srow[cfg.jefeArea]) : '';
+      var sJD = cfg.jefeDepartamento >= 0 ? limpiarValorJerarquia(srow[cfg.jefeDepartamento]) : '';
+      var sSG = cfg.subgerente >= 0 ? limpiarValorJerarquia(srow[cfg.subgerente]) : '';
+      var sG = cfg.ejecutivo >= 0 ? limpiarValorJerarquia(srow[cfg.ejecutivo]) : '';
+      var sGSR = cfg.gerenteSr >= 0 ? limpiarValorJerarquia(srow[cfg.gerenteSr]) : '';
+      var sDir = cfg.director >= 0 ? limpiarValorJerarquia(srow[cfg.director]) : '';
+      _log('  [' + sampled + '] BP=' + sBP + ' | ' + sNombre + ' | email=' + sEmail + ' | status=' + sStatus);
+      _log('       SUP="' + sSup + '" JA="' + sJA + '" JDPTO="' + sJD + '" SG="' + sSG + '" G="' + sG + '" GSR="' + sGSR + '" DIR="' + sDir + '"');
+    }
+    
+    Logger.log('[AUDIT-READ][BASE=' + bk + '] FIN');
+    Logger.log('═══════════════════════════════════════════════════════════');
+  }
+  
+  Logger.log('');
+  Logger.log('[AUDIT-READ] COMPLETADO para filtro="' + filtro + '"');
+}
+
+
+/**
+ * 2) auditFindUserInBases(emailOrTodo)
+ * 
+ * Si se pasa un email, lo busca en todas las bases.
+ * Si se pasa "todo" o vacío, lista TODOS los empleados activos de todas las bases
+ * (sample de 20 por base).
+ *
+ * Llamadas de ejemplo:
+ *   auditFindUserInBases("patricio.linzmayer@latam.com")
+ *   auditFindUserInBases("todo")
+ */
+function auditFindUserInBases(emailOrTodo) {
+  var modo = (emailOrTodo || 'todo').toString().toLowerCase().trim();
+  var esTodo = (modo === 'todo' || modo === '' || modo === 'todos');
+  var email = esTodo ? '' : modo;
+  
+  Logger.log('╔══════════════════════════════════════════════════════════════╗');
+  if (esTodo) {
+    Logger.log('║ [AUDIT-FIND] MODO TODO: listando empleados activos de cada base');
+  } else {
+    Logger.log('║ [AUDIT-FIND] Buscando email="' + email + '" en todas las bases');
+  }
+  Logger.log('╚══════════════════════════════════════════════════════════════╝');
+  
+  var BASES = Object.keys(CONFIG_BASE);
+  var encontrado = false;
+  
+  for (var bi = 0; bi < BASES.length; bi++) {
+    var bk = BASES[bi];
+    Logger.log('');
+    Logger.log('[AUDIT-FIND][BASE=' + bk + '] Leyendo...');
+    
+    var empleados;
+    try {
+      empleados = leerHojaBase_raw(bk);
+    } catch(errRead) {
+      Logger.log('[AUDIT-FIND][BASE=' + bk + '] ERROR leyendo: ' + errRead.message);
+      continue;
+    }
+    
+    if (!empleados || empleados.length === 0) {
+      Logger.log('[AUDIT-FIND][BASE=' + bk + '] 0 empleados activos');
+      continue;
+    }
+    
+    Logger.log('[AUDIT-FIND][BASE=' + bk + '] ' + empleados.length + ' empleados activos');
+    
+    if (esTodo) {
+      // Modo TODO: sample de 20 por base
+      var maxSample = Math.min(empleados.length, 20);
+      for (var si = 0; si < maxSample; si++) {
+        var emp = empleados[si];
+        _log('  [' + (si+1) + '] BP=' + emp.bp + ' | "' + (emp.nombre||'').substring(0,35) + '" | email=' + (emp.correo||'-') + ' | SUP="' + (emp.jefeDirecto||'-') + '" JA="' + (emp.jefeArea||'-') + '" JDPTO="' + (emp.jefeDepartamento||'-') + '" SG="' + (emp.subgerente||'-') + '" G="' + (emp.gerente||'-') + '" GSR="' + (emp.gerenteSr||'-') + '" DIR="' + (emp.director||'-') + '"');
+      }
+      if (empleados.length > 20) _log('  ... y ' + (empleados.length - 20) + ' mas');
+    } else {
+      // Modo email específico
+      var found = false;
+      for (var ei = 0; ei < empleados.length; ei++) {
+        var emp = empleados[ei];
+        if ((emp.correo || '').toLowerCase().trim() === email) {
+          found = true;
+          encontrado = true;
+          Logger.log('[AUDIT-FIND][BASE=' + bk + '] ENCONTRADO:');
+          _log('  BP=' + emp.bp);
+          _log('  nombre="' + emp.nombre + '"');
+          _log('  correo="' + emp.correo + '"');
+          _log('  status/habilitacion="' + emp.habilitacionGeneral + '"');
+          _log('  area="' + (emp.area || '') + '"');
+          _log('  pais="' + (emp.pais || '') + '"');
+          _log('  CADENA JERARQUICA:');
+          _log('    DIR="' + (emp.director || '-') + '"');
+          _log('    GSR="' + (emp.gerenteSr || '-') + '"');
+          _log('    G="' + (emp.gerente || '-') + '"');
+          _log('    SG="' + (emp.subgerente || '-') + '"');
+          _log('    JDPTO="' + (emp.jefeDepartamento || '-') + '"');
+          _log('    JA="' + (emp.jefeArea || '-') + '"');
+          _log('    SUP="' + (emp.jefeDirecto || '-') + '"');
+          _log('  CURSOS: ' + (emp.cursos ? emp.cursos.length : 0));
+          break;
+        }
+      }
+      if (!found) {
+        Logger.log('[AUDIT-FIND][BASE=' + bk + '] NOT_FOUND en ' + empleados.length + ' empleados');
+      }
+    }
+  }
+  
+  if (!esTodo && !encontrado) {
+    Logger.log('');
+    Logger.log('[AUDIT-FIND] RESULTADO: email="' + email + '" NO ENCONTRADO EN NINGUNA BASE');
+  }
+  
+  Logger.log('');
+  Logger.log('[AUDIT-FIND] COMPLETADO');
+}
+
+
+/**
+ * 3) auditBuildHierarchy(emailOrTodo, filtro)
+ * 
+ * Construye el árbol jerárquico como lo hace Forecast, pero solo para auditoría.
+ * Si email es "todo" o vacío, usa Session.getActiveUser().getEmail().
+ * Si filtro es "TODO", prueba todas las bases.
+ *
+ * Llamadas de ejemplo:
+ *   auditBuildHierarchy("patricio.linzmayer@latam.com", "TODO")
+ *   auditBuildHierarchy("", "TODO")     ← usa tu email de session
+ *   auditBuildHierarchy("todo", "TODO") ← usa tu email de session
+ */
+function auditBuildHierarchy(emailOrTodo, filtro) {
+  var emailInput = (emailOrTodo || '').toString().toLowerCase().trim();
+  filtro = (filtro || 'TODO').toUpperCase().trim();
+  if (BASE_ALIAS[filtro]) filtro = BASE_ALIAS[filtro];
+  
+  // Si no se pasa email o se pasa "todo", usar Session
+  var email = emailInput;
+  if (!email || email === 'todo' || email === 'todos') {
+    try {
+      email = Session.getActiveUser().getEmail().toLowerCase().trim();
+      Logger.log('[AUDIT-HIER-BUILD] Email no proporcionado, usando Session: "' + email + '"');
+    } catch(e) {
+      Logger.log('[AUDIT-HIER-BUILD] ERROR: No se pudo obtener email de Session. Usa: auditBuildHierarchy("tu@email.com", "TODO")');
+      return;
+    }
+  }
+  
+  Logger.log('╔══════════════════════════════════════════════════════════════╗');
+  Logger.log('║ [AUDIT-HIER-BUILD] email="' + email + '" filtro="' + filtro + '"');
+  Logger.log('╚══════════════════════════════════════════════════════════════╝');
+  
+  // 1. Determinar bases
+  var bkMap = {
+    'CHILE': ['CHILE'], 'LATAM': ['LATAM'], 'RAMPA': ['RAMPA'], 'NAM': ['NAM'],
+    'HCC': ['LATAM', 'RAMPA'],
+    'TODO': ['CHILE', 'LATAM', 'RAMPA', 'NAM']
+  };
+  var basesParaJerarquia = (bkMap[filtro] || bkMap['TODO']).slice();
+  
+  // 2. Encontrar al usuario y su base
+  var BASES_TODAS = Object.keys(CONFIG_BASE);
+  var usuarioBase = null;
+  var usuarioNombre = null;
+  
+  for (var ub = 0; ub < BASES_TODAS.length; ub++) {
+    var bkUser;
+    try { bkUser = leerHojaBase_raw(BASES_TODAS[ub]); } catch(e) { continue; }
+    for (var eu = 0; eu < bkUser.length; eu++) {
+      if ((bkUser[eu].correo || '').toLowerCase().trim() === email) {
+        usuarioBase = BASES_TODAS[ub];
+        usuarioNombre = bkUser[eu].nombre;
+        Logger.log('[AUDIT-HIER-BUILD] Usuario encontrado: base=' + usuarioBase + ' nombre="' + usuarioNombre + '" BP=' + bkUser[eu].bp);
+        Logger.log('[AUDIT-HIER-BUILD]   DIR="' + (bkUser[eu].director||'-') + '" GSR="' + (bkUser[eu].gerenteSr||'-') + '" G="' + (bkUser[eu].gerente||'-') + '" SG="' + (bkUser[eu].subgerente||'-') + '" JDPTO="' + (bkUser[eu].jefeDepartamento||'-') + '" JA="' + (bkUser[eu].jefeArea||'-') + '" SUP="' + (bkUser[eu].jefeDirecto||'-') + '"');
+        break;
+      }
+    }
+    if (usuarioBase) break;
+  }
+  
+  if (!usuarioBase) {
+    Logger.log('[AUDIT-HIER-BUILD] USUARIO NO ENCONTRADO en ninguna base.');
+    Logger.log('[AUDIT-HIER-BUILD] Instruccion: ejecuta auditFindUserInBases("' + email + '") para verificar si existe.');
+    return;
+  }
+  
+  // 3. Garantía: incluir base del usuario
+  var todasLasBasesValidas = ['CHILE', 'LATAM', 'RAMPA', 'NAM'];
+  if (todasLasBasesValidas.indexOf(usuarioBase) >= 0 && basesParaJerarquia.indexOf(usuarioBase) < 0) {
+    basesParaJerarquia.push(usuarioBase);
+    Logger.log('[AUDIT-HIER-BUILD] GARANTIA: base "' + usuarioBase + '" agregada a basesParaJerarquia');
+  }
+  
+  Logger.log('[AUDIT-HIER-BUILD] basesParaJerarquia=' + JSON.stringify(basesParaJerarquia));
+  
+  // 4. Cargar pseudoEmpleados
+  var pseudoEmpleados = [];
+  basesParaJerarquia.forEach(function(bk) {
+    if (!CONFIG_BASE[bk] || !TABS[bk]) return;
+    try {
+      var emps = leerHojaBase_raw(bk);
+      Logger.log('[AUDIT-HIER-BUILD] base=' + bk + ' empleados=' + emps.length);
+      emps.forEach(function(emp) {
+        pseudoEmpleados.push({
+          bp: emp.bp, nombre: emp.nombre, correo: (emp.correo || '').toLowerCase().trim(),
+          jefeDirecto: emp.jefeDirecto, jefeArea: emp.jefeArea,
+          jefeDepartamento: emp.jefeDepartamento, subgerente: emp.subgerente,
+          gerente: emp.gerente, gerenteSr: emp.gerenteSr, director: emp.director,
+          base: bk
+        });
+      });
+    } catch(errB) {
+      Logger.log('[AUDIT-HIER-BUILD] ERROR cargando base ' + bk + ': ' + errB.message);
+    }
+  });
+  
+  Logger.log('[AUDIT-HIER-BUILD] pseudoEmpleadosCount=' + pseudoEmpleados.length);
+  
+  // 5. Buscar fila del usuario en pseudoEmpleados
+  var filaUsuario = null;
+  for (var fu = 0; fu < pseudoEmpleados.length; fu++) {
+    if (pseudoEmpleados[fu].correo === email) {
+      filaUsuario = pseudoEmpleados[fu];
+      break;
+    }
+  }
+  
+  if (!filaUsuario) {
+    Logger.log('[AUDIT-HIER-BUILD] userRowFoundInBase=false — email "' + email + '" NO en pseudoEmpleados (' + pseudoEmpleados.length + ' filas)');
+    return;
+  }
+  
+  Logger.log('[AUDIT-HIER-BUILD] userRowFoundInBase=true baseEncontrada=' + filaUsuario.base);
+  
+  // 6. Construir árbol
+  Logger.log('[AUDIT-HIER-BUILD] Construyendo arbol para "' + usuarioNombre + '"...');
+  var arbol = buildArbolJerarquico(usuarioNombre, pseudoEmpleados, { email: email });
+  
+  Logger.log('');
+  Logger.log('[AUDIT-HIER-BUILD] ═══ RESULTADO ═══');
+  if (arbol) {
+  Logger.log('[AUDIT-HIER-BUILD] chosenRole=' + arbol.rolAutoDetectado);
+  Logger.log('[AUDIT-HIER-BUILD] subordinatesFound=' + arbol.total);
+  Logger.log('[AUDIT-HIER-BUILD] discardedByAncestorMismatch=' + (arbol.descartadosPorAncestro || 0));
+  Logger.log('[AUDIT-HIER-BUILD] incluyeSiMismo=' + (arbol.incluyeSiMismo || false));
+  
+  // matchByColumn
+  var srcLog = '';
+  var rolesPorNivel = arbol.rolesPorNivel || {};
+  for (var rk in rolesPorNivel) srcLog += rk + ':' + rolesPorNivel[rk] + ' ';
+  Logger.log('[AUDIT-HIER-BUILD] rolesPorNivel: ' + (srcLog || 'ninguno'));
+  
+  // 7. Sample FOUND (20)
+  var maxFound = Math.min(arbol.personas.length, 20);
+  Logger.log('[AUDIT-HIER-BUILD] FOUND (' + maxFound + ' de ' + arbol.personas.length + '):');
+  for (var fi = 0; fi < maxFound; fi++) {
+    var p = arbol.personas[fi];
+    _log('  [' + fi + '] BP=' + p.bp + ' "' + (p.nombre||'').substring(0,35) + '" | DIR="' + (p.director||'-') + '" GSR="' + (p.gerenteSr||'-') + '" G="' + (p.gerente||'-') + '" SG="' + (p.subgerente||'-') + '" JDPTO="' + (p.jefeDepartamento||'-') + '" JA="' + (p.jefeArea||'-') + '" SUP="' + (p.jefeDirecto||'-') + '"');
+  }
+  if (arbol.personas.length > 20) _log('  ... y ' + (arbol.personas.length - 20) + ' mas');
+  
+  // 8. Sample DISCARDED (20)
+  var discarded = arbol.descartadosEjemplos || [];
+  Logger.log('[AUDIT-HIER-BUILD] DISCARDED (' + discarded.length + ' de ' + (arbol.descartadosPorAncestro || 0) + '):');
+  for (var di = 0; di < discarded.length; di++) {
+    var dd = discarded[di];
+    _log('  [' + di + '] BP=' + dd.bp + ' "' + dd.nombre + '" | DIR="' + (dd.dir||'-') + '" GSR="' + (dd.gsr||'-') + '" G="' + (dd.g||'-') + '" SG="' + (dd.sg||'-') + '" JDPTO="' + (dd.jdpto||'-') + '" JA="' + (dd.ja||'-') + '" SUP="' + (dd.sup||'-') + '" | CONFLICTO=' + dd.razon);
+  }
+  
+  Logger.log('');
+  Logger.log('[AUDIT-HIER-BUILD] COMPLETADO');
+  } else {
+    Logger.log('[AUDIT-HIER-BUILD] arbol es null — buildArbolJerarquico no retornó resultado');
+  }
+}
+
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// V31.2: AUDITORÍAS INDEPENDIENTES DE SESSION
+// No dependen de Session.getActiveUser(). Operan con nombre de JA o BP.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * A) auditJefeAreaSubtree(nombreJA, filtroBases)
+ * 
+ * Recorre las bases indicadas, busca todos los empleados cuyo campo
+ * "jefeArea" coincida con nombreJA, y lista:
+ *  - Total colaboradores
+ *  - Supervisores únicos + conteo por supervisor
+ *  - Bucket "Sin Supervisor"
+ *  - 10 BPs de muestra con cadena completa
+ *
+ * Ejemplos:
+ *   auditJefeAreaSubtree("TORRES JORGE ANGEL", "TODO")
+ *   auditJefeAreaSubtree("ATOCHE EDUARD HENRY", "LATAM")
+ */
+function auditJefeAreaSubtree(nombreJA, filtroBases) {
+  nombreJA = (nombreJA || '').toUpperCase().replace(/\s+/g, ' ').trim();
+  filtroBases = (filtroBases || 'TODO').toUpperCase().trim();
+  if (BASE_ALIAS[filtroBases]) filtroBases = BASE_ALIAS[filtroBases];
+  
+  Logger.log('╔══════════════════════════════════════════════════════════════╗');
+  Logger.log('║ [AUDIT-JA-SUBTREE] V32: Jefe Area: "' + nombreJA + '"');
+  Logger.log('║ [AUDIT-JA-SUBTREE] Filtro bases: ' + filtroBases);
+  Logger.log('╚══════════════════════════════════════════════════════════════╝');
+  
+  if (!nombreJA) {
+    Logger.log('[AUDIT-JA-SUBTREE] ERROR: nombreJA vacío. Uso: auditJefeAreaSubtree("TORRES JORGE ANGEL", "TODO")');
+    return;
+  }
+  
+  var bkMap = {
+    'CHILE': ['CHILE'], 'LATAM': ['LATAM'], 'RAMPA': ['RAMPA'], 'NAM': ['NAM'],
+    'HCC': ['LATAM', 'RAMPA'],
+    'TODO': ['CHILE', 'LATAM', 'RAMPA', 'NAM']
+  };
+  var bases = (bkMap[filtroBases] || bkMap['TODO']).slice();
+  
+  // ═══ PARTE 1: Lectura cruda directa ═══
+  var subordinados = [];
+  var totalEmpleados = 0;
+  
+  bases.forEach(function(bk) {
+    try {
+      var emps = leerHojaBase_raw(bk);
+      totalEmpleados += emps.length;
+      emps.forEach(function(emp) {
+        var ja = (emp.jefeArea || '').toUpperCase().replace(/\s+/g, ' ').trim();
+        if (ja === nombreJA) {
+          subordinados.push({
+            bp: emp.bp, nombre: emp.nombre, base: bk,
+            sup: (emp.jefeDirecto || '').trim(),
+            ja: ja,
+            jdpto: (emp.jefeDepartamento || '').trim(),
+            sg: (emp.subgerente || '').trim(),
+            g: (emp.gerente || '').trim(),
+            gsr: (emp.gerenteSr || '').trim(),
+            dir: (emp.director || '').trim()
+          });
+        }
+      });
+    } catch(e) {
+      Logger.log('[AUDIT-JA-SUBTREE] ERROR base ' + bk + ': ' + e.message);
+    }
+  });
+  
+  // Agrupar por supervisor
+  var porSup = {};
+  var sinSup = [];
+  subordinados.forEach(function(s) {
+    var supName = s.sup ? s.sup.toUpperCase().replace(/\s+/g, ' ').trim() : '';
+    if (!supName) {
+      sinSup.push(s);
+    } else {
+      if (!porSup[supName]) porSup[supName] = [];
+      porSup[supName].push(s);
+    }
+  });
+  
+  var supKeys = Object.keys(porSup).sort();
+  
+  Logger.log('');
+  Logger.log('[AUDIT-JA-SUBTREE] ═══ RESULTADO CRUDO ═══');
+  Logger.log('[AUDIT-JA-SUBTREE] Empleados escaneados: ' + totalEmpleados + ' (bases: ' + bases.join(', ') + ')');
+  Logger.log('[AUDIT-JA-SUBTREE] Total subordinados: ' + subordinados.length);
+  Logger.log('[AUDIT-JA-SUBTREE] Supervisores únicos: ' + supKeys.length);
+  Logger.log('[AUDIT-JA-SUBTREE] Sin Supervisor: ' + sinSup.length);
+  Logger.log('');
+  
+  // Detalle por supervisor con SAMPLE BPs + cadena completa
+  supKeys.forEach(function(sk) {
+    var lista = porSup[sk];
+    Logger.log('[AUDIT-JA-SUBTREE]   SUP="' + sk + '" → ' + lista.length + ' colaboradores');
+    lista.slice(0, 3).forEach(function(p) {
+      _log('    BP=' + p.bp + ' "' + (p.nombre||'').substring(0,30) + '"');
+      _log('      SUP="' + (p.sup||'-') + '" JA="' + (p.ja||'-') + '" JDPTO="' + (p.jdpto||'-') + '" SG="' + (p.sg||'-') + '" G="' + (p.g||'-') + '" GSR="' + (p.gsr||'-') + '" DIR="' + (p.dir||'-') + '"');
+    });
+    if (lista.length > 3) _log('    ... +' + (lista.length - 3) + ' mas');
+  });
+  
+  if (sinSup.length > 0) {
+    Logger.log('[AUDIT-JA-SUBTREE]   SIN SUPERVISOR → ' + sinSup.length + ' colaboradores');
+    sinSup.slice(0, 3).forEach(function(p) {
+      _log('    BP=' + p.bp + ' "' + (p.nombre||'').substring(0,30) + '"');
+      _log('      SUP="' + (p.sup||'-') + '" JA="' + (p.ja||'-') + '" JDPTO="' + (p.jdpto||'-') + '" SG="' + (p.sg||'-') + '" G="' + (p.g||'-') + '" GSR="' + (p.gsr||'-') + '" DIR="' + (p.dir||'-') + '"');
+    });
+    if (sinSup.length > 3) _log('    ... +' + (sinSup.length - 3) + ' mas');
+  }
+  
+  // ═══ PARTE 2: Comparar con buildArbolJerarquico ═══
+  Logger.log('');
+  Logger.log('[AUDIT-JA-SUBTREE] ═══ COBERTURA: BASE vs ARBOL ═══');
+  
+  try {
+    // Leer empleados procesados (como lo hace getForecastDataByBase)
+    var todosEmps = [];
+    bases.forEach(function(bk) {
+      try {
+        var emps = leerHoja(bk, 'base');
+        todosEmps = todosEmps.concat(emps);
+      } catch(e) {}
+    });
+    
+    var arbol = buildArbolJerarquico(nombreJA, todosEmps, { rolFiltro: 'TODOS' });
+    var bpsArbol = {};
+    if (arbol && arbol.personas) {
+      arbol.personas.forEach(function(p) { bpsArbol[String(p.bp)] = p; });
+    }
+    var bpsCrudos = {};
+    subordinados.forEach(function(s) { bpsCrudos[String(s.bp)] = s; });
+    
+    var bpsArbolKeys = Object.keys(bpsArbol);
+    var bpsCrudosKeys = Object.keys(bpsCrudos);
+    
+    Logger.log('[AUDIT-JA-SUBTREE] CRUDO (jefeArea match):       ' + bpsCrudosKeys.length + ' BPs');
+    Logger.log('[AUDIT-JA-SUBTREE] ARBOL (buildArbolJerarquico): ' + bpsArbolKeys.length + ' BPs (rol=' + ((arbol && arbol.rolAutoDetectado) ? arbol.rolAutoDetectado : 'N/A') + ')');
+    
+    // BPs en crudo pero NO en arbol → se pierden en buildArbol
+    var perdidos = bpsCrudosKeys.filter(function(bp) { return !bpsArbol[bp]; });
+    if (perdidos.length > 0) {
+      Logger.log('[AUDIT-JA-SUBTREE] ⚠ ' + perdidos.length + ' BPs en CRUDO pero NO en ARBOL (se pierden):');
+      perdidos.slice(0, 15).forEach(function(bp) {
+        var s = bpsCrudos[bp];
+        _log('  BP=' + bp + ' "' + (s.nombre||'').substring(0,30) + '" SUP="' + (s.sup||'-') + '" JDPTO="' + (s.jdpto||'-') + '"');
+      });
+      if (perdidos.length > 15) _log('  ... +' + (perdidos.length - 15) + ' mas');
+    } else {
+      Logger.log('[AUDIT-JA-SUBTREE] ✓ Todos los BPs del crudo están en el árbol');
+    }
+    
+    // BPs en arbol pero NO en crudo → expansión recursiva los incluyó
+    var extras = bpsArbolKeys.filter(function(bp) { return !bpsCrudos[bp]; });
+    if (extras.length > 0) {
+      Logger.log('[AUDIT-JA-SUBTREE] + ' + extras.length + ' BPs en ARBOL pero NO en CRUDO (por expansión recursiva):');
+      extras.slice(0, 10).forEach(function(bp) {
+        var p = bpsArbol[bp];
+        _log('  BP=' + bp + ' "' + (p.nombre||'').substring(0,30) + '" SUP="' + (p.jefeDirecto||'-') + '" JA="' + (p.jefeArea||'-') + '"');
+      });
+    }
+    
+    // Supervisores en arbol
+    var supsArbol = {};
+    bpsArbolKeys.forEach(function(bp) {
+      var p = bpsArbol[bp];
+      var sup = (p.jefeDirecto || '').toUpperCase().replace(/\s+/g, ' ').trim();
+      supsArbol[sup || '(Sin Supervisor)'] = (supsArbol[sup || '(Sin Supervisor)'] || 0) + 1;
+    });
+    
+    Logger.log('[AUDIT-JA-SUBTREE] Supervisores en ARBOL: ' + Object.keys(supsArbol).length);
+    Object.keys(supsArbol).sort().forEach(function(sk) {
+      _log('  "' + sk + '": ' + supsArbol[sk]);
+    });
+    
+  } catch(e) {
+    Logger.log('[AUDIT-JA-SUBTREE] ERROR en comparación árbol: ' + e.message);
+  }
+  
+  Logger.log('');
+  Logger.log('[AUDIT-JA-SUBTREE] V32 COMPLETADO');
+}
+
+
+/**
+ * B) auditAllJefesAreaCoverage(filtroBases, sampleSize)
+ *
+ * Lista TODOS los Jefes de Área únicos en las bases indicadas.
+ * Para cada JA: total colaboradores, #supervisores, #sinSupervisor.
+ * Resalta los JAs con 0 supervisores pero con colaboradores.
+ *
+ * Ejemplos:
+ *   auditAllJefesAreaCoverage("TODO", 50)
+ *   auditAllJefesAreaCoverage("LATAM", 30)
+ */
+function auditAllJefesAreaCoverage(filtroBases, sampleSize) {
+  filtroBases = (filtroBases || 'TODO').toUpperCase().trim();
+  if (BASE_ALIAS[filtroBases]) filtroBases = BASE_ALIAS[filtroBases];
+  sampleSize = parseInt(sampleSize) || 50;
+  
+  Logger.log('╔══════════════════════════════════════════════════════════════╗');
+  Logger.log('║ [AUDIT-ALL-JA] Cobertura de Jefes de Área');
+  Logger.log('║ [AUDIT-ALL-JA] Filtro: ' + filtroBases + ' | sample=' + sampleSize);
+  Logger.log('╚══════════════════════════════════════════════════════════════╝');
+  
+  var bkMap = {
+    'CHILE': ['CHILE'], 'LATAM': ['LATAM'], 'RAMPA': ['RAMPA'], 'NAM': ['NAM'],
+    'HCC': ['LATAM', 'RAMPA'],
+    'TODO': ['CHILE', 'LATAM', 'RAMPA', 'NAM']
+  };
+  var bases = (bkMap[filtroBases] || bkMap['TODO']).slice();
+  
+  var porJA = {};  // { nombreJA: { total: N, sups: Set, sinSup: N } }
+  var totalEmps = 0;
+  var sinJA = 0;
+  
+  bases.forEach(function(bk) {
+    try {
+      var emps = leerHojaBase_raw(bk);
+      totalEmps += emps.length;
+      emps.forEach(function(emp) {
+        var ja = (emp.jefeArea || '').toUpperCase().replace(/\s+/g, ' ').trim();
+        if (!ja) { sinJA++; return; }
+        if (!porJA[ja]) porJA[ja] = { total: 0, sups: {}, sinSup: 0 };
+        porJA[ja].total++;
+        var sup = (emp.jefeDirecto || '').toUpperCase().replace(/\s+/g, ' ').trim();
+        if (sup) {
+          porJA[ja].sups[sup] = (porJA[ja].sups[sup] || 0) + 1;
+        } else {
+          porJA[ja].sinSup++;
+        }
+      });
+    } catch(e) {
+      Logger.log('[AUDIT-ALL-JA] ERROR base ' + bk + ': ' + e.message);
+    }
+  });
+  
+  var jaKeys = Object.keys(porJA).sort(function(a, b) { return porJA[b].total - porJA[a].total; });
+  
+  Logger.log('');
+  Logger.log('[AUDIT-ALL-JA] ═══ RESULTADO ═══');
+  Logger.log('[AUDIT-ALL-JA] Total empleados escaneados: ' + totalEmps);
+  Logger.log('[AUDIT-ALL-JA] Jefes de Área únicos: ' + jaKeys.length);
+  Logger.log('[AUDIT-ALL-JA] Empleados sin Jefe de Área: ' + sinJA);
+  Logger.log('');
+  
+  var sinSupPeroConColab = [];
+  var count = Math.min(jaKeys.length, sampleSize);
+  
+  for (var i = 0; i < count; i++) {
+    var ja = jaKeys[i];
+    var info = porJA[ja];
+    var numSups = Object.keys(info.sups).length;
+    var supList = Object.keys(info.sups).map(function(s) { return s.substring(0,20) + '(' + info.sups[s] + ')'; }).join(', ');
+    
+    Logger.log('[AUDIT-ALL-JA]   "' + ja + '" → ' + info.total + ' colab | ' + numSups + ' sups | ' + info.sinSup + ' sinSup' + (numSups > 0 ? ' | sups: ' + supList : ''));
+    
+    if (numSups === 0 && info.total > 0) {
+      sinSupPeroConColab.push(ja + ' (' + info.total + ')');
+    }
+  }
+  if (jaKeys.length > count) Logger.log('[AUDIT-ALL-JA]   ... y ' + (jaKeys.length - count) + ' JAs mas');
+  
+  // Alertas
+  if (sinSupPeroConColab.length > 0) {
+    Logger.log('');
+    Logger.log('[AUDIT-ALL-JA] ⚠ JAs con colaboradores PERO 0 supervisores:');
+    sinSupPeroConColab.forEach(function(s) { _log('  → ' + s); });
+  }
+  
+  Logger.log('');
+  Logger.log('[AUDIT-ALL-JA] COMPLETADO');
+}
+
+
+/**
+ * C) auditHierarchyByBP(bp, filtroBases)
+ * 
+ * Busca un BP específico en las bases, imprime su cadena jerárquica completa,
+ * y explica si entraría al subtree de su Jefe de Área (simula matchContexto).
+ *
+ * Ejemplos:
+ *   auditHierarchyByBP("4068818", "TODO")
+ *   auditHierarchyByBP("4500519", "LATAM")
+ */
+function auditHierarchyByBP(bp, filtroBases) {
+  bp = String(bp || '').trim();
+  filtroBases = (filtroBases || 'TODO').toUpperCase().trim();
+  if (BASE_ALIAS[filtroBases]) filtroBases = BASE_ALIAS[filtroBases];
+  
+  Logger.log('╔══════════════════════════════════════════════════════════════╗');
+  Logger.log('║ [AUDIT-BP] Análisis jerárquico para BP=' + bp);
+  Logger.log('║ [AUDIT-BP] Filtro bases: ' + filtroBases);
+  Logger.log('╚══════════════════════════════════════════════════════════════╝');
+  
+  if (!bp) {
+    Logger.log('[AUDIT-BP] ERROR: BP vacío. Uso: auditHierarchyByBP("4068818", "TODO")');
+    return;
+  }
+  
+  var bkMap = {
+    'CHILE': ['CHILE'], 'LATAM': ['LATAM'], 'RAMPA': ['RAMPA'], 'NAM': ['NAM'],
+    'HCC': ['LATAM', 'RAMPA'],
+    'TODO': ['CHILE', 'LATAM', 'RAMPA', 'NAM']
+  };
+  var bases = (bkMap[filtroBases] || bkMap['TODO']).slice();
+  
+  var encontrado = null;
+  var baseEnc = '';
+  
+  for (var bi = 0; bi < bases.length; bi++) {
+    try {
+      var emps = leerHojaBase_raw(bases[bi]);
+      for (var ei = 0; ei < emps.length; ei++) {
+        if (String(emps[ei].bp) === bp) {
+          encontrado = emps[ei];
+          baseEnc = bases[bi];
+          break;
+        }
+      }
+      if (encontrado) break;
+    } catch(e) {
+      Logger.log('[AUDIT-BP] ERROR base ' + bases[bi] + ': ' + e.message);
+    }
+  }
+  
+  if (!encontrado) {
+    Logger.log('[AUDIT-BP] BP=' + bp + ' NO ENCONTRADO en bases: ' + bases.join(', '));
+    return;
+  }
+  
+  Logger.log('');
+  Logger.log('[AUDIT-BP] ═══ BP ENCONTRADO ═══');
+  Logger.log('[AUDIT-BP] Base: ' + baseEnc);
+  Logger.log('[AUDIT-BP] BP: ' + encontrado.bp);
+  Logger.log('[AUDIT-BP] Nombre: "' + (encontrado.nombre || '') + '"');
+  Logger.log('[AUDIT-BP] Correo: "' + (encontrado.correo || '') + '"');
+  Logger.log('[AUDIT-BP] Pais: "' + (encontrado.pais || '') + '"');
+  Logger.log('[AUDIT-BP] Area: "' + (encontrado.area || '') + '"');
+  Logger.log('[AUDIT-BP] Hab.General: "' + (encontrado.habilitacionGeneral || '') + '"');
+  Logger.log('');
+  Logger.log('[AUDIT-BP] ═══ CADENA JERÁRQUICA COMPLETA ═══');
+  Logger.log('[AUDIT-BP]   DIRECTOR:          "' + (encontrado.director || '(vacío)') + '"');
+  Logger.log('[AUDIT-BP]   GERENTE SR:        "' + (encontrado.gerenteSr || '(vacío)') + '"');
+  Logger.log('[AUDIT-BP]   GERENTE:           "' + (encontrado.gerente || '(vacío)') + '"');
+  Logger.log('[AUDIT-BP]   SUBGERENTE:        "' + (encontrado.subgerente || '(vacío)') + '"');
+  Logger.log('[AUDIT-BP]   JEFE DEPARTAMENTO: "' + (encontrado.jefeDepartamento || '(vacío)') + '"');
+  Logger.log('[AUDIT-BP]   JEFE AREA:         "' + (encontrado.jefeArea || '(vacío)') + '"');
+  Logger.log('[AUDIT-BP]   SUPERVISOR:        "' + (encontrado.jefeDirecto || '(vacío)') + '"');
+  
+  // Simular: ¿entraría al subtree de su JA?
+  var jaName = (encontrado.jefeArea || '').toUpperCase().replace(/\s+/g, ' ').trim();
+  if (!jaName) {
+    Logger.log('');
+    Logger.log('[AUDIT-BP] Este BP NO tiene Jefe de Área asignado. No entraría en ningún subtree de JA.');
+  } else {
+    Logger.log('');
+    Logger.log('[AUDIT-BP] ═══ SIMULACIÓN SUBTREE ═══');
+    Logger.log('[AUDIT-BP] Su Jefe de Área es: "' + jaName + '"');
+    
+    // Buscar al JA en las bases para obtener su contexto
+    var jaRow = null;
+    for (var jbi = 0; jbi < bases.length; jbi++) {
+      try {
+        var jaEmps = leerHojaBase_raw(bases[jbi]);
+        for (var jei = 0; jei < jaEmps.length; jei++) {
+          var empNorm = (jaEmps[jei].nombre || '').toUpperCase().replace(/\s+/g, ' ').trim();
+          if (empNorm === jaName) { jaRow = jaEmps[jei]; break; }
+          // Buscar también en columna jefeArea por si el JA no tiene fila propia
+        }
+        if (jaRow) break;
+      } catch(e) {}
+    }
+    
+    if (jaRow) {
+      Logger.log('[AUDIT-BP] Fila del JA encontrada: BP=' + jaRow.bp);
+      Logger.log('[AUDIT-BP] Contexto del JA (ancestros):');
+      Logger.log('[AUDIT-BP]   JDPTO="' + (jaRow.jefeDepartamento||'(vacío)') + '" SG="' + (jaRow.subgerente||'(vacío)') + '" G="' + (jaRow.gerente||'(vacío)') + '" GSR="' + (jaRow.gerenteSr||'(vacío)') + '" DIR="' + (jaRow.director||'(vacío)') + '"');
+      
+      // Comparar ancestros
+      var campos = [
+        { key: 'director', label: 'DIRECTOR' },
+        { key: 'gerenteSr', label: 'GERENTE_SR' },
+        { key: 'gerente', label: 'GERENTE' },
+        { key: 'subgerente', label: 'SUBGERENTE' },
+        { key: 'jefeDepartamento', label: 'JEFE_DPTO' }
+      ];
+      Logger.log('');
+      Logger.log('[AUDIT-BP] ═══ MATCH ANCESTROS (BP vs JA) ═══');
+      var bloqueo = false;
+      campos.forEach(function(c) {
+        var valJA = (jaRow[c.key] || '').toUpperCase().replace(/\s+/g, ' ').trim();
+        var valBP = (encontrado[c.key] || '').toUpperCase().replace(/\s+/g, ' ').trim();
+        var status = '';
+        if (!valJA && !valBP) status = 'SKIP (ambos vacíos)';
+        else if (!valJA) status = 'OK (JA vacío, no constrañe)';
+        else if (!valBP) status = 'OK-V31 (BP vacío, se permite)';
+        else if (valJA === valBP) status = 'MATCH';
+        else { status = 'CONFLICTO → excluiría al BP'; bloqueo = true; }
+        Logger.log('[AUDIT-BP]   ' + c.label + ': JA="' + (valJA||'(vacío)') + '" vs BP="' + (valBP||'(vacío)') + '" → ' + status);
+      });
+      
+      Logger.log('');
+      if (bloqueo) {
+        Logger.log('[AUDIT-BP] RESULTADO: BP SERIA EXCLUIDO del subtree de "' + jaName + '" por conflicto de ancestros.');
+      } else {
+        Logger.log('[AUDIT-BP] RESULTADO: BP ENTRARÍA al subtree de "' + jaName + '" (sin conflictos).');
+      }
+    } else {
+      Logger.log('[AUDIT-BP] Fila del JA "' + jaName + '" NO encontrada como empleado en las bases.');
+      Logger.log('[AUDIT-BP] Esto puede ser normal si el JA solo aparece como referencia en la columna JefeArea de otros empleados.');
+      Logger.log('[AUDIT-BP] El BP igualmente entraría al subtree si jefeArea coincide (match directo).');
+    }
+  }
+  
+  Logger.log('');
+  Logger.log('[AUDIT-BP] COMPLETADO');
+}
+
+
+/**
+ * D) auditCountDelta(filtroBases)
+ * 
+ * Para cada base (o la indicada), lee TODA la hoja cruda y clasifica cada fila
+ * en categorías de descarte. Al final muestra el delta entre filas totales y
+ * empleados que llegan al UI.
+ *
+ * Si hay diferencia, lista los BPs faltantes con el motivo exacto.
+ *
+ * Ejemplos:
+ *   auditCountDelta("HCC")     → audita LATAM + RAMPA
+ *   auditCountDelta("CHILE")   → solo Chile
+ *   auditCountDelta("TODO")    → todas las bases
+ */
+function auditCountDelta(filtroBases) {
+  filtroBases = (filtroBases || 'TODO').toUpperCase().trim();
+  if (BASE_ALIAS[filtroBases]) filtroBases = BASE_ALIAS[filtroBases];
+  
+  Logger.log('╔══════════════════════════════════════════════════════════════╗');
+  Logger.log('║ [AUDIT-DELTA] V32: Lectura CRUDA real (getValues)');
+  Logger.log('║ [AUDIT-DELTA] Filtro: ' + filtroBases);
+  Logger.log('╚══════════════════════════════════════════════════════════════╝');
+  
+  var bkMap = {
+    'CHILE': ['CHILE'], 'LATAM': ['LATAM'], 'RAMPA': ['RAMPA'], 'NAM': ['NAM'],
+    'HCC': ['LATAM', 'RAMPA'],
+    'TODO': ['CHILE', 'LATAM', 'RAMPA', 'NAM']
+  };
+  var bases = (bkMap[filtroBases] || bkMap['TODO']).slice();
+  
+  var granTotal = { filasTotales: 0, sinBP: 0, inactivos: 0, sinNombre: 0, activos: 0 };
+  
+  // Helper: find column index by normalized header keywords
+  function findColByHeader(headers, keywords) {
+    for (var c = 0; c < headers.length; c++) {
+      var h = normKey(headers[c]);
+      if (!h) continue;
+      for (var k = 0; k < keywords.length; k++) {
+        if (h === normKey(keywords[k]) || h.indexOf(normKey(keywords[k])) >= 0) return c;
+      }
+    }
+    return -1;
+  }
+  
+  bases.forEach(function(bk) {
+    Logger.log('');
+    Logger.log('[AUDIT-DELTA] ═══ BASE: ' + bk + ' ═══');
+    
+    try {
+      // ═══ LECTURA CRUDA REAL ═══
+      var ss = getSpreadsheet(bk);
+      var tabName = TABS[bk] ? TABS[bk].base : 'BASE';
+      var sh = ss.getSheetByName(tabName);
+      if (!sh) { Logger.log('[AUDIT-DELTA] ERROR: Hoja "' + tabName + '" no encontrada en ' + bk); return; }
+      var rawData = sh.getDataRange().getValues();
+      if (!rawData || rawData.length < 2) {
+        Logger.log('[AUDIT-DELTA] ERROR: No hay datos para ' + bk + ' (filas=' + (rawData ? rawData.length : 0) + ')');
+        return;
+      }
+      
+      var headers = rawData[0];
+      var cfg = CONFIG_BASE[bk];
+      if (!cfg) { Logger.log('[AUDIT-DELTA] ERROR: sin CONFIG_BASE para ' + bk); return; }
+      
+      // ═══ IDENTIFICAR COLUMNAS POR HEADER ═══
+      var idxBP = cfg.bp;
+      var idxNombre = cfg.nombre;
+      
+      // STATUS: usar CONFIG_BASE.status como base, RAMPA usa preferredCol=79
+      var idxStatus = -1;
+      var statusLogic = 'N/A';
+      var statusCfg = STATUS_COLUMNS[bk];
+      if (statusCfg) {
+        statusLogic = statusCfg.logic;
+        if (statusCfg.logic === 'DISCOVER_WHITELIST') {
+          // RAMPA: usar preferredCol directamente si tiene ACTIVO
+          if (statusCfg.preferredCol >= 0 && statusCfg.preferredCol < headers.length) {
+            var prefActivoCount = 0;
+            for (var pr = 1; pr < Math.min(rawData.length, 100); pr++) {
+              if (normKey(rawData[pr][statusCfg.preferredCol]) === 'ACTIVO') prefActivoCount++;
+            }
+            if (prefActivoCount > 0) {
+              idxStatus = statusCfg.preferredCol;
+              statusLogic = 'PREFERRED_COL_' + statusCfg.preferredCol;
+            }
+          }
+          // Fallback: discover dynamically
+          if (idxStatus < 0) {
+            idxStatus = descubrirColumnaEstadoActivo(headers, rawData, bk);
+            statusLogic = 'DISCOVERED_' + idxStatus;
+          }
+        } else if (statusCfg.col >= 0) {
+          idxStatus = statusCfg.col;
+        }
+      }
+      
+      Logger.log('[AUDIT-DELTA] INDICES: idxBP=' + idxBP + ' idxNombre=' + idxNombre + ' idxStatus=' + idxStatus + ' (logic=' + statusLogic + ')');
+      Logger.log('[AUDIT-DELTA] HEADERS: BP="' + (headers[idxBP] || '(fuera)') + '" NOMBRE="' + (headers[idxNombre] || '(fuera)') + '" STATUS="' + (idxStatus >= 0 ? (headers[idxStatus] || '(fuera)') : '(sin col)') + '"');
+      Logger.log('[AUDIT-DELTA] Total columnas=' + headers.length + ' Total filas=' + rawData.length);
+      
+      // ═══ SAMPLE 5 FILAS CRUDAS ═══
+      Logger.log('[AUDIT-DELTA] SAMPLE 5 filas crudas:');
+      for (var si = 1; si <= Math.min(5, rawData.length - 1); si++) {
+        var sRow = rawData[si];
+        _log('  [' + si + '] BP="' + (sRow[idxBP] || '') + '" NOMBRE="' + String(sRow[idxNombre] || '').substring(0, 30) + '" STATUS="' + (idxStatus >= 0 ? (sRow[idxStatus] || '') : 'N/A') + '"');
+      }
+      
+      // ═══ CONTEO ═══
+      var filasTotales = rawData.length - 1;
+      var sinBP = 0;
+      var inactivos = [];
+      var sinNombre = 0;
+      var activos = 0;
+      var statusBreakdown = {};
+      
+      for (var i = 1; i < rawData.length; i++) {
+        var row = rawData[i];
+        var bpRaw = row[idxBP];
+        var bp = normBP(bpRaw);
+        
+        // V32: BP validation relajada — cualquier valor no-vacío y no-cero cuenta
+        if (!bp || bp === '0') { sinBP++; continue; }
+        
+        // Status check
+        var statusVal = idxStatus >= 0 ? (normKey(row[idxStatus]) || '(VACIO)') : '(sin col)';
+        if (!statusBreakdown[statusVal]) statusBreakdown[statusVal] = { total: 0, activo: 0, inactivo: 0 };
+        statusBreakdown[statusVal].total++;
+        
+        // Determine if active using the SAME logic as leerHojaBase
+        var esActivo = true;
+        if (statusCfg && idxStatus >= 0) {
+          var sVal = normKey(row[idxStatus]);
+          if (sVal === 'SIN KPI') {
+            esActivo = false;
+          } else if (statusCfg.logic === 'NOT_WC' || (statusLogic && statusLogic.indexOf('NOT_WC') >= 0)) {
+            esActivo = sVal !== 'WC';
+          } else {
+            // WHITELIST logic (ACTIVO only)
+            var wl = statusCfg.whitelist || ['ACTIVO'];
+            esActivo = false;
+            for (var wi = 0; wi < wl.length; wi++) {
+              if (sVal === normKey(wl[wi])) { esActivo = true; break; }
+            }
+            if (!sVal) esActivo = false;
+          }
+        }
+        
+        if (!esActivo) {
+          statusBreakdown[statusVal].inactivo++;
+          inactivos.push({ bp: bp, nombre: String(row[idxNombre] || '').substring(0, 30), status: statusVal });
+          continue;
+        }
+        statusBreakdown[statusVal].activo++;
+        
+        var nombreC = String(row[idxNombre] || '').trim();
+        if (!nombreC) { sinNombre++; continue; }
+        
+        activos++;
+      }
+      
+      Logger.log('[AUDIT-DELTA] Filas totales (sin header): ' + filasTotales);
+      Logger.log('[AUDIT-DELTA] Sin BP (vacio/invalido):     ' + sinBP);
+      Logger.log('[AUDIT-DELTA] Inactivos (status):          ' + inactivos.length);
+      Logger.log('[AUDIT-DELTA] Sin nombre:                  ' + sinNombre);
+      Logger.log('[AUDIT-DELTA] ─────────────────────────────');
+      Logger.log('[AUDIT-DELTA] ACTIVOS (llegan al UI):      ' + activos);
+      Logger.log('[AUDIT-DELTA] CHECK: ' + sinBP + '+' + inactivos.length + '+' + sinNombre + '+' + activos + '=' + (sinBP + inactivos.length + sinNombre + activos) + ' (esperado:' + filasTotales + ')');
+      
+      var statusKeys = Object.keys(statusBreakdown).sort(function(a, b) { return statusBreakdown[b].total - statusBreakdown[a].total; });
+      Logger.log('[AUDIT-DELTA] Desglose STATUS:');
+      statusKeys.forEach(function(sk) {
+        var sb = statusBreakdown[sk];
+        Logger.log('[AUDIT-DELTA]   "' + sk + '": total=' + sb.total + ' activo=' + sb.activo + ' descartado=' + sb.inactivo);
+      });
+      
+      if (inactivos.length > 0) {
+        Logger.log('[AUDIT-DELTA] DESCARTADOS (primeros 20):');
+        inactivos.slice(0, 20).forEach(function(d) {
+          _log('  BP=' + d.bp + ' "' + d.nombre + '" status="' + d.status + '"');
+        });
+        if (inactivos.length > 20) _log('  ... +' + (inactivos.length - 20) + ' mas');
+      }
+      
+      granTotal.filasTotales += filasTotales;
+      granTotal.sinBP += sinBP;
+      granTotal.inactivos += inactivos.length;
+      granTotal.sinNombre += sinNombre;
+      granTotal.activos += activos;
+      
+    } catch(e) {
+      Logger.log('[AUDIT-DELTA] ERROR en ' + bk + ': ' + e.message + ' | stack: ' + (e.stack || '').substring(0, 200));
+    }
+  });
+  
+  if (bases.length > 1) {
+    Logger.log('');
+    Logger.log('[AUDIT-DELTA] ═══ RESUMEN GLOBAL (' + filtroBases + ' = ' + bases.join('+') + ') ═══');
+    Logger.log('[AUDIT-DELTA] Filas totales:    ' + granTotal.filasTotales);
+    Logger.log('[AUDIT-DELTA] Sin BP:           ' + granTotal.sinBP);
+    Logger.log('[AUDIT-DELTA] Inactivos:        ' + granTotal.inactivos);
+    Logger.log('[AUDIT-DELTA] Sin nombre:       ' + granTotal.sinNombre);
+    Logger.log('[AUDIT-DELTA] ACTIVOS (UI):     ' + granTotal.activos);
+  }
+  
+  Logger.log('');
+  Logger.log('[AUDIT-DELTA] V32 COMPLETADO');
+}
+
+
+
+// ═══════════════════════════════════════════════════════════════
+

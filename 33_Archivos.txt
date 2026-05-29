@@ -1,0 +1,745 @@
+// ═══════════════════════════════════════════════════════════════
+// CODIGO_ARCHIVOS.gs — Generacion de Archivos, Exports, Drive
+// Responsabilidades:
+//   - Creacion de Excel/PDF en Drive
+//   - Exportacion de Forecast
+//   - Carpeta MENTE_Outputs para outputs separados del maestro
+//   - Registro de trazabilidad de archivos generados
+// ═══════════════════════════════════════════════════════════════
+
+function crearExcelEnDrive() {
+  try {
+    var data = getForecastData('TODO');
+    if (!data.success) return { success: false, error: data.error };
+    
+    var ss = SpreadsheetApp.create('Forecast_LATAM_Cargo_' + Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd'));
+    var sheet = ss.getActiveSheet();
+    sheet.setName('Forecast');
+    
+    // V33: Headers con 7 niveles jerárquicos
+    var headers = [
+      'BP', 'Nombre', 'País', 'Correo',
+      'Jefe Directo', 'Jefe Área', 'Jefe Departamento', 'Subgerente', 'Gerente', 'Gerente SR', 'Director',
+      'Área', 'Curso', 'Status', 'Vencimiento', 'Días', 'Base'
+    ];
+    
+    var dataRows = [];
+    data.registros.forEach(function(r) {
+      dataRows.push([
+        r.b, r.n, r.p, r.co || '',
+        r.jd || '', r.ja || '', r.jdpto || '', r.sg || '', r.g || '', r.gsr || '', r.dir || '',
+        r.a, r.cn || r.cu, r.s, r.v, r.d, r.bo
+      ]);
+    });
+    
+    // Ordenar por jerarquía: Director→GerenteSR→Gerente→SubG→JDepto→JArea→JDirecto→Nombre
+    dataRows.sort(function(a, b) {
+      var cols = [10, 9, 8, 7, 6, 5, 4, 1];
+      for (var si = 0; si < cols.length; si++) {
+        var va = (a[cols[si]] || '').toString().toUpperCase();
+        var vb = (b[cols[si]] || '').toString().toUpperCase();
+        if (va < vb) return -1;
+        if (va > vb) return 1;
+      }
+      return 0;
+    });
+    
+    var allRows = [headers].concat(dataRows);
+    sheet.getRange(1, 1, allRows.length, headers.length).setValues(allRows);
+    sheet.getRange(1, 1, 1, headers.length).setBackground('#1e293b').setFontColor('#ffffff').setFontWeight('bold');
+    if (allRows.length > 1) sheet.getRange(2, 5, allRows.length - 1, 7).setBackground('#f0f9ff');
+    for (var i = 1; i <= headers.length; i++) sheet.autoResizeColumn(i);
+    sheet.setFrozenRows(1);
+    
+    // Mover archivo a MENTE_Outputs
+    var fileUrl = ss.getUrl();
+    try {
+      var folder = _getOutputSubfolder('Exports');
+      var file = DriveApp.getFileById(ss.getId());
+      folder.addFile(file);
+      DriveApp.getRootFolder().removeFile(file);
+    } catch (moveErr) { Logger.log('[OUTPUT-MOVE] ' + moveErr.message); }
+
+    _logOutput('EXCEL', fileUrl, 'FORECAST', 'Forecast General: ' + data.registros.length + ' registros', { base: 'TODO', nombreArchivo: ss.getName(), origen: 'REPORTE' });
+
+    return { success: true, fileId: ss.getId(), fileUrl: fileUrl, total: data.registros.length };
+  } catch(e) {
+    return { success: false, error: e.message };
+  }
+}
+
+/**
+ * Crea o actualiza Excel en Drive con datos del Forecast
+ * @param {Array} forecastData - Array de registros forecast
+ * @param {string} nombreArchivo - Nombre base del archivo
+ * @param {string} tipoNombre - Tipo de base para el nombre
+ * @param {boolean} resetear - Si true, busca y actualiza archivo existente
+ */
+function crearExcelForecastEnDrive(forecastData, nombreArchivo, tipoNombre, resetear) {
+  try {
+    var fecha = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd_HH-mm');
+    var fileName = (nombreArchivo || 'Forecast_LATAM') + '_' + (tipoNombre || '') + '_' + fecha;
+    
+    var registros = forecastData || [];
+    if (!registros.length) {
+      var data = getForecastData('TODO');
+      if (data.success) registros = data.registros;
+    }
+    
+    if (!registros.length) {
+      return { success: false, error: 'No hay registros para exportar' };
+    }
+    
+    var ss = SpreadsheetApp.create(fileName);
+    var sheet = ss.getActiveSheet();
+    sheet.setName('Forecast');
+    
+    // V33: Headers con los 7 niveles jerárquicos completos + ordenamiento
+    var headers = [
+      'BP', 'Nombre', 'País', 'Correo',
+      'Jefe Directo', 'Jefe Área', 'Jefe Departamento', 'Subgerente', 'Gerente', 'Gerente SR', 'Director',
+      'Área', 'Curso', 'Status', 'Vencimiento', 'Habilitación', 'Días Restantes', 'Base'
+    ];
+    
+    var dataRows = [];
+    registros.forEach(function(r) {
+      var correoColaborador = r.co || r.correo || '';
+      dataRows.push([
+        r.b || r.bp || '',
+        r.n || r.nombre || '',
+        r.p || r.pais || '',
+        correoColaborador,
+        r.jd || r.jefeDirecto || '',
+        r.ja || r.jefeArea || '',
+        r.jdpto || r.jefeDepartamento || '',
+        r.sg || r.subgerente || '',
+        r.g || r.ejecutivo || r.gerente || '',
+        r.gsr || r.gerenteSr || '',
+        r.dir || r.director || '',
+        r.a || r.area || '',
+        r.cn || r.nombreCurso || r.cursoNombre || r.cu || r.curso || '',
+        r.s || r.status || '',
+        r.v || r.vencimiento || r.fechaVencimiento || '',
+        r.h || r.habilitacion || '',
+        r.d || r.diasRestantes || r.dias || '',
+        r.bo || r.base || r.baseOriginal || ''
+      ]);
+    });
+    
+    // V33: Ordenar por jerarquía (Director → Gerente SR → Gerente → Subgerente → Jefe Depto → Jefe Área → Supervisor → Nombre)
+    // Columnas de jerarquía: indices 10(Director), 9(GerenteSR), 8(Gerente), 7(Subgerente), 6(JefeDepto), 5(JefeArea), 4(JefeDirecto), 1(Nombre)
+    dataRows.sort(function(a, b) {
+      var cols = [10, 9, 8, 7, 6, 5, 4, 1]; // Director→GerenteSR→Gerente→SubG→JDepto→JArea→JDirecto→Nombre
+      for (var si = 0; si < cols.length; si++) {
+        var va = (a[cols[si]] || '').toString().toUpperCase();
+        var vb = (b[cols[si]] || '').toString().toUpperCase();
+        if (va < vb) return -1;
+        if (va > vb) return 1;
+      }
+      return 0;
+    });
+    
+    var allRows = [headers].concat(dataRows);
+    
+    // Un solo setValues() → máxima velocidad
+    sheet.getRange(1, 1, allRows.length, headers.length).setValues(allRows);
+    
+    // Format header row
+    var headerRange = sheet.getRange(1, 1, 1, headers.length);
+    headerRange.setBackground('#1e293b').setFontColor('#ffffff').setFontWeight('bold');
+    
+    // Colorear columnas de jerarquía (5-11: JefeDirecto..Director)
+    if (allRows.length > 1) {
+      var hierRange = sheet.getRange(2, 5, allRows.length - 1, 7);
+      hierRange.setBackground('#f0f9ff');
+    }
+    
+    // Auto-resize columns
+    for (var i = 1; i <= headers.length; i++) sheet.autoResizeColumn(i);
+    
+    // Freeze header
+    sheet.setFrozenRows(1);
+    
+    var fileUrl = ss.getUrl();
+
+    // V2: Mover a MENTE_Outputs/Exports
+    try {
+      var folder = _getOutputSubfolder('Exports');
+      var file = DriveApp.getFileById(ss.getId());
+      folder.addFile(file);
+      DriveApp.getRootFolder().removeFile(file);
+    } catch (moveErr) { Logger.log('[OUTPUT-MOVE] ' + moveErr.message); }
+
+    // V37: Compartir archivo con cualquiera que tenga el link (viewer)
+    try {
+      var file = DriveApp.getFileById(ss.getId());
+      file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+      Logger.log('Excel compartido: ANYONE_WITH_LINK → VIEW');
+    } catch(shareErr) {
+      Logger.log('Error compartiendo Excel: ' + shareErr.message);
+      // Fallback: intentar compartir con el usuario activo
+      try {
+        var activeEmail = Session.getActiveUser().getEmail();
+        if (activeEmail) {
+          DriveApp.getFileById(ss.getId()).addViewer(activeEmail);
+          Logger.log('Excel compartido con ' + activeEmail);
+        }
+      } catch(e2) { Logger.log('Error fallback sharing: ' + e2.message); }
+    }
+    
+    Logger.log('Excel Forecast V37 creado: ' + fileUrl + ' (' + registros.length + ' registros)');
+    
+    _logOutput('EXCEL', fileUrl, 'FORECAST', 'Forecast Excel: ' + fileName + ' (' + registros.length + ' registros)', { base: tipoNombre || 'TODO', nombreArchivo: fileName, origen: 'REPORTE' });
+    
+    return {
+      success: true,
+      fileName: fileName,
+      url: fileUrl,
+      totalRegistros: registros.length,
+      fechaActualizacion: new Date().toLocaleString('es-CL')
+    };
+  } catch(e) {
+    Logger.log('Error crearExcelForecastEnDrive: ' + e.message);
+    return { success: false, error: e.message };
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// FORECAST POR CURSO — Vista agrupada por sigla de curso (V2 - Matriz)
+// Combina datos de cumplimiento (Forecast) con datos de planificación (PLAN_REGISTRO)
+// ═══════════════════════════════════════════════════════════════════════
+
+/**
+ * Obtiene datos del forecast agrupados por curso (sigla) con distribución mensual.
+ * @param {string} tipoBase - 'HCC','LATAM_SUR','CL','RAMPA','NAM_EU','TODO'
+ * @param {string} fuente - 'CONSOLIDADO','PHH','RAMPA'
+ * @return {Object} { success, kpis, monthKeys, cursos[], tiempoMs }
+ */
+function getForecastDataByCourse(tipoBase, fuente) {
+  var t0 = new Date().getTime();
+  try {
+    tipoBase = tipoBase || 'HCC';
+    fuente = fuente || 'CONSOLIDADO';
+
+    // 1. Sesión y rol
+    var usr = getUsuarioActual();
+    if (!usr) return { success: false, error: 'No hay sesión activa' };
+    var rolUsuario = (usr.rol || '').toUpperCase();
+
+    // 2. Cache (120s TTL, segmentado por rol+base+fuente)
+    var cacheKey = 'FC_CRS_V2_' + tipoBase + '_' + fuente + '_' + rolUsuario.substring(0, 3) + '_' + (usr.email || '').replace(/[^a-zA-Z0-9]/g, '').substring(0, 15);
+    var cache = CacheService.getScriptCache();
+    try {
+      var cached = cache.get(cacheKey);
+      if (cached) {
+        var parsed = JSON.parse(cached);
+        if (parsed && parsed.success) {
+          Logger.log('[FC_CRS] Cache HIT ' + cacheKey + ' (' + (new Date().getTime() - t0) + 'ms)');
+          return parsed;
+        }
+      }
+    } catch (ce) {}
+
+    // 3. Obtener forecast filtrado por rol y base
+    var usuarioInfo = {
+      nombre: usr.nombre || '', email: usr.email || '',
+      role: rolUsuario, pais: usr.pais || '', area: usr.area || '',
+      bp: usr.bp || '', baseOrigen: usr.base || '',
+      capacityFilter: usr.capacityFilter || null
+    };
+    var forecastResult = getForecastDataByBase(tipoBase, 0, usuarioInfo, fuente);
+    if (forecastResult.error && (!forecastResult.forecast || !forecastResult.forecast.length)) {
+      return { success: false, error: forecastResult.error || 'Sin datos de forecast para ' + tipoBase };
+    }
+    var forecast = forecastResult.forecast || [];
+
+    // 4. Leer PLAN_REGISTRO — stats por sigla + mapa individual
+    var planBySigla = {};
+    var planByKey = {};
+    try {
+      var ss = getSpreadsheet('MAESTRO');
+      var shReg = ss.getSheetByName('PLAN_REGISTRO');
+      if (shReg && shReg.getLastRow() >= 2) {
+        var regData = shReg.getDataRange().getValues();
+        for (var ri = 1; ri < regData.length; ri++) {
+          var siglaRaw = String(regData[ri][2]).trim();
+          if (!siglaRaw) continue;
+          var siglaNorm = normalizarSigla(siglaRaw) || siglaRaw;
+          var bpReg = String(regData[ri][6]).trim();
+          var estado = String(regData[ri][13]).toUpperCase().trim();
+          if (!planBySigla[siglaNorm]) planBySigla[siglaNorm] = { sel: 0, pre: 0, cit: 0, conf: 0 };
+          if (estado === 'SELECCIONADO') planBySigla[siglaNorm].sel++;
+          else if (estado === 'PRECONFIRMADO_JEFE') planBySigla[siglaNorm].pre++;
+          else if (estado === 'CITADO') planBySigla[siglaNorm].cit++;
+          else if (estado === 'CONFIRMADO') planBySigla[siglaNorm].conf++;
+          if (bpReg) planByKey[siglaNorm + '|' + bpReg] = estado;
+        }
+      }
+    } catch (pe) { Logger.log('[FC_CRS] Error PLAN_REGISTRO: ' + pe.message); }
+
+    // 4b. Construir mapa SIGLA → NOMBRE desde BIBLIOTECA
+    var biblioNombreMap = {};
+    try {
+      var bibPorBase = getBibliotecaPorBase();
+      var allBases = Object.keys(bibPorBase);
+      for (var bbi = 0; bbi < allBases.length; bbi++) {
+        var baseItems = bibPorBase[allBases[bbi]] || [];
+        for (var bbi2 = 0; bbi2 < baseItems.length; bbi2++) {
+          var item = baseItems[bbi2];
+          var itemKey = normalizarSigla(item.id || item.header || '') || '';
+          if (itemKey && item.nombre && !biblioNombreMap[itemKey]) {
+            biblioNombreMap[itemKey] = item.nombre;
+          }
+        }
+      }
+      Logger.log('[FC_CRS] Biblioteca nombres cargada: ' + Object.keys(biblioNombreMap).length + ' cursos');
+    } catch (bibErr) { Logger.log('[FC_CRS] Error Biblioteca: ' + bibErr.message); }
+
+    // 5. Agrupar forecast por curso con distribución mensual
+    // ROLLING VIEW: Generar ventana de 12 meses desde mes actual
+    var ahora = new Date();
+    var mesActual = ahora.getMonth() + 1; // 1-12
+    var anioActual = ahora.getFullYear();
+    
+    // Generar rolling monthKeys: mes actual → +11 meses
+    var rollingMonthKeys = [];
+    for (var rm = 0; rm < 12; rm++) {
+      var rmMes = ((mesActual - 1 + rm) % 12) + 1;
+      var rmAnio = anioActual + Math.floor((mesActual - 1 + rm) / 12);
+      rollingMonthKeys.push(String(rmAnio) + '-' + (rmMes < 10 ? '0' + rmMes : String(rmMes)));
+    }
+    // Key especial para anteriores
+    var ANT_KEY = '_ANT';
+    
+    var cursos = {};
+    var allBPs = {};
+    var areasSet = {};
+
+    for (var fi = 0; fi < forecast.length; fi++) {
+      var rec = forecast[fi];
+      if (rec.sinCursos) continue;
+      // Excluir SIN DATO, NO_APLICA y DOESNT APPLY del Forecast por Curso
+      var stUpper = (rec.status || '').toUpperCase().replace(/\s+/g, '_');
+      if (stUpper === 'SIN_DATO' || stUpper === 'NO_APLICA' || stUpper === 'DOESNT_APPLY' || stUpper === 'DOES_NOT_APPLY' || stUpper === 'N/A') continue;
+      var siglaRaw2 = rec.curso || '';
+      var siglaNorm2 = normalizarSigla(siglaRaw2) || siglaRaw2;
+      if (!siglaNorm2) continue;
+      var bpF = rec.bp || '';
+      if (!bpF) continue;
+
+      var nombre = rec.nombreCurso || biblioNombreMap[siglaNorm2] || siglaRaw2;
+      if (!cursos[siglaNorm2]) {
+        cursos[siglaNorm2] = { sigla: siglaNorm2, nombre: nombre, personas: {}, alDia: 0, porVencer: 0, vencidos: 0, meses: {}, parts: [] };
+      }
+      var c = cursos[siglaNorm2];
+      // Actualizar nombre si el actual es solo la sigla y hay uno mejor
+      if (c.nombre === c.sigla && biblioNombreMap[siglaNorm2]) {
+        c.nombre = biblioNombreMap[siglaNorm2];
+      }
+
+      // Dedup por BP+curso (un BP solo cuenta una vez por curso)
+      if (!c.personas[bpF]) {
+        c.personas[bpF] = true;
+        allBPs[bpF] = true;
+        if (rec.area) areasSet[rec.area] = true;
+
+        var st = (rec.status || '').toUpperCase().replace(/\s+/g, '_');
+        var esVencido = (st === 'VENCIDO' || st === 'SIN_FECHA_VENCIDO' || st === 'VENCIDO_REAL');
+        var esPorVencer = (st === 'POR_VENCER' || st === 'POR VENCER' || st === 'PROGRAMAR' || st === 'CRITICO' || st === 'PROXIMO' || st === 'SIN_PLAN');
+        if (esVencido) c.vencidos++;
+        else if (esPorVencer) c.porVencer++;
+        else c.alDia++;
+
+        // Distribución mensual con rolling window
+        var mesVenc = rec.mesVencimiento || 0;
+        var anioVenc = rec.anioVencimiento || 0;
+        if (mesVenc > 0 && anioVenc > 0) {
+          var mk = String(anioVenc) + '-' + (mesVenc < 10 ? '0' + mesVenc : String(mesVenc));
+          // Determinar si es anterior al mes actual o está en la ventana rolling
+          var esAnterior = (anioVenc < anioActual) || (anioVenc === anioActual && mesVenc < mesActual);
+          var targetKey = esAnterior ? ANT_KEY : mk;
+          
+          if (!c.meses[targetKey]) c.meses[targetKey] = { v: 0, pv: 0, h: 0, t: 0 };
+          c.meses[targetKey].t++;
+          if (esVencido) c.meses[targetKey].v++;
+          else if (esPorVencer) c.meses[targetKey].pv++;
+          else c.meses[targetKey].h++;
+        }
+
+        // Participante para drill-down
+        var planKey = siglaNorm2 + '|' + bpF;
+        c.parts.push({
+          bp: bpF, n: (rec.nombre || '').substring(0, 60),
+          p: rec.pais || '', a: (rec.area || '').substring(0, 40),
+          s: rec.status || '', d: rec.diasRestantes,
+          v: rec.vencimiento || '', b: rec.base || '',
+          ep: planByKey[planKey] || '', m: mesVenc, an: anioVenc
+        });
+      }
+    }
+
+    // 6. Month keys: _ANT primero, luego rolling 12 meses
+    var monthKeys = [ANT_KEY].concat(rollingMonthKeys);
+
+    // 7. Construir array de cursos
+    var cursosArr = [];
+    var totalConfirmados = 0;
+    var sumPctAlDia = 0;
+    for (var sigla in cursos) {
+      var cc = cursos[sigla];
+      var totalP = Object.keys(cc.personas).length;
+      if (totalP === 0) continue;
+      var pctAlDia = Math.round((cc.alDia / totalP) * 100);
+      var plan = planBySigla[sigla] || {};
+      totalConfirmados += (plan.conf || 0);
+      sumPctAlDia += pctAlDia;
+      cursosArr.push({
+        sigla: cc.sigla, nombre: cc.nombre, total: totalP,
+        alDia: cc.alDia, pctAlDia: pctAlDia,
+        porVencer: cc.porVencer, vencidos: cc.vencidos,
+        sel: plan.sel || 0, pre: plan.pre || 0,
+        cit: plan.cit || 0, conf: plan.conf || 0,
+        meses: cc.meses, parts: cc.parts
+      });
+    }
+    // Ordenar: más vencidos primero, luego más personas
+    cursosArr.sort(function (a, b) {
+      if (b.vencidos !== a.vencidos) return b.vencidos - a.vencidos;
+      return b.total - a.total;
+    });
+
+    // 8. KPIs
+    var result = {
+      success: true,
+      kpis: {
+        totalCursos: cursosArr.length,
+        totalColaboradores: Object.keys(allBPs).length,
+        pctCumplPromedio: cursosArr.length > 0 ? Math.round(sumPctAlDia / cursosArr.length) : 0,
+        totalConfirmados: totalConfirmados
+      },
+      monthKeys: monthKeys,
+      anioActual: anioActual,
+      areas: Object.keys(areasSet).sort(),
+      cursos: cursosArr,
+      tiempoMs: new Date().getTime() - t0
+    };
+
+    try { cache.put(cacheKey, JSON.stringify(result), 120); } catch (e) {
+      Logger.log('[FC_CRS] Cache PUT falló (payload >100KB): ' + e.message);
+    }
+    Logger.log('[FC_CRS] OK: ' + cursosArr.length + ' cursos, ' + Object.keys(allBPs).length + ' personas, ' + monthKeys.length + ' meses (' + (new Date().getTime() - t0) + 'ms)');
+    return result;
+  } catch (e) {
+    Logger.log('[FC_CRS] ERROR: ' + e.message);
+    return { success: false, error: 'Error en Forecast por Curso: ' + e.message };
+  }
+}
+
+/**
+ * Exporta datos del Forecast por Curso a Excel en Google Drive
+ */
+function exportForecastCursosExcel(cursosData, monthKeys) {
+  try {
+    var fecha = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd_HH-mm');
+    var fileName = 'Forecast_por_Curso_' + fecha;
+    var ssExport = SpreadsheetApp.create(fileName);
+    var sheet = ssExport.getActiveSheet();
+    sheet.setName('Forecast por Curso');
+
+    var headers = ['Sigla', 'Curso', 'Total', 'Al Dia', '% Al Dia', 'Por Vencer', 'Vencidos', 'Selecc.', 'Preconf.', 'Citados', 'Confirm.'];
+    var mks = monthKeys || [];
+    for (var mi = 0; mi < mks.length; mi++) {
+      if (mks[mi] === '_ANT') {
+        headers.push('<' + new Date().getFullYear());
+      } else {
+        var mkParts = mks[mi].split('-');
+        var MESES_E = ['', 'Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
+        headers.push(MESES_E[parseInt(mkParts[1], 10)] + ' ' + mkParts[0]);
+      }
+    }
+    var rows = [headers];
+    var cursos = cursosData || [];
+    for (var i = 0; i < cursos.length; i++) {
+      var c = cursos[i];
+      var row = [c.sigla, c.nombre, c.total, c.alDia, c.pctAlDia + '%', c.porVencer, c.vencidos, c.sel || 0, c.pre || 0, c.cit || 0, c.conf || 0];
+      for (var mj = 0; mj < mks.length; mj++) {
+        var md = c.meses ? c.meses[mks[mj]] : null;
+        row.push(md ? md.t : 0);
+      }
+      rows.push(row);
+    }
+
+    sheet.getRange(1, 1, rows.length, headers.length).setValues(rows);
+    sheet.getRange(1, 1, 1, headers.length).setBackground('#1e293b').setFontColor('#ffffff').setFontWeight('bold');
+    for (var ci = 1; ci <= headers.length; ci++) sheet.autoResizeColumn(ci);
+    sheet.setFrozenRows(1);
+
+    // === HOJA 2: Participantes por curso ===
+    var shParts = ssExport.insertSheet('Participantes');
+    var pHeaders = ['Sigla', 'Curso', 'BP', 'Nombre', 'Pais', 'Area', 'Status', 'Dias Restantes', 'Vencimiento', 'Base', 'Estado Planificacion'];
+    var pRows = [pHeaders];
+    for (var pi = 0; pi < cursos.length; pi++) {
+      var cc = cursos[pi];
+      var parts = cc.parts || [];
+      for (var pj = 0; pj < parts.length; pj++) {
+        var p = parts[pj];
+        pRows.push([cc.sigla, cc.nombre, p.bp || '', p.n || '', p.p || '', p.a || '', p.s || '', p.d || '', p.v || '', p.b || '', p.ep || '']);
+      }
+    }
+    if (pRows.length > 1) {
+      shParts.getRange(1, 1, pRows.length, pHeaders.length).setValues(pRows);
+      shParts.getRange(1, 1, 1, pHeaders.length).setBackground('#1e293b').setFontColor('#ffffff').setFontWeight('bold');
+      for (var pci = 1; pci <= pHeaders.length; pci++) shParts.autoResizeColumn(pci);
+      shParts.setFrozenRows(1);
+    }
+
+    var fileUrl = ssExport.getUrl();
+    try { var ae = Session.getActiveUser().getEmail(); if (ae) DriveApp.getFileById(ssExport.getId()).addViewer(ae); } catch (e2) {}
+
+    // Mover a MENTE_Outputs/Exports
+    try {
+      var folder = _getOutputSubfolder('Exports');
+      var file = DriveApp.getFileById(ssExport.getId());
+      folder.addFile(file);
+      DriveApp.getRootFolder().removeFile(file);
+    } catch (moveErr) { Logger.log('[OUTPUT-MOVE] ' + moveErr.message); }
+
+    _logOutput('EXCEL', fileUrl, 'FORECAST_CURSOS', 'Forecast por Curso: ' + cursos.length + ' cursos', { nombreArchivo: fileName, origen: 'REPORTE' });
+
+    return { success: true, url: fileUrl, fileName: fileName, total: cursos.length };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+}
+
+/**
+ * Exporta los participantes de UN solo curso a un Google Sheet (con opción PDF).
+ * Llamado desde el drilldown modal del Forecast Cursos.
+ */
+function exportCursoIndividual(cursoData, formato) {
+  try {
+    if (!cursoData || !cursoData.sigla) return { success: false, error: 'Sin datos de curso' };
+    var sigla = cursoData.sigla;
+    var nombre = cursoData.nombre || sigla;
+    var parts = cursoData.parts || [];
+    if (!parts.length) return { success: false, error: 'Sin participantes para exportar' };
+
+    var fileName = 'Forecast_' + sigla + '_' + Utilities.formatDate(new Date(), 'America/Santiago', 'yyyyMMdd_HHmm');
+    var ssExport = SpreadsheetApp.create(fileName);
+    var sheet = ssExport.getActiveSheet();
+    sheet.setName(nombre.substring(0, 30));
+
+    // Header info
+    sheet.getRange(1, 1).setValue('Curso:').setFontWeight('bold');
+    sheet.getRange(1, 2).setValue(nombre + ' (' + sigla + ')');
+    sheet.getRange(2, 1).setValue('Total:').setFontWeight('bold');
+    sheet.getRange(2, 2).setValue(parts.length + ' participantes');
+    sheet.getRange(3, 1).setValue('Exportado:').setFontWeight('bold');
+    sheet.getRange(3, 2).setValue(Utilities.formatDate(new Date(), 'America/Santiago', 'dd/MM/yyyy HH:mm'));
+
+    // Summary row
+    var venc = 0, pv = 0, hab = 0;
+    for (var si = 0; si < parts.length; si++) {
+      var stt = (parts[si].s || '').toUpperCase();
+      if (stt.indexOf('VENCIDO') >= 0) venc++;
+      else if (stt.indexOf('POR') >= 0 || stt === 'CRITICO' || stt === 'PROXIMO') pv++;
+      else hab++;
+    }
+    sheet.getRange(4, 1).setValue('Resumen:').setFontWeight('bold');
+    sheet.getRange(4, 2).setValue('Habilitados: ' + hab + ' | Por Vencer: ' + pv + ' | Vencidos: ' + venc);
+
+    // Data table from row 6
+    var headers = ['BP', 'Nombre', 'Pais', 'Area', 'Status', 'Dias Restantes', 'Vencimiento', 'Base', 'Estado Planificacion'];
+    var rows = [headers];
+    for (var pi = 0; pi < parts.length; pi++) {
+      var p = parts[pi];
+      rows.push([p.bp || '', p.n || '', p.p || '', p.a || '', p.s || '', p.d || '', p.v || '', p.b || '', p.ep || '']);
+    }
+    sheet.getRange(6, 1, rows.length, headers.length).setValues(rows);
+    sheet.getRange(6, 1, 1, headers.length).setBackground('#1e293b').setFontColor('#ffffff').setFontWeight('bold');
+    for (var ci = 1; ci <= headers.length; ci++) sheet.autoResizeColumn(ci);
+    sheet.setFrozenRows(6);
+
+    // Color coding for status column (column 5 = E)
+    for (var ri = 1; ri < rows.length; ri++) {
+      var stVal = (rows[ri][4] || '').toUpperCase();
+      var bg = '#ffffff';
+      if (stVal.indexOf('VENCIDO') >= 0) bg = '#fee2e2';
+      else if (stVal.indexOf('POR') >= 0 || stVal === 'CRITICO') bg = '#fef3c7';
+      else if (stVal === 'HABILITADO') bg = '#dcfce7';
+      sheet.getRange(6 + ri, 5).setBackground(bg);
+    }
+
+    var fileUrl = ssExport.getUrl();
+    try { var ae = Session.getActiveUser().getEmail(); if (ae) DriveApp.getFileById(ssExport.getId()).addViewer(ae); } catch(e2) {}
+
+    // Mover a MENTE_Outputs/Exports
+    try {
+      var folder = _getOutputSubfolder('Exports');
+      var file = DriveApp.getFileById(ssExport.getId());
+      folder.addFile(file);
+      DriveApp.getRootFolder().removeFile(file);
+    } catch (moveErr) { Logger.log('[OUTPUT-MOVE] ' + moveErr.message); }
+
+    // Si pide PDF, convertir
+    if (formato === 'pdf') {
+      try {
+        var ssId = ssExport.getId();
+        var pdfBlob = DriveApp.getFileById(ssId).getAs('application/pdf');
+        pdfBlob.setName(fileName + '.pdf');
+        var pdfFolder = _getOutputSubfolder('Exports');
+        var pdfFile = pdfFolder.createFile(pdfBlob);
+        try { var ae2 = Session.getActiveUser().getEmail(); if (ae2) pdfFile.addViewer(ae2); } catch(e3) {}
+        _logOutput('PDF', pdfFile.getUrl(), 'FORECAST_CURSOS', 'Export individual: ' + sigla + ' (' + parts.length + ' personas)', { nombreArchivo: fileName + '.pdf', origen: 'REPORTE' });
+        return { success: true, url: pdfFile.getUrl(), fileName: fileName + '.pdf', formato: 'pdf', total: parts.length, excelUrl: fileUrl };
+      } catch(pdfErr) {
+        Logger.log('[EXPORT] Error PDF: ' + pdfErr.message);
+        _logOutput('EXCEL', fileUrl, 'FORECAST_CURSOS', 'Export individual (PDF falló): ' + sigla, { nombreArchivo: fileName, origen: 'REPORTE' });
+        return { success: true, url: fileUrl, fileName: fileName, formato: 'excel', total: parts.length, pdfError: pdfErr.message };
+      }
+    }
+
+    _logOutput('EXCEL', fileUrl, 'FORECAST_CURSOS', 'Export individual: ' + sigla + ' (' + parts.length + ' personas)', { nombreArchivo: fileName, origen: 'REPORTE' });
+    return { success: true, url: fileUrl, fileName: fileName, formato: 'excel', total: parts.length };
+  } catch(e) {
+    return { success: false, error: e.message };
+  }
+}
+
+/**
+ * Exporta el forecast completo (cursosData + monthKeys) a PDF
+ */
+function exportForecastCursosPDF(cursosData, monthKeys) {
+  try {
+    // Primero generar el Excel
+    var excelResult = exportForecastCursosExcel(cursosData, monthKeys);
+    if (!excelResult.success) return excelResult;
+    // Extraer el SS ID de la URL
+    var urlParts = excelResult.url.match(/\/d\/([a-zA-Z0-9_-]+)/);
+    if (!urlParts || !urlParts[1]) return { success: false, error: 'No se pudo obtener ID del archivo' };
+    var ssId = urlParts[1];
+    var pdfBlob = DriveApp.getFileById(ssId).getAs('application/pdf');
+    pdfBlob.setName(excelResult.fileName + '.pdf');
+    var pdfFolder = _getOutputSubfolder('Exports');
+    var pdfFile = pdfFolder.createFile(pdfBlob);
+    try { var ae = Session.getActiveUser().getEmail(); if (ae) pdfFile.addViewer(ae); } catch(e2) {}
+    _logOutput('PDF', pdfFile.getUrl(), 'FORECAST_CURSOS', 'Forecast por Curso PDF: ' + (cursosData || []).length + ' cursos', { nombreArchivo: excelResult.fileName + '.pdf', origen: 'REPORTE' });
+    return { success: true, url: pdfFile.getUrl(), fileName: excelResult.fileName + '.pdf', formato: 'pdf' };
+  } catch(e) {
+    return { success: false, error: e.message };
+  }
+}
+
+
+
+
+/**
+ * Obtiene la URL de la carpeta del Drive donde se guardan los reportes
+ */
+
+
+
+// ═══════════════════════════════════════════════════════════════
+// GOBERNANZA: Outputs fuera del Sheet maestro
+// ═══════════════════════════════════════════════════════════════
+
+var _OUTPUT_FOLDER_NAME = 'MENTE_Outputs';
+var _OUTPUT_LOG_SHEET = 'REGISTRO_OUTPUTS';
+var _OUTPUT_HEADERS = ['OUTPUT_ID','TIPO','FECHA','USUARIO','MODULO','BASE','URL','NOMBRE_ARCHIVO','DESCRIPCION','ORIGEN'];
+
+/**
+ * Obtiene o crea la carpeta de outputs en Drive (separada del Sheet maestro).
+ * Si no existe, la crea en la raiz de Drive del usuario.
+ */
+function _getOutputFolder() {
+  var folders = DriveApp.getFoldersByName(_OUTPUT_FOLDER_NAME);
+  if (folders.hasNext()) return folders.next();
+  var folder = DriveApp.createFolder(_OUTPUT_FOLDER_NAME);
+  folder.setDescription('Outputs generados por MENTE Training Cargo. NO es la fuente maestra.');
+  return folder;
+}
+
+/**
+ * Obtiene o crea una subcarpeta dentro de MENTE_Outputs.
+ * Ejemplo: _getOutputSubfolder('Exports'), _getOutputSubfolder('Reportes_IA')
+ */
+function _getOutputSubfolder(nombre) {
+  var parent = _getOutputFolder();
+  var subs = parent.getFoldersByName(nombre);
+  if (subs.hasNext()) return subs.next();
+  return parent.createFolder(nombre);
+}
+
+/**
+ * Registra un output en la hoja de trazabilidad REGISTRO_OUTPUTS.
+ * @param {string} tipo - Tipo: EXCEL, PDF, REPORTE_IA, LIBRO_ASISTENCIA, etc.
+ * @param {string} url - URL del archivo generado
+ * @param {string} modulo - Modulo origen: FORECAST, CONTROL_TOWER, PLANIFICACION, etc.
+ * @param {string} descripcion - Descripcion breve
+ * @param {Object} opts - Opciones: { base, nombreArchivo, origen }
+ *   origen: 'IA' o 'REPORTE' o 'MANUAL'
+ */
+function _logOutput(tipo, url, modulo, descripcion, opts) {
+  try {
+    opts = opts || {};
+    var ss = getSpreadsheet('MAESTRO');
+    if (!ss) return;
+
+    var sh = ss.getSheetByName(_OUTPUT_LOG_SHEET);
+    if (!sh) {
+      sh = ss.insertSheet(_OUTPUT_LOG_SHEET);
+      sh.appendRow(_OUTPUT_HEADERS);
+      sh.getRange(1, 1, 1, _OUTPUT_HEADERS.length).setFontWeight('bold').setBackground('#1B0088').setFontColor('white');
+      sh.setFrozenRows(1);
+    }
+
+    var usr = Session.getActiveUser().getEmail() || 'sistema';
+    var outputId = 'OUT-' + Utilities.getUuid().substring(0, 8);
+
+    sh.appendRow([
+      outputId,
+      tipo || 'N/A',
+      new Date().toISOString(),
+      usr,
+      modulo || 'N/A',
+      opts.base || '',
+      url || '',
+      opts.nombreArchivo || '',
+      descripcion || '',
+      opts.origen || 'REPORTE'
+    ]);
+
+    // Limpiar si tiene mas de 500 registros
+    var lastRow = sh.getLastRow();
+    if (lastRow > 500) sh.deleteRows(2, lastRow - 400);
+
+    return outputId;
+  } catch (e) {
+    Logger.log('[OUTPUT-LOG-ERROR] ' + e.message);
+    return null;
+  }
+}
+
+/**
+ * Obtiene los ultimos outputs registrados.
+ */
+function getRecentOutputs(limit) {
+  try {
+    var ss = getSpreadsheet('MAESTRO');
+    var sh = ss.getSheetByName(_OUTPUT_LOG_SHEET);
+    if (!sh) return { success: true, outputs: [] };
+    var data = sh.getDataRange().getValues();
+    var outputs = [];
+    var max = Math.min(data.length, (limit || 20) + 1);
+    for (var r = data.length - 1; r >= 1 && outputs.length < (limit || 20); r--) {
+      outputs.push({
+        id: data[r][0], tipo: data[r][1], fecha: data[r][2],
+        usuario: data[r][3], modulo: data[r][4], base: data[r][5],
+        url: data[r][6], nombre: data[r][7], descripcion: data[r][8], origen: data[r][9]
+      });
+    }
+    return { success: true, outputs: outputs };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+}

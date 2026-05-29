@@ -1,0 +1,1240 @@
+// ===================== FUNCIONES VISTA ADMIN =====================
+/**
+ * Obtiene estudiantes de una base específica para vista Admin
+ * @param {string} tipoBase - 'LATAM_SUR', 'CL', 'RAMPA', 'NAM_EU'
+ */
+function getStudentsFromBase(tipoBase) {
+  try {
+    var baseKey = tipoBase;
+    // Mapear nombres de vista a keys internos
+    if (tipoBase === 'LATAM_SUR') baseKey = 'LATAM';
+    else if (tipoBase === 'CL') baseKey = 'CHILE';
+    else if (tipoBase === 'NAM_EU') baseKey = 'NAM';
+    
+    var empleados = leerHoja(baseKey, 'base');
+    
+    // Transformar a formato Admin
+    var students = empleados.map(function(e) {
+      return {
+        bp: e.bp, nombre: e.nombre, correo: e.correo, pais: e.pais,
+        area: e.area, jefeDirecto: e.jefeDirecto, jefeArea: e.jefeArea,
+        cursosActivos: e.cursosAplicables || e.totalCursos,
+        cursosHabilitados: e.habilitados, cursosPorVencer: e.porVencer,
+        cursosVencidos: e.vencidosAplicables || e.vencidos,
+        cumplimiento: e.cumplimiento, semaforo: e.semaforo,
+        habilitacionGeneral: e.habilitacionGeneral, tieneAlerta: e.tieneAlerta,
+        esNuevoIngreso: e.esNuevoIngreso || false
+      };
+    });
+    
+    return { students: students, total: students.length };
+  } catch(e) {
+    return { error: e.message, students: [] };
+  }
+}
+
+/**
+ * Obtiene estudiantes HCC de todas las bases
+ * HCC = Area contiene "HCC"
+ */
+function getStudentsHCCFromAllBases() {
+  try {
+    var allStudents = [];
+    
+    ['CHILE', 'RAMPA', 'LATAM', 'NAM'].forEach(function(bk) {
+      try {
+        var empleados = leerHoja(bk, 'base');
+        empleados.forEach(function(e) {
+          // Filtrar solo HCC (detección multi-columna)
+          if (e.esHCC) {
+            allStudents.push({
+              bp: e.bp, nombre: e.nombre, correo: e.correo, pais: e.pais,
+              area: e.area, jefeDirecto: e.jefeDirecto, jefeArea: e.jefeArea,
+              cursosActivos: e.cursosAplicables || e.totalCursos,
+              cursosHabilitados: e.habilitados, cursosPorVencer: e.porVencer,
+              cursosVencidos: e.vencidosAplicables || e.vencidos,
+              cumplimiento: e.cumplimiento, semaforo: e.semaforo,
+              habilitacionGeneral: e.habilitacionGeneral, tieneAlerta: e.tieneAlerta,
+              baseOriginal: bk,
+              esNuevoIngreso: e.esNuevoIngreso || false
+            });
+          }
+        });
+      } catch(e) { Logger.log('Error HCC ' + bk + ': ' + e.message); }
+    });
+    
+    return { students: allStudents, total: allStudents.length };
+  } catch(e) {
+    return { error: e.message, students: [] };
+  }
+}
+
+// ===================== FUNCIONES ADAPTER FORECAST (para Forescast.txt) =====================
+/**
+ * Adapter: Obtiene datos de forecast para una base específica
+ * Transforma la respuesta de getForecastData al formato esperado por el frontend Forescast.txt
+ * @param {string} tipoBase - 'HCC', 'LATAM_SUR', 'CL', 'RAMPA', 'NAM_EU'
+ * @param {number} dias - No usado directamente, mantenido por compatibilidad
+ * @param {Object} usuarioInfo - Info del usuario para RLS
+ */
+function getForecastDataByBase(tipoBase, dias, usuarioInfo, fuente) {
+  // ═══════════════════════════════════════════════════════════════
+  // [ARG-AUDIT] V47: Auditoría completa de argumentos + fuente
+  // ═══════════════════════════════════════════════════════════════
+  fuente = (fuente || 'CONSOLIDADO').toString().toUpperCase().trim();
+  if (fuente !== 'PHH' && fuente !== 'RAMPA' && fuente !== 'PLAN_SINGLE') fuente = 'CONSOLIDADO';
+  var rawTipoBase = String(tipoBase === undefined ? 'UNDEFINED' : tipoBase === null ? 'NULL' : tipoBase);
+  var rawDias = dias;
+  _log(2, '[ARG-AUDIT] argsRaw: tipoBase=' + rawTipoBase + ' dias=' + rawDias + ' fuente=' + fuente);
+
+  // ═══ FIX A: NUNCA defaultear a HCC — usar TODO o base del usuario ═══
+  if (!tipoBase || tipoBase === 'undefined' || tipoBase === 'null') {
+    var defaultBase = (usuarioInfo && (usuarioInfo.baseOrigen || usuarioInfo.base)) || 'TODO';
+    _log(2, '[ARG-AUDIT] tipoBase invalido ("' + rawTipoBase + '") → defaulting a "' + defaultBase + '"');
+    tipoBase = defaultBase;
+  }
+  
+  // V100-CLEAN: Log visible de params de entrada al Forecast
+  _auditLog('[V100-FC-START] tipoBase="' + rawTipoBase + '" fuente=' + fuente + ' rol=' + (usuarioInfo && usuarioInfo.role || 'N/A') + ' email=' + (usuarioInfo && usuarioInfo.email || 'N/A') + ' | BUILD=' + BUILD_GS);
+
+  _log(2, '>>> START getForecastDataByBase("' + tipoBase + '")');
+  var t0ByBase = new Date().getTime();
+  try {
+    // ═══ FIX B: Si usuarioInfo está vacío, recuperar de sesión ═══
+    if (!usuarioInfo || !usuarioInfo.nombre || !usuarioInfo.email) {
+      var _usr = getUsuarioActual();
+      if (_usr) {
+        usuarioInfo = {
+          nombre: _usr.nombre || '',
+          email: _usr.email || '',
+          role: (_usr.rol || '').toUpperCase(),
+          pais: _usr.pais || '',
+          area: _usr.area || '',
+          bp: _usr.bp || '',
+          baseOrigen: _usr.base || '',
+          capacityFilter: _usr.capacityFilter || null
+        };
+        Logger.log('[ARG-AUDIT] usuarioInfo recuperado de sesion: nombre="' + usuarioInfo.nombre + '" email=' + usuarioInfo.email + ' baseOrigen=' + usuarioInfo.baseOrigen);
+      } else {
+        Logger.log('[ARG-AUDIT] WARN: getUsuarioActual() retorno null — no se puede determinar base del usuario');
+        usuarioInfo = usuarioInfo || {};
+      }
+    }
+
+    // ═══ Resolver base del usuario (para garantizar inclusión) ═══
+    var usuarioBase = (usuarioInfo.baseOrigen || usuarioInfo.base || '').toUpperCase().trim();
+    // Normalizar alias de base del usuario
+    if (usuarioBase === 'TRAINING CL' || usuarioBase === 'CL') usuarioBase = 'CHILE';
+    if (usuarioBase === 'PHH RED' || usuarioBase === 'PHH') usuarioBase = 'LATAM';
+    if (usuarioBase === 'CTRL NORTE' || usuarioBase === 'CONTROL NORTE') usuarioBase = 'NAM';
+
+    var filtroMap = {
+      'HCC': 'HCC',
+      'LATAM_SUR': 'LATAM',
+      'CL': 'CHILE',
+      'CHILE': 'CHILE',
+      'RAMPA': 'RAMPA',
+      'NAM_EU': 'NAM',
+      'NAM': 'NAM',
+      'LATAM': 'LATAM',
+      'TODO': 'TODO'
+    };
+    var filtro = filtroMap[tipoBase.toUpperCase()] || tipoBase.toUpperCase();
+    
+    Logger.log('[ARG-AUDIT] resolved: tipoBase="' + tipoBase + '" → filtro="' + filtro + '" | usuarioBase="' + usuarioBase + '"');
+
+    // ═══ V50-FIX: Declarar rolUsuario ANTES de su primer uso (antes era hoisting bug) ═══
+    var rolUsuario = (usuarioInfo && usuarioInfo.role || '').toUpperCase();
+    var nombreUsuarioInfo = (usuarioInfo && usuarioInfo.nombre || '').trim();
+
+    // V48: JEFES — leer TODAS las bases para que BPs multi-base tengan registros de cursos
+    // de ambas fuentes. El filtro por equipoBPs (línea 5150) se encarga de limitar el scope.
+    // V49: ADMIN/CAPACITY también leen TODAS las bases cuando fuente=CONSOLIDADO
+    var filtroParaData = filtro;
+    if (filtro !== 'TODO' && filtro !== 'HCC') {
+      if (rolUsuario !== 'ADMIN' && rolUsuario !== 'CAPACITY') {
+        filtroParaData = 'TODO';
+        _log('[V8-MULTIBASE] JEFE: leyendo TODAS las bases (filtro UI=' + filtro + ', fuente=' + fuente + ')');
+      } else if (fuente === 'CONSOLIDADO') {
+        filtroParaData = 'TODO';
+        _log('[V9-MULTIBASE] ADMIN/CAPACITY fuente=CONSOLIDADO: leyendo TODAS las bases');
+      }
+      // V96: PLAN_SINGLE = solo leer la base especifica (para busqueda en Planificacion)
+    }
+    _log('  Llamando getForecastData("' + filtroParaData + '", usuarioBase="' + usuarioBase + '")...');
+    var data = getForecastData(filtroParaData, usuarioBase);
+    // V100-CLEAN: Log VISIBLE de getForecastData resultado
+    _auditLog('[V100-FC-DATA] filtro=' + filtro + ' filtroParaData=' + filtroParaData + ' | registrosRaw=' + (data.registros ? data.registros.length : 0) + ' success=' + data.success);
+    _log('  getForecastData retornó: success=' + data.success + ', registros=' + (data.registros ? data.registros.length : 0) + ' (filtroParaData=' + filtroParaData + ') | ' + (new Date().getTime() - t0ByBase) + 'ms');
+    if (!data.success) {
+      Logger.log('◀◀◀ END getForecastDataByBase("' + tipoBase + '") [ERROR en getForecastData] ' + (data.error || ''));
+      return { error: data.error || 'getForecastData falló', forecast: [] };
+    }
+    
+    // EXPAND: Minified keys -> full names for frontend compatibility
+    // V50: Normalizar BP (trim) para evitar duplicados por whitespace
+    var forecast = data.registros.map(function(r) {
+      return {
+        bp: String(r.b || '').trim(),
+        nombre: r.n,
+        pais: r.p,
+        correo: r.co,
+        jefeDirecto: r.jd   || '',      // SUPERVISOR   (nivel 7)
+        jefeArea:    r.ja   || '',      // JEFE AREA    (nivel 6)
+        jefeDepartamento: r.jdpto || '', // JEFE DEPTO  (nivel 5)
+        subgerente:  r.sg   || '',      // SUBGERENTE   (nivel 4)
+        gerente:     r.g    || '',      // GERENTE      (nivel 3)
+        gerenteSr:   r.gsr  || '',      // GERENTE SR   (nivel 2)
+        director:    r.dir  || '',      // DIRECTOR     (nivel 1)
+        ejecutivo:   r.g    || '',      // Alias backward-compat
+        area: r.a,
+        negocio: r.neg || '',
+        zona: r.z || '',
+        areaCanon: r.ac || '',
+        posicion: r.pos || '',
+        nombreCurso: r.cn || r.cu,
+        curso: r.cu,
+        vencimiento: r.v,
+        fechaVencimiento: r.v,
+        habilitacion: r.h,
+        diasRestantes: r.d,
+        status: r.s,
+        statusReal: r.sr || r.s,
+        mesVencimiento: r.m,
+        anioVencimiento: r.an,
+        base: r.bo || tipoBase,
+        esNuevoIngreso: r.ni || false,
+        esHCC: r.hcc || false,
+        sinCursos: r.sc || false,
+        cuentaKPI: r.kpi === true,
+        statusRaw: r.stRaw || ''
+      };
+    });
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // V50: DEDUP POR BP — Registros de cursos + Personas únicas
+    // Cuando un BP aparece en múltiples bases (PHH + RAMPA), hay registros
+    // duplicados de cursos. La regla de merge:
+    //   - RAMPA TIENE PRIORIDAD sobre PHH para metadata (pais, area, jerarquía)
+    //   - Se conservan TODOS los registros de cursos (sin dedup de cursos)
+    //   - La dedup es solo de PERSONAS para conteos correctos
+    // ═══════════════════════════════════════════════════════════════════════
+    var _beforeMerge = forecast.length;
+    var _bpSeenBases = {}; // { bp: { bases: ['LATAM','RAMPA'], prioBase: 'RAMPA' } }
+    forecast.forEach(function(r) {
+      if (!r.bp) return;
+      if (!_bpSeenBases[r.bp]) {
+        _bpSeenBases[r.bp] = { bases: [r.base], prioBase: r.base };
+      } else {
+        if (_bpSeenBases[r.bp].bases.indexOf(r.base) < 0) {
+          _bpSeenBases[r.bp].bases.push(r.base);
+        }
+        // RAMPA tiene prioridad sobre otros para metadata
+        if (r.base === 'RAMPA') _bpSeenBases[r.bp].prioBase = 'RAMPA';
+      }
+    });
+    // Contar personas únicas ANTES de jerarquía
+    var _uniqueBPsBeforeJerarquia = Object.keys(_bpSeenBases).length;
+    // Identificar BPs duplicados (multi-base)
+    var _dupBPs = [];
+    for (var _dbp in _bpSeenBases) {
+      if (_bpSeenBases[_dbp].bases.length > 1) _dupBPs.push(_dbp);
+    }
+    // Para BPs duplicados: normalizar metadata usando la base prioritaria (RAMPA > otros)
+    if (_dupBPs.length > 0) {
+      // Construir mapa de metadata prioritaria por BP
+      var _prioMeta = {};
+      forecast.forEach(function(r) {
+        if (!r.bp || _dupBPs.indexOf(r.bp) < 0) return;
+        var prio = _bpSeenBases[r.bp].prioBase;
+        if (r.base === prio && !_prioMeta[r.bp]) {
+          _prioMeta[r.bp] = {
+            pais: r.pais, area: r.area, negocio: r.negocio, areaCanon: r.areaCanon, zona: r.zona,
+            jefeDirecto: r.jefeDirecto, jefeArea: r.jefeArea,
+            jefeDepartamento: r.jefeDepartamento, subgerente: r.subgerente,
+            gerente: r.gerente, gerenteSr: r.gerenteSr, director: r.director
+          };
+        }
+      });
+      // Aplicar metadata prioritaria a TODOS los registros de BPs duplicados
+      forecast.forEach(function(r) {
+        if (_prioMeta[r.bp]) {
+          var m = _prioMeta[r.bp];
+          r.pais = m.pais; r.area = m.area; r.negocio = m.negocio; r.areaCanon = m.areaCanon;
+          r.jefeDirecto = m.jefeDirecto; r.jefeArea = m.jefeArea;
+          r.jefeDepartamento = m.jefeDepartamento; r.subgerente = m.subgerente;
+          r.gerente = m.gerente; r.gerenteSr = m.gerenteSr; r.director = m.director;
+        }
+      });
+      _log('[V0-DEDUP] BPs duplicados (multi-base): ' + _dupBPs.length + ' → metadata normalizada con prioridad RAMPA');
+      if (_dupBPs.length <= 20) _log('[V0-DEDUP] BPs: ' + _dupBPs.join(', '));
+    }
+    Logger.log('[FORECAST] beforeMerge=' + _beforeMerge + ' afterMergeUniqueBP=' + _uniqueBPsBeforeJerarquia);
+    
+    // ═══════════════════════════════════════════════════════════════════════
+    // V51: Construir mapa nombre→BP para resolver jefeDirectoBP
+    // Cada empleado tiene nombre y BP. Buscamos el BP del jefe por su nombre.
+    // ═══════════════════════════════════════════════════════════════════════
+    var _nombreBPMap = {};  // { normNombre: bp }
+    forecast.forEach(function(r) {
+      if (r.bp && r.nombre) {
+        var nn = normNombre(r.nombre);
+        if (nn && !_nombreBPMap[nn]) _nombreBPMap[nn] = r.bp;
+      }
+    });
+    // Asignar jefeDirectoBP a cada registro — resolución exhaustiva
+    var _jdResolved = 0, _jdTotal = 0, _jdAmbiguous = 0;
+    forecast.forEach(function(r) {
+      if (r.jefeDirecto) {
+        _jdTotal++;
+        var jdNorm = normNombre(r.jefeDirecto);
+        var bp = _nombreBPMap[jdNorm];
+        
+        // PASO 1: Match exacto — si existe, usar directamente (sin fuzzy)
+        if (bp) {
+          r.jefeDirectoBP = bp;
+          _jdResolved++;
+          return; // DONE — no usar fuzzy
+        }
+        
+        // PASO 2: Fuzzy fallback SOLO si no hay match exacto
+        var candidates = [];
+        var tokens = jdNorm.split(/\s+/).filter(function(p) { return p.length > 1; });
+        if (tokens.length >= 2) {
+          for (var nk2 in _nombreBPMap) {
+            var allFound = true;
+            for (var tk = 0; tk < tokens.length; tk++) {
+              if (nk2.indexOf(tokens[tk]) < 0) { allFound = false; break; }
+            }
+            if (allFound) candidates.push({ name: nk2, bp: _nombreBPMap[nk2] });
+          }
+        }
+        
+        if (candidates.length === 1) {
+          // Fuzzy unambiguo — usar
+          r.jefeDirectoBP = candidates[0].bp;
+          _jdResolved++;
+        } else if (candidates.length > 1) {
+          // Ambiguo — loguear y NO asignar
+          _jdAmbiguous++;
+          _log('[V1-JEFE-BP] ambiguous name="' + r.jefeDirecto + '" candidates=[' + candidates.map(function(c) { return c.bp; }).join(',') + ']');
+          r.jefeDirectoBP = '';
+        } else {
+          r.jefeDirectoBP = '';
+        }
+      } else {
+        r.jefeDirectoBP = '';
+      }
+    });
+    var _jdPct = _jdTotal > 0 ? Math.round((_jdResolved / _jdTotal) * 100) : 100;
+    _log('[V1-JEFE-BP] nombreBPMap=' + Object.keys(_nombreBPMap).length + ' | resuelto: ' + _jdResolved + '/' + _jdTotal + ' (' + _jdPct + '%) | ambiguos: ' + _jdAmbiguous);
+    
+    // ═══════════════════════════════════════════════════════════════════════
+    // V22c: FILTRO JERÁRQUICO UNIFICADO usando buildArbolJerarquico
+    // ═══════════════════════════════════════════════════════════════════════
+    var forecastAntes = forecast.length;
+    // V50: rolUsuario y nombreUsuarioInfo ya declarados arriba (fix hoisting)
+    var areaUsuarioInfo = (usuarioInfo && usuarioInfo.area || '').trim();
+    var emailUsuarioInfo = (usuarioInfo && usuarioInfo.email || 'N/A');
+    var nk = normNombre(nombreUsuarioInfo);
+    var nf = normalizarNombreJefe(nombreUsuarioInfo);
+    
+    Logger.log('═══════ FILTRO JERARQUÍA V50 ═══════');
+    Logger.log('DBG filtroJerarquia: email=' + emailUsuarioInfo + ' nombre="' + nombreUsuarioInfo + '" rol=' + rolUsuario);
+    Logger.log('DBG areaUsuario=' + areaUsuarioInfo + ' (NO se usa para limitar arbol, solo metadata)');
+    _log('  email: ' + emailUsuarioInfo + ' | nombre: "' + nombreUsuarioInfo + '" | rol: ' + rolUsuario);
+    _log('  registros TOTAL dataset: ' + forecastAntes + ' | personas únicas (pre-jerarquía): ' + _uniqueBPsBeforeJerarquia);
+    
+    // V44: Initialize shared variables used after ALL conditional branches
+    var personasSet = {};
+    var jefesSet = {};
+    var jefesAreaSet = {};
+    var equipoTotalActivos = 0;
+    var totalNuevosIngresosArbol = 0;
+    var niBPsList = [];
+    var arbol = null;
+    var equipoBPs = {};
+    var miCadena = { director:'', gerenteSr:'', gerente:'', subgerente:'', jefeDepartamento:'', jefeArea:'', supervisor:'' };
+    var nivelAgrupacion = '';
+    var campoAgrupacion = '';
+    var filaUsuario = null;
+    
+    // V52: CAPACITY users — vista consolidada como ADMIN, con filtro geográfico opcional
+    if (rolUsuario === 'CAPACITY') {
+      var _capT0 = new Date().getTime();
+      Logger.log('[V76-CAPACITY] >>> START procesando CAPACITY: email=' + emailUsuarioInfo + ' filtro=' + filtro + ' fuente=' + fuente + ' filtroParaData=' + filtroParaData + ' forecast.length=' + forecast.length);
+      var capFilter = (usuarioInfo && usuarioInfo.capacityFilter) || null;
+      // V52: Log obligatorio [CAPACITY-DBG]
+      var _capBasesEnDatos = {};
+      forecast.forEach(function(r) { _capBasesEnDatos[r.base || 'SIN_BASE'] = (_capBasesEnDatos[r.base || 'SIN_BASE'] || 0) + 1; });
+      Logger.log('[CAPACITY-DBG] rol=CAPACITY basesLeidas=' + JSON.stringify(Object.keys(_capBasesEnDatos)) + ' registrosPorBase=' + JSON.stringify(_capBasesEnDatos) + ' totalRegistros=' + forecast.length + ' capFilter=' + JSON.stringify(capFilter));
+
+      if (capFilter && ((capFilter.allowedCountries || []).length > 0 || (capFilter.excludedAreas || []).length > 0)) {
+        // Mapa amplio: normKey() quita acentos (PERÚ→PERU, PANAMÁ→PANAMA)
+        var PAIS_NORMALIZE = {
+          'COLOMBIA': 'CO', 'PERU': 'PE', 'ECUADOR': 'EC', 'CHILE': 'CL',
+          'UNITED STATES': 'US', 'US': 'US', 'USA': 'US', 'ESTADOS UNIDOS': 'US',
+          'ARGENTINA': 'AR', 'URUGUAY': 'UY', 'PARAGUAY': 'PY',
+          'BRASIL': 'BR', 'BRAZIL': 'BR', 'MEXICO': 'MX', 'PANAMA': 'PA',
+          'COSTA RICA': 'CR', 'REPUBLICA DOMINICANA': 'DO', 'GUATEMALA': 'GT',
+          'HONDURAS': 'HN', 'EL SALVADOR': 'SV', 'NICARAGUA': 'NI',
+          'BOLIVIA': 'BO', 'VENEZUELA': 'VE', 'PUERTO RICO': 'PR'
+        };
+        var countriesAllowed = {};
+        (capFilter.allowedCountries || []).forEach(function(c) { countriesAllowed[c.toUpperCase()] = true; });
+        var excAreasNorm = (capFilter.excludedAreas || []).map(function(a) { return normKey(a); });
+
+        var antesCapFilter = forecast.length;
+        if (forecast.length > 0) {
+          var muestra = forecast.slice(0, 5).map(function(r) { return '{pais:"' + (r.pais||'') + '", area:"' + (r.area||'') + '", base:"' + (r.base||'') + '"}'; });
+          Logger.log('[CAPACITY-DBG] Muestra pre-filtro: ' + muestra.join(', '));
+        }
+
+        forecast = forecast.filter(function(r) {
+          // Filtro por país (normKey quita acentos)
+          var paisNorm = normKey(r.pais || '');
+          var paisCode = PAIS_NORMALIZE[paisNorm] || paisNorm;
+          if ((capFilter.allowedCountries || []).length > 0 && !countriesAllowed[paisCode] && !countriesAllowed[paisNorm]) return false;
+          // Filtro por área excluida (indexOf: HCC matchea "HCC", "HCC BOGOTA", etc.)
+          if (excAreasNorm.length > 0) {
+            var areaNorm = normKey(r.area || '');
+            for (var eai = 0; eai < excAreasNorm.length; eai++) {
+              if (areaNorm.indexOf(excAreasNorm[eai]) >= 0) return false;
+            }
+          }
+          return true;
+        });
+        // V52: Log post-filtro con detalle de bases restantes
+        var _capBasesPost = {};
+        forecast.forEach(function(r) { _capBasesPost[r.base || 'SIN_BASE'] = (_capBasesPost[r.base || 'SIN_BASE'] || 0) + 1; });
+        Logger.log('[CAPACITY-DBG] Filtro geográfico aplicado: ' + antesCapFilter + ' → ' + forecast.length + ' registros | basesPost=' + JSON.stringify(_capBasesPost) + ' | countries=' + JSON.stringify(capFilter.allowedCountries) + ' exclAreas=' + JSON.stringify(capFilter.excludedAreas));
+        if (forecast.length === 0 && antesCapFilter > 0) {
+          var paisesEnDatos = {};
+          data.registros.forEach(function(r) {
+            var pn = normKey(r.p || '');
+            var pc = PAIS_NORMALIZE[pn] || pn;
+            paisesEnDatos[pc] = (paisesEnDatos[pc] || 0) + 1;
+          });
+          Logger.log('[CAPACITY-DBG] ALERTA: 0 registros post-filtro. Países en datos: ' + JSON.stringify(paisesEnDatos));
+        }
+      } else {
+        Logger.log('[CAPACITY-DBG] Sin filtro geográfico — vista IDÉNTICA a ADMIN (PHH+RAMPA consolidado)');
+      }
+      // CAPACITY no usa hierarchy — skip buildArbolJerarquico
+      // V52: equipoTotalActivos se recalculará desde personasSet (igual que ADMIN)
+      equipoTotalActivos = 0;
+      var _capT1 = new Date().getTime();
+      Logger.log('[V76-CAPACITY] <<< END procesando CAPACITY | ' + (_capT1 - _capT0) + 'ms | forecast.length=' + forecast.length);
+    } else if (rolUsuario === 'ADMIN') {
+      // ═══════════════════════════════════════════════════════════════════════
+      // V51e: ADMIN — ve todo el dataset (sin filtro jerárquico)
+      // El conteo se calcula abajo desde personasSet (dedup por BP, post base-filter)
+      // NO usa metadata.totalXXX (que inflaba el conteo con BPs duplicados cross-base)
+      // ═══════════════════════════════════════════════════════════════════════
+      _log('[V1e] ADMIN: sin filtro de jerarquía — equipoTotalActivos se calculará desde personasSet');
+      // forecast no se filtra — ADMIN ve todos los registros
+      // equipoTotalActivos se fijará en 0 aquí y se recalculará abajo
+      equipoTotalActivos = 0;
+    } else {
+      // ═══════════════════════════════════════════════════════════════════════
+      // V51: JEFE y otros roles — getEquipoRealBPs OBLIGATORIO
+      // V76: Si el rol está vacío (sesión expirada), tratar como vista sin filtro
+      // ═══════════════════════════════════════════════════════════════════════
+      if (!rolUsuario) {
+        Logger.log('[V76-WARN] rolUsuario VACIO — sesión expirada o info incompleta. Tratando como vista sin filtro (como ADMIN).');
+        equipoTotalActivos = 0;
+      } else {
+
+      // VALIDAR: necesitamos email para resolver jerarquía
+      if (!emailUsuarioInfo || emailUsuarioInfo === 'N/A') {
+        Logger.log('[FORECAST-DBG] ERROR: Sin email de usuario → no se puede resolver jerarquía. Retornando 0 colaboradores.');
+        Logger.log('[FORECAST-DBG] usuarioInfo recibido: ' + JSON.stringify(usuarioInfo || {}));
+        // NO traer todo — devolver vacío con error controlado
+        forecast = [];
+      } else {
+      var porBPForecast = {};
+      var bkMap = {
+        'CHILE': ['CHILE'], 'LATAM': ['LATAM'], 'RAMPA': ['RAMPA'], 'NAM': ['NAM'],
+        'HCC': ['LATAM', 'RAMPA'],
+        'TODO': ['CHILE', 'LATAM', 'RAMPA', 'NAM'],
+        'TODOS': ['CHILE', 'LATAM', 'RAMPA', 'NAM']
+      };
+      var basesParaJerarquia = bkMap['TODO'].slice(); // V43: SIEMPRE leer TODAS las bases para jerarquía
+      // Esto garantiza consistencia con Mi Equipo, que lee todas las bases.
+      // El filtro solo afecta registros (cursos), no la población de empleados.
+      _log('[V3-BASES] Leyendo TODAS las bases para jerarquía (como Mi Equipo): ' + JSON.stringify(basesParaJerarquia));
+      
+      // ═══ V30d: GARANTÍA — basesParaJerarquia SIEMPRE incluye la base del usuario ═══
+      // Misma garantía que basesALeerFinal en getForecastData (línea 3636)
+      var todasLasBasesValidas = ['CHILE', 'LATAM', 'RAMPA', 'NAM'];
+      if (usuarioBase && todasLasBasesValidas.indexOf(usuarioBase) >= 0 && basesParaJerarquia.indexOf(usuarioBase) < 0) {
+        basesParaJerarquia.push(usuarioBase);
+        Logger.log('[ARG-AUDIT] GARANTIA-JERARQUIA: base del usuario "' + usuarioBase + '" NO estaba en basesParaJerarquia → AGREGADA');
+      }
+      
+      // ═══ V30d: LOGS OBLIGATORIOS POR EJECUCIÓN ═══
+      Logger.log('[ARG-AUDIT] filtro=' + filtro + ' usuarioBase=' + usuarioBase);
+      Logger.log('[ARG-AUDIT] basesALeerFinal=' + JSON.stringify(data.metadata ? data.metadata.basesProcesadas : '(ver getForecastData)'));
+      Logger.log('[ARG-AUDIT] basesParaJerarquia=' + JSON.stringify(basesParaJerarquia));
+
+      // ═══════════════════════════════════════════════════════════════════
+      // V44: FUENTE ÚNICA DE VERDAD — getEquipoRealBPs
+      // Forecast NO construye su propio árbol. Usa el MISMO equipo que Mi Equipo.
+      // ═══════════════════════════════════════════════════════════════════
+      _log('[V7-FORECAST] ══════ USANDO getEquipoRealBPs como fuente única (fuente=' + fuente + ') ══════');
+      // V65: noClimb=true — NO agregar jefes superiores (JefeArea/JefeDepto) al equipo
+      // Consistente con Mi Equipo: solo subordinados reales del usuario
+      var _equipoReal = getEquipoRealBPs(emailUsuarioInfo, fuente, { noClimb: true });
+      
+      if (!_equipoReal.success || _equipoReal.totalEquipo === 0) {
+        Logger.log('[FORECAST-DBG] WARN: getEquipoRealBPs retornó 0 personas para email=' + emailUsuarioInfo + '. Sin fallback — resultado será 0 colaboradores.');
+      }
+      
+      arbol = _equipoReal.arbol || { personas: [], bps: {}, total: 0, rolAutoDetectado: 'COLABORADOR' };
+      equipoTotalActivos = _equipoReal.totalEquipo || 0;
+      totalNuevosIngresosArbol = _equipoReal.totalNI || 0;
+      niBPsList = _equipoReal.niBPsList || [];
+      equipoBPs = _equipoReal.equipoBPs || {};
+      
+      _log('[V4-FORECAST] equipoReal: total=' + equipoTotalActivos + ' activos=' + (_equipoReal.totalActivos || 0) + ' NI=' + totalNuevosIngresosArbol);
+      _log('[V4-FORECAST] BPs ACTIVOS (' + (_equipoReal.actBPsList || []).length + '): ' + (_equipoReal.actBPsList || []).join(', '));
+      _log('[V4-FORECAST] BPs NI (' + niBPsList.length + '): ' + niBPsList.join(', '));
+      
+      // ═══ V30: miCadenaJerarquica — extraer cadena de ancestros del usuario ═══
+      var CAMPOS_CADENA = ['director','gerenteSr','gerente','subgerente','jefeDepartamento','jefeArea','jefeDirecto'];
+      var LABELS_CADENA = ['director','gerenteSr','gerente','subgerente','jefeDepartamento','jefeArea','supervisor'];
+      // Buscar la fila del usuario por email en TODOS los empleados (no solo el equipo)
+      filaUsuario = null;
+      var emailBusca = (emailUsuarioInfo || '').toLowerCase().trim();
+      var _allEmps44 = _equipoReal.allEmpleados || {};
+      var _todosParaBusca = [];
+      ['CHILE','RAMPA','LATAM','NAM'].forEach(function(bk44) {
+        (_allEmps44[bk44] || []).forEach(function(e44) { _todosParaBusca.push(e44); });
+      });
+      for (var fu = 0; fu < _todosParaBusca.length; fu++) {
+        if (emailBusca && (_todosParaBusca[fu].correo || '').toLowerCase().trim() === emailBusca) {
+          filaUsuario = _todosParaBusca[fu]; break;
+        }
+      }
+      if (!filaUsuario && _equipoReal.nombreUsuario) {
+        var nombreBusca = normNombre(_equipoReal.nombreUsuario);
+        for (var fu2 = 0; fu2 < _todosParaBusca.length; fu2++) {
+          if (normNombre(_todosParaBusca[fu2].nombre) === nombreBusca) {
+            filaUsuario = _todosParaBusca[fu2]; break;
+          }
+        }
+      }
+      if (filaUsuario) {
+        for (var cci = 0; cci < CAMPOS_CADENA.length; cci++) {
+          var val = (filaUsuario[CAMPOS_CADENA[cci]] || '').trim();
+          if (val) miCadena[LABELS_CADENA[cci]] = val;
+        }
+        _log('[V4] miCadenaJerarquica: DIR=' + miCadena.director + ' G=' + miCadena.gerente + ' JA=' + miCadena.jefeArea + ' SUP=' + miCadena.supervisor);
+      }
+
+      // ═══ V30: nivelAgrupacion ═══
+      var NIVELES_ORDEN = ['DIRECTOR','GERENTE_SR','GERENTE','SUBGERENTE','JEFE_DEPARTAMENTO','JEFE_AREA','SUPERVISOR','COLABORADOR'];
+      var CAMPOS_NIVEL  = ['director','gerenteSr','gerente','subgerente','jefeDepartamento','jefeArea','jefeDirecto'];
+      var rolNivel = (arbol && arbol.rolAutoDetectado) ? arbol.rolAutoDetectado : 'COLABORADOR';
+      var idxRol = NIVELES_ORDEN.indexOf(rolNivel);
+      if (idxRol < 0) idxRol = 7;
+      nivelAgrupacion = '';
+      campoAgrupacion = '';
+      if (idxRol < 7) {
+        for (var nai = idxRol + 1; nai < 7; nai++) {
+          var campoTest = CAMPOS_NIVEL[nai];
+          var tieneValor = false;
+          var _arbolPersonas5 = (arbol && arbol.personas) ? arbol.personas : [];
+          for (var npi = 0; npi < _arbolPersonas5.length; npi++) {
+            var valTest = (_arbolPersonas5[npi][campoTest] || '').trim();
+            if (valTest) { tieneValor = true; break; }
+          }
+          if (tieneValor) {
+            nivelAgrupacion = NIVELES_ORDEN[nai];
+            campoAgrupacion = campoTest;
+            break;
+          }
+        }
+      }
+      if (!nivelAgrupacion && idxRol < 7) {
+        // V60: SUPERVISOR (idxRol=6) → no tiene sub-niveles, agrupar por jefeDirecto
+        // para que el supervisor vea su equipo directamente, no el equipo de su jefe.
+        if (idxRol === 6) {
+          nivelAgrupacion = 'SUPERVISOR';
+          campoAgrupacion = 'jefeDirecto';
+          _log('[V0] SUPERVISOR detectado → campoAgrupacion=jefeDirecto (su equipo directo)');
+        } else {
+          nivelAgrupacion = 'COLABORADOR';
+        }
+      }
+      _log('[V4] nivelAgrupacion: rolUsuario=' + rolNivel + ' → agruparPor=' + (nivelAgrupacion || 'ninguno'));
+      
+      // ═══ V44: Filtrar forecast por BPs del equipo real ═══
+      if (equipoTotalActivos > 0) {
+        var _v100forecastAntesBP = forecast.length;
+        forecast = forecast.filter(function(r) { return equipoBPs[r.bp]; });
+        // V100-CLEAN: Distribución por base DESPUÉS del filtro equipoBPs
+        var _v100basesDist = {};
+        forecast.forEach(function(r) { var bk = (r.base || 'SIN_BASE'); _v100basesDist[bk] = (_v100basesDist[bk] || 0) + 1; });
+        _auditLog('[V100-FC-EQUIPO-FILTER] equipoBPs=' + Object.keys(equipoBPs).length + ' | forecastAntes=' + _v100forecastAntesBP + ' → forecastDespues=' + forecast.length + ' | basesDist=' + JSON.stringify(_v100basesDist));
+        _log('[V4-FORECAST] Forecast filtrado: ' + forecastAntes + ' → ' + forecast.length + ' registros (usando ' + equipoTotalActivos + ' BPs del equipo real)');
+        
+        // V48: Para PHH/RAMPA, filtrar registros por la base correcta para BPs duplicados
+        // Evita que se muestren cursos de la base "incorrecta" cuando el usuario selecciona una fuente específica
+        var _dupBPs48 = (_equipoReal && _equipoReal._v47Debug && _equipoReal._v47Debug.duplicados_BPs) ? _equipoReal._v47Debug.duplicados_BPs : [];
+        if (_dupBPs48.length > 0 && fuente !== 'CONSOLIDADO') {
+          var _dupSet48 = {};
+          _dupBPs48.forEach(function(bp) { _dupSet48[bp] = true; });
+          var _base48 = (fuente === 'PHH') ? 'LATAM' : 'RAMPA';
+          var _before48 = forecast.length;
+          forecast = forecast.filter(function(r) {
+            if (_dupSet48[r.bp]) return (r.base || '').toUpperCase() === _base48;
+            return true;
+          });
+          _log('[V8-MULTIBASE] Post-filtro fuente=' + fuente + ' base=' + _base48 + ': ' + _before48 + ' → ' + forecast.length + ' (removidos ' + (_before48 - forecast.length) + ' de base incorrecta para ' + _dupBPs48.length + ' BPs duplicados)');
+        }
+      } else {
+        // V51: 0 personas en equipo real → NO FALLBACK → no traer dataset global
+        Logger.log('[FORECAST-DBG] WARN: getEquipoRealBPs retornó 0 personas para email=' + emailUsuarioInfo + ' rol=' + rolUsuario);
+        Logger.log('[FORECAST-DBG] NO se aplica fallback token-match. Resultado: 0 colaboradores.');
+        forecast = [];
+      }
+      
+      if (forecast.length === 0) {
+        _log('[V1-FORECAST] 0 MATCHES — equipo vacío o sin registros de cursos');
+      }
+      
+      // ═══ V44: DEBUG COMPARACIÓN MI EQUIPO VS FORECAST ═══
+      var forecastBPsSet = {};
+      forecast.forEach(function(r) { if (r.bp) forecastBPsSet[r.bp] = true; });
+      var extraInForecast = [];
+      var missingInForecast = [];
+      for (var fbp in forecastBPsSet) {
+        if (!equipoBPs[fbp]) extraInForecast.push(fbp);
+      }
+      for (var ebp in equipoBPs) {
+        if (!forecastBPsSet[ebp]) missingInForecast.push(ebp);
+      }
+      _log('[V4-DEBUG] MiEquipo_BPs size=' + Object.keys(equipoBPs).length);
+      _log('[V4-DEBUG] Forecast_BPs size=' + Object.keys(forecastBPsSet).length);
+      if (extraInForecast.length > 0) _log('[V4-DEBUG] ExtraInForecast (NO deberían estar): ' + extraInForecast.join(', '));
+      if (missingInForecast.length > 0) _log('[V4-DEBUG] MissingInForecast (sin registros de cursos): ' + missingInForecast.join(', '));
+      if (extraInForecast.length === 0 && missingInForecast.length === 0) _log('[V4-DEBUG] MATCH PERFECTO: Forecast usa exactamente los mismos BPs que Mi Equipo');
+      } // fin: email disponible (JEFE branch)
+      } // V76: fin del else (rolUsuario no vacío)
+    } // fin: JEFE/otros branch
+    Logger.log('════════════════════════════════════════════════════════');
+    
+    // ═══════════════════════════════════════════════════════════════════════
+    // V51c: FILTRO POR BASE SELECCIONADA
+    // Cuando el usuario selecciona una base específica (RAMPA, LATAM, etc.),
+    // mostrar SOLO registros que provienen de esa base.
+    // Para TODO/HCC: no filtrar (mostrar consolidado/cross-base).
+    // Esto SOLUCIONA el P0: al seleccionar RAMPA se veían datos de PHH.
+    // ═══════════════════════════════════════════════════════════════════════
+    if (filtro !== 'TODO' && filtro !== 'HCC') {
+      var _antesBaseFiltro = forecast.length;
+      var _srcCount = {};  // contar registros por base-origen
+      forecast.forEach(function(r) {
+        var bOrig = (r.base || '').toUpperCase();
+        _srcCount[bOrig] = (_srcCount[bOrig] || 0) + 1;
+      });
+      // V100-CLEAN: Log VISIBLE de distribución ANTES del filtro por base
+      _auditLog('[V100-FC-BASE-FILTER] filtro=' + filtro + ' | antesFiltro=' + _antesBaseFiltro + ' | distribucion=' + JSON.stringify(_srcCount));
+      
+      // Filtrar: solo registros cuya base-origen coincida con la base seleccionada
+      forecast = forecast.filter(function(r) {
+        return (r.base || '').toUpperCase() === filtro;
+      });
+      
+      var _despuesBaseFiltro = forecast.length;
+      // V100-CLEAN: Log VISIBLE del resultado del filtro
+      _auditLog('[V100-FC-BASE-RESULT] filtro=' + filtro + ' | despues=' + _despuesBaseFiltro + ' (eliminados ' + (_antesBaseFiltro - _despuesBaseFiltro) + ')');
+      Logger.log('[FORECAST-SRC] Después de filtro base=' + filtro + ': ' + _despuesBaseFiltro + ' registros. Eliminados: ' + (_antesBaseFiltro - _despuesBaseFiltro) + ' de otras bases.');
+      
+      // Log muestra por cada BP especial (multi-base)
+      if (_dupBPs && _dupBPs.length > 0) {
+        var _srcCheckCount = { RAMPA: 0, PHH: 0, LATAM: 0, CHILE: 0, NAM: 0, OTRO: 0 };
+        forecast.forEach(function(r) {
+          if (_dupBPs.indexOf(r.bp) >= 0) {
+            var bk = (r.base || 'OTRO').toUpperCase();
+            _srcCheckCount[bk] = (_srcCheckCount[bk] || 0) + 1;
+          }
+        });
+        Logger.log('[FORECAST-SRC] BPs especiales (multi-base) post-filtro: ' + JSON.stringify(_srcCheckCount));
+      }
+    } else {
+      // V100-CLEAN: Cuando filtro=TODO o HCC, NO se aplica base-filter
+      _auditLog('[V100-FC-BASE-FILTER] filtro=' + filtro + ' | SIN FILTRO BASE (TODO/HCC) | registros=' + forecast.length);
+    }
+    
+    // V100-CLEAN: RESUMEN FINAL VISIBLE
+    var _v100FinalBPsSet = {};
+    forecast.forEach(function(r) { if (r.bp) _v100FinalBPsSet[r.bp] = true; });
+    _auditLog('[V100-FC-FINAL] filtro=' + filtro + ' rol=' + rolUsuario + ' | registrosFinal=' + forecast.length + ' | personasUnicas=' + Object.keys(_v100FinalBPsSet).length + ' | BUILD=' + BUILD_GS);
+
+    // V50: Log obligatorio de dedup — conteo DESPUÉS de filtro jerarquía + base
+    var _afterJerarquiaUniqueSet = {};
+    forecast.forEach(function(r) { if (r.bp) _afterJerarquiaUniqueSet[r.bp] = true; });
+    var _afterJerarquiaUnique = Object.keys(_afterJerarquiaUniqueSet).length;
+    Logger.log('[FORECAST] beforeMerge=' + _beforeMerge + ' afterMergeUniqueBP=' + _uniqueBPsBeforeJerarquia + ' afterJerarquia=' + _afterJerarquiaUnique);
+    
+    // V44: Build personasSet from forecast AFTER all filtering (works for ALL roles)
+    // V54: Track esHCC per BP for accurate PHH vs HCC separation
+    var _bpHCC = {};   // BPs que son HCC
+    var _bpNI = {};    // BPs que son Nuevo Ingreso
+    forecast.forEach(function(r) {
+      if (r.jefeDirecto) jefesSet[r.jefeDirecto] = true;
+      if (r.jefeArea) jefesAreaSet[r.jefeArea] = true;
+      if (r.gerente) jefesAreaSet[r.gerente] = true;
+      if (r.bp) {
+        personasSet[r.bp] = true;
+        if (r.esHCC) _bpHCC[r.bp] = true;
+        if (r.esNuevoIngreso) _bpNI[r.bp] = true;
+      }
+    });
+    
+    // V75c: Construir mapa jefe→correo eficiente (2 pases, O(n+m))
+    var jefesCorreoMap = {};
+    // Paso 1: mapa normalizado de jefes pendientes
+    var _jefesNormPending = {};
+    Object.keys(jefesSet).forEach(function(jn) {
+      _jefesNormPending[(jn || '').toUpperCase().replace(/\s+/g, ' ').trim()] = jn;
+    });
+    // Paso 2: un pase por forecast para resolver correos
+    forecast.forEach(function(r) {
+      if (r.nombre && r.correo) {
+        var nk = (r.nombre || '').toUpperCase().replace(/\s+/g, ' ').trim();
+        if (_jefesNormPending[nk] && !jefesCorreoMap[_jefesNormPending[nk]]) {
+          jefesCorreoMap[_jefesNormPending[nk]] = r.correo;
+        }
+      }
+    });
+    
+    // V99-REGLA-NEGOCIO: WC safety net solo aplica si estamos viendo base NAM.
+    // Para PHH/LATAM/RAMPA/CHILE, WC no es un concepto operativo válido.
+    var wcSafetyRemoved = 0;
+    if (filtro === 'NAM' && Object.keys(_wcBPsSession).length > 0) {
+      Object.keys(_wcBPsSession).forEach(function(wcBP) {
+        if (personasSet[wcBP]) {
+          delete personasSet[wcBP];
+          wcSafetyRemoved++;
+        }
+      });
+      if (wcSafetyRemoved > 0) {
+        _log('[V99-WC-SAFETY-NAM] Removidos ' + wcSafetyRemoved + ' BPs WC de personasSet (solo NAM)');
+      }
+    }
+    var totalActivos = Object.keys(personasSet).length;
+    var totalHCCPersonas = Object.keys(_bpHCC).length;
+    var totalNIPersonas = Object.keys(_bpNI).length;
+    // V54: equipoTotalActivosSinHCC = personas NO-HCC (para tab PHH)
+    var equipoTotalActivosSinHCC = totalActivos - totalHCCPersonas;
+    _log('[V4-HCC-SPLIT] totalActivos=' + totalActivos + ' HCC=' + totalHCCPersonas + ' sinHCC=' + equipoTotalActivosSinHCC + ' NI=' + totalNIPersonas);
+    // V51: NO fallback a metadata.totalXXX — eso infla el conteo con BPs no filtrados
+    // Si totalActivos === 0, es porque no hay personas post-filtro → correcto mostrar 0
+    
+    // V51e: Recalcular equipoTotalActivos DESPUÉS de todos los filtros
+    // Para ADMIN: equipoTotalActivos=0 aquí → se fija desde personasSet
+    // Para bases específicas: recalcular porque el filtro base reduce el universo
+    // Para CAPACITY con 0: recalcular desde personasSet
+    if (equipoTotalActivos === 0) {
+      equipoTotalActivos = totalActivos;
+      _log('[V1e] equipoTotalActivos fijado desde personasSet=' + equipoTotalActivos + ' (rol=' + rolUsuario + ' base=' + filtro + ')');
+    } else if (filtro !== 'TODO' && filtro !== 'HCC') {
+      var prevETA = equipoTotalActivos;
+      equipoTotalActivos = totalActivos;
+      _log('[V1c] equipoTotalActivos recalculado post-filtro-base: ' + prevETA + ' → ' + equipoTotalActivos + ' (base=' + filtro + ')');
+    }
+    
+    _log('[V1] POBLACIONES: equipoTotalActivos=' + equipoTotalActivos + ' | evaluados=' + totalActivos + ' | NI_arbol=' + totalNuevosIngresosArbol);
+    
+    // V51c: Log obligatorio con formato requerido — finalTotal = equipoTotalActivos POST todos los filtros
+    Logger.log('[FORECAST-DBG] base=' + filtro + ' rol=' + rolUsuario + ' beforeMerge=' + _beforeMerge + ' afterMergeUniqueBP=' + _uniqueBPsBeforeJerarquia + ' afterJerarquia=' + _afterJerarquiaUnique + ' finalTotal=' + equipoTotalActivos);
+    
+    var elapsedByBase = new Date().getTime() - t0ByBase;
+    
+    // ═══ LOG KPIs POR PERSONA (BPs únicos) — MUTUAMENTE EXCLUYENTES ═══
+    // CRITICO > PENDIENTE > AL_DIA  (misma lógica que frontend)
+    var bpsCritico = {}, bpsPendiente = {}, bpsAlDia = {};
+    forecast.forEach(function(r) {
+      if (!r.bp) return;
+      var st = (r.status || '').toUpperCase().replace(/\s+/g, '_');
+      if (st === 'VENCIDO' || st === 'SIN_FECHA_VENCIDO' || st === 'VENCIDO_REAL') {
+        bpsCritico[r.bp] = true;
+      } else if (st === 'POR_VENCER' || st === 'POR VENCER' || st === 'PROGRAMAR' || st === 'SIN_PLAN') {
+        if (!bpsCritico[r.bp]) bpsPendiente[r.bp] = true;
+      } else if (st === 'HABILITADO' || st === 'COMPLETADO') {
+        if (!bpsCritico[r.bp] && !bpsPendiente[r.bp]) bpsAlDia[r.bp] = true;
+      }
+    });
+    var totalPersonasKPI = Object.keys(personasSet).length;
+    var personasCriticoKPI = Object.keys(bpsCritico).length;
+    var personasPendienteKPI = Object.keys(bpsPendiente).length;
+    var personasAlDiaKPI = totalPersonasKPI - personasCriticoKPI - personasPendienteKPI;
+    if (personasAlDiaKPI < 0) personasAlDiaKPI = 0;
+    var checkOK = (personasCriticoKPI + personasPendienteKPI + personasAlDiaKPI) === totalPersonasKPI;
+    var pctCumplimientoKPI = totalPersonasKPI > 0 ? Math.round((1 - (personasCriticoKPI / totalPersonasKPI)) * 100) : 100;
+    
+    // V41: Diagnosticar NI con vencidos (pueden causar diferencia Forecast vs Looker)
+    var niConVencidoBE = [];
+    forecast.forEach(function(r) {
+      if (r.ni && bpsCritico[r.bp] && niConVencidoBE.indexOf(r.bp) < 0) {
+        niConVencidoBE.push(r.bp);
+      }
+    });
+    if (niConVencidoBE.length > 0) {
+      _log('[V1-DIAG] NI con vencidos (excluidos del KPI frontend): ' + niConVencidoBE.length + ' BPs: ' + niConVencidoBE.join(', '));
+    }
+    var personasCriticoSinNI = personasCriticoKPI - niConVencidoBE.length;
+    _log('[V1-DIAG] Criticos TOTAL=' + personasCriticoKPI + ' | NI_con_vencido=' + niConVencidoBE.length + ' | Criticos_SIN_NI=' + personasCriticoSinNI);
+    // V44: % Cumplimiento BASADO EN PERSONAS (consistente con frontend y Mi Equipo)
+    var totalActivosKPIBE = equipoTotalActivos - totalNuevosIngresosArbol;
+    var pctCumplPersonasBE = totalActivosKPIBE > 0 ? Math.round(((totalActivosKPIBE - personasCriticoSinNI) / totalActivosKPIBE) * 100) : 100;
+    _log('[V4-BE] %CumplPersonas: (' + totalActivosKPIBE + '-' + personasCriticoSinNI + ')/' + totalActivosKPIBE + '=' + pctCumplPersonasBE + '%');
+    
+    // Conteo de registros PLAN vs BASE
+    var registrosDePlan = 0, registrosDeBase = 0;
+    forecast.forEach(function(r) {
+      if (r.sp === 2) registrosDeBase++;
+      else registrosDePlan++;
+    });
+    
+    // Log auditoría unificado
+    var arbolRoles = (arbol && arbol.roles) ? arbol.roles : { asGerente: 0, asJefeArea: 0, asJefeDirecto: 0 };
+    var arbolRolUsado = (arbol && arbol.rolAutoDetectado) ? arbol.rolAutoDetectado : '(sin arbol)';
+    var arbolDescartados = (arbol && arbol.descartadosPorAncestro) ? arbol.descartadosPorAncestro : 0;
+    Logger.log('═══ KPIs AUDITADOS (V25-CHAIN) ═══');
+    _log('  usuario="' + nombreUsuarioInfo + '" | roles: G=' + arbolRoles.asGerente + ' JA=' + arbolRoles.asJefeArea + ' JD=' + arbolRoles.asJefeDirecto + ' → rolUsado=' + arbolRolUsado);
+    _log('  personas=' + totalPersonasKPI + ' | critico=' + personasCriticoKPI + ' | pendiente=' + personasPendienteKPI + ' | alDia=' + personasAlDiaKPI);
+    _log('  CHECK: ' + totalPersonasKPI + '==' + personasCriticoKPI + '+' + personasPendienteKPI + '+' + personasAlDiaKPI + ' → ' + (checkOK ? 'OK ✓' : 'FALLA ✗'));
+    _log('  fuente: PLAN=' + registrosDePlan + ' | BASE-extra=' + registrosDeBase);
+    _log('  %cumplimiento=' + pctCumplimientoKPI + '% (1-critico/total)');
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // [AUDIT-EMPTY] V30d: Log OBLIGATORIO cuando forecast=0 o KPIs=0
+    // ═══════════════════════════════════════════════════════════════════════
+    if (forecast.length === 0 || equipoTotalActivos === 0 || totalPersonasKPI === 0) {
+      Logger.log('[AUDIT-EMPTY] ══════════════════════════════════════════');
+      Logger.log('[AUDIT-EMPTY] usuario: nombre="' + nombreUsuarioInfo + '" email=' + emailUsuarioInfo + ' BP=' + ((usuarioInfo && usuarioInfo.bp) || 'N/A') + ' baseOrigen=' + usuarioBase + ' rol=' + rolUsuario);
+      Logger.log('[AUDIT-EMPTY] filtro=' + filtro + ' tipoBase=' + tipoBase);
+      Logger.log('[AUDIT-EMPTY] basesALeerFinal=' + JSON.stringify(data.metadata ? data.metadata.basesProcesadas : 'N/A'));
+      Logger.log('[AUDIT-EMPTY] basesParaJerarquia=' + JSON.stringify(typeof basesParaJerarquia !== 'undefined' ? basesParaJerarquia : 'N/A'));
+      Logger.log('[AUDIT-EMPTY] userRowFoundInBase=' + (filaUsuario ? 'true' : 'false') + ' baseEncontrada=' + (filaUsuario ? (filaUsuario.baseRegion || 'N/A') : 'N/A'));
+      Logger.log('[AUDIT-EMPTY] chosenRole=' + arbolRolUsado + ' contexts=' + ((arbol && arbol.personas) ? 'OK' : 'N/A'));
+      Logger.log('[AUDIT-EMPTY] subordinatesFound=' + equipoTotalActivos + ' discardedByAncestorMismatch=' + arbolDescartados);
+      Logger.log('[AUDIT-EMPTY] forecastAntes=' + forecastAntes + ' forecastDespues=' + forecast.length + ' personasKPI=' + totalPersonasKPI);
+      // Razón final clara
+      var razonEmpty = '';
+      if (!filaUsuario) razonEmpty = 'USUARIO NO ENCONTRADO en pseudoEmpleados — nombre/email no coincide con ninguna fila en basesParaJerarquia';
+      else if (arbolRolUsado === 'COLABORADOR' || arbolRolUsado === '(sin arbol)') razonEmpty = 'USUARIO DETECTADO COMO COLABORADOR — nombre no aparece como jefe en ningun nivel jerarquico';
+      else if (equipoTotalActivos === 0) razonEmpty = 'ARBOL VACIO — jefe detectado en ' + arbolRolUsado + ' pero 0 subordinados pasaron matchContexto (descartados=' + arbolDescartados + ')';
+      else if (forecast.length === 0 && equipoTotalActivos > 0) razonEmpty = 'FILTRO DEJO 0 — arbol tiene ' + equipoTotalActivos + ' personas pero ninguna tiene registros de cursos en el dataset';
+      else if (totalPersonasKPI === 0) razonEmpty = 'KPI EN 0 — forecast=' + forecast.length + ' registros pero 0 personas unicas (BPs vacios?)';
+      else razonEmpty = 'PARCIAL — alguna metrica en 0 (equipo=' + equipoTotalActivos + ' evaluados=' + totalPersonasKPI + ' forecast=' + forecast.length + ')';
+      Logger.log('[AUDIT-EMPTY] RAZON: ' + razonEmpty);
+      Logger.log('[AUDIT-EMPTY] ══════════════════════════════════════════');
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // [AUDIT-KPI-COURSES] V30d: Auditoría de KPIs y Total Cursos (SIEMPRE)
+    // ═══════════════════════════════════════════════════════════════════════
+    Logger.log('[AUDIT-KPI-COURSES] ══════════════════════════════════════');
+    Logger.log('[AUDIT-KPI-COURSES] usuario="' + nombreUsuarioInfo + '" filtro=' + filtro + ' rol=' + arbolRolUsado);
+    Logger.log('[AUDIT-KPI-COURSES] DEFINICIONES:');
+    Logger.log('[AUDIT-KPI-COURSES]   equipoTotalActivos=' + equipoTotalActivos + ' (personas unicas en arbol jerarquico, incluye jefes sin cursos)');
+    Logger.log('[AUDIT-KPI-COURSES]   evaluados(personasEnTabla)=' + totalPersonasKPI + ' (personas unicas con al menos 1 registro de curso en forecast)');
+    Logger.log('[AUDIT-KPI-COURSES]   totalCursos(registros)=' + forecast.length + ' (filas totales en tabla, ~N cursos x M personas)');
+    Logger.log('[AUDIT-KPI-COURSES]   critico=' + personasCriticoKPI + ' pendiente=' + personasPendienteKPI + ' alDia=' + personasAlDiaKPI + ' CHECK=' + (checkOK ? 'OK' : 'FALLA'));
+    Logger.log('[AUDIT-KPI-COURSES]   %cumplimiento=' + pctCumplimientoKPI + '% formula=1-(critico/evaluados)');
+
+    // Detalle de 10 BPs: cuantos cursos tiene cada uno y desglose por status
+    var bpCourseDetail = {};
+    forecast.forEach(function(r) {
+      if (!r.bp) return;
+      if (!bpCourseDetail[r.bp]) bpCourseDetail[r.bp] = { nombre: r.nombre||'', total: 0, hab: 0, prog: 0, venc: 0, otro: 0 };
+      bpCourseDetail[r.bp].total++;
+      var st = (r.status || '').toUpperCase().replace(/\s+/g, '_');
+      if (st === 'HABILITADO' || st === 'COMPLETADO') bpCourseDetail[r.bp].hab++;
+      else if (st === 'VENCIDO' || st === 'SIN_FECHA_VENCIDO' || st === 'VENCIDO_REAL') bpCourseDetail[r.bp].venc++;
+      else if (st === 'POR_VENCER' || st === 'POR VENCER' || st === 'PROGRAMAR' || st === 'SIN_PLAN') bpCourseDetail[r.bp].prog++;
+      else bpCourseDetail[r.bp].otro++;
+    });
+    var sampleBPs = Object.keys(bpCourseDetail).slice(0, 10);
+    for (var sbi = 0; sbi < sampleBPs.length; sbi++) {
+      var bpd = bpCourseDetail[sampleBPs[sbi]];
+      Logger.log('[AUDIT-KPI-COURSES]   BP=' + sampleBPs[sbi] + ' "' + (bpd.nombre||'').substring(0,30) + '" totalCursos=' + bpd.total + ' HAB=' + bpd.hab + ' PROG=' + bpd.prog + ' VENC=' + bpd.venc + ' OTRO=' + bpd.otro);
+    }
+    if (Object.keys(bpCourseDetail).length > 10) Logger.log('[AUDIT-KPI-COURSES]   ... y ' + (Object.keys(bpCourseDetail).length - 10) + ' personas mas');
+    Logger.log('[AUDIT-KPI-COURSES] FORMULA TOTAL CURSOS: Sum(registros en forecast filtrado) = ' + forecast.length + ' | registrosPLAN=' + registrosDePlan + ' registrosBASE=' + registrosDeBase);
+    Logger.log('[AUDIT-KPI-COURSES] VALIDACION: equipoTotal(' + equipoTotalActivos + ') >= evaluados(' + totalPersonasKPI + ')? ' + (equipoTotalActivos >= totalPersonasKPI ? 'SI' : 'NO — posible inconsistencia'));
+    Logger.log('[AUDIT-KPI-COURSES] ══════════════════════════════════════');
+    
+    // ═══════════════════════════════════════════════════════════════════════
+    // [HIER-DRILLDOWN-DIAG] V31: Simular agrupación frontend para diagnosticar drilldown
+    // El frontend agrupa por campoAgrupacion.
+    // V33: Diagnóstico sin override (confiamos en el campoAgrupacion original del backend).
+    // ═══════════════════════════════════════════════════════════════════════
+    var _ddDiag = { campoUsado: '', porJefe: {}, totalBPs: 0 };
+    try {
+      var CAMPOS_CASCADE_BE = ['director','gerenteSr','gerente','subgerente','jefeDepartamento','jefeArea','jefeDirecto'];
+      var ddCampo = campoAgrupacion || 'jefeArea';
+      var ddIdx = CAMPOS_CASCADE_BE.indexOf(ddCampo);
+      if (ddIdx < 0) ddIdx = CAMPOS_CASCADE_BE.indexOf('jefeArea');
+      // V33: NO override — el campoAgrupacion del backend es correcto
+      var ddCascadeDown = CAMPOS_CASCADE_BE.slice(ddIdx);
+      var ddCascadeUp = CAMPOS_CASCADE_BE.slice(0, ddIdx).reverse();
+      _ddDiag.campoUsado = ddCampo;
+      _ddDiag.overrideAplicado = false;
+      _ddDiag.cascadeDown = ddCascadeDown.join(',');
+      _ddDiag.cascadeUp = ddCascadeUp.join(',');
+
+      // Agrupar BPs por jefe (misma lógica que frontend)
+      var ddBPsVisto = {};
+      var ddPorJefe = {};
+      forecast.forEach(function(r) {
+        if (!r.bp || ddBPsVisto[r.bp]) return;
+        ddBPsVisto[r.bp] = true;
+        var jefeAsig = '';
+        // Paso 1: campo directo
+        var valDir = (r[ddCampo] || '').trim();
+        if (valDir) jefeAsig = valDir;
+        // Paso 2: cascada arriba
+        if (!jefeAsig) {
+          for (var u = 0; u < ddCascadeUp.length; u++) {
+            var vU = (r[ddCascadeUp[u]] || '').trim();
+            if (vU) { jefeAsig = vU; break; }
+          }
+        }
+        // Paso 3: cascada abajo
+        if (!jefeAsig) {
+          for (var d = 1; d < ddCascadeDown.length; d++) {
+            var vD = (r[ddCascadeDown[d]] || '').trim();
+            if (vD) { jefeAsig = vD; break; }
+          }
+        }
+        if (!jefeAsig) jefeAsig = 'Sin Jefe';
+        if (!ddPorJefe[jefeAsig]) ddPorJefe[jefeAsig] = [];
+        ddPorJefe[jefeAsig].push(r.bp);
+      });
+      _ddDiag.totalBPs = Object.keys(ddBPsVisto).length;
+      // Construir resumen
+      var ddJefes = Object.keys(ddPorJefe);
+      Logger.log('[HIER-DRILLDOWN-DIAG] ══════════════════════════════════════');
+      Logger.log('[HIER-DRILLDOWN-DIAG] campoAgrupacion(backend)="' + (campoAgrupacion || '') + '" → campoUsado(con override)="' + ddCampo + '"');
+      Logger.log('[HIER-DRILLDOWN-DIAG] totalBPs=' + _ddDiag.totalBPs + ' | totalJefes=' + ddJefes.length);
+      for (var dji = 0; dji < Math.min(ddJefes.length, 20); dji++) {
+        var djNombre = ddJefes[dji];
+        var djBPs = ddPorJefe[djNombre];
+        Logger.log('[HIER-DRILLDOWN-DIAG]   jefe="' + djNombre + '" → ' + djBPs.length + ' BPs' + (djBPs.length <= 5 ? ': [' + djBPs.join(', ') + ']' : ': [' + djBPs.slice(0,3).join(', ') + '... +' + (djBPs.length-3) + ' mas]'));
+        _ddDiag.porJefe[djNombre] = djBPs.length;
+      }
+      if (ddJefes.length > 20) Logger.log('[HIER-DRILLDOWN-DIAG]   ... y ' + (ddJefes.length - 20) + ' jefes mas');
+      
+      // Log detallado para los primeros 5 BPs: mostrar TODOS sus campos jerárquicos
+      var ddSampleBPs = Object.keys(ddBPsVisto).slice(0, 5);
+      Logger.log('[HIER-DRILLDOWN-DIAG] MUESTRA de 5 BPs con campos jerárquicos:');
+      ddSampleBPs.forEach(function(sbp) {
+        var sampleRec = null;
+        for (var si = 0; si < forecast.length; si++) { if (forecast[si].bp === sbp) { sampleRec = forecast[si]; break; } }
+        if (sampleRec) {
+          Logger.log('[HIER-DRILLDOWN-DIAG]   BP=' + sbp + ' nombre="' + (sampleRec.nombre || '').substring(0,30) + '"'
+            + ' dir="' + (sampleRec.director || '') + '"'
+            + ' gsr="' + (sampleRec.gerenteSr || '') + '"'
+            + ' g="' + (sampleRec.gerente || '') + '"'
+            + ' sg="' + (sampleRec.subgerente || '') + '"'
+            + ' jdpto="' + (sampleRec.jefeDepartamento || '') + '"'
+            + ' ja="' + (sampleRec.jefeArea || '') + '"'
+            + ' jd="' + (sampleRec.jefeDirecto || '') + '"');
+        }
+      });
+      Logger.log('[HIER-DRILLDOWN-DIAG] ══════════════════════════════════════');
+    } catch(ddErr) {
+      Logger.log('[HIER-DRILLDOWN-DIAG] ERROR: ' + ddErr.message);
+    }
+
+    Logger.log('[PERF] getForecastDataByBase base=' + tipoBase + ' totalMs=' + elapsedByBase + ' forecast=' + forecast.length + ' personas=' + totalPersonasKPI);
+    Logger.log('◀◀◀ END getForecastDataByBase("' + tipoBase + '") [OK] forecast=' + forecast.length + ' | personas=' + totalPersonasKPI + ' | equipo=' + equipoTotalActivos + ' | NI=' + totalNIPersonas + ' | HCC=' + totalHCCPersonas + ' | sinHCC=' + equipoTotalActivosSinHCC + ' | ' + elapsedByBase + 'ms');
+    
+    // ═══ METADATA DIAGNÓSTICA para mostrar en UI (visible sin consola) ═══
+    var diagInfo = {
+      usuarioDetectado: nombreUsuarioInfo || '(vacío)',
+      rolDetectado: rolUsuario || '(vacío)',
+      baseDetectada: tipoBase || '(vacía)',
+      areaDetectada: areaUsuarioInfo || '(vacía)',
+      normKeyUsuario: nk || '(vacío)',
+      registrosBackend: forecastAntes || 0,
+      registrosTrasFiltro: forecast.length,
+      personasUnicas: totalPersonasKPI,
+      personasCritico: personasCriticoKPI,
+      personasPendiente: personasPendienteKPI,
+      personasAlDia: personasAlDiaKPI,
+      checkKPI: checkOK,
+      fuentePLAN: registrosDePlan,
+      fuenteBASE: registrosDeBase,
+      pctCumplimiento: pctCumplimientoKPI,
+      tiempoMs: elapsedByBase,
+      filtroAplicado: rolUsuario === 'ADMIN' ? 'NINGUNO-ADMIN (personasSet dedup)' : (rolUsuario === 'CAPACITY' ? 'CAPACITY-CONSOLIDADO (PHH+RAMPA, filtro geográfico opcional)' : 'JERARQUIA-getEquipoRealBPs'),
+      rolesDetectados: arbolRoles,
+      rolAutoDetectado: arbolRolUsado,
+      equipoTotalActivos: equipoTotalActivos,
+      descartadosPorAncestro: arbolDescartados,
+      basesParaJerarquia: (typeof basesParaJerarquia !== 'undefined') ? basesParaJerarquia : null,
+      userRowFoundInBase: (typeof filaUsuario !== 'undefined' && filaUsuario) ? true : false
+    };
+    
+    // Si 0 resultados, agregar pistas adicionales
+    if (forecast.length === 0 && forecastAntes > 0) {
+      // V72d: [AUDIT-NODATA] — log obligatorio para diagnóstico rápido
+      Logger.log('[AUDIT-NODATA] user=' + (emailUsuarioInfo || 'N/A') + ' nombre="' + (nombreUsuarioInfo || '') + '" base=' + tipoBase + ' filtro=' + filtro + ' rol=' + rolUsuario + ' registrosBackend=' + forecastAntes + ' registrosTrasFiltro=0 equipoBPs=' + Object.keys(equipoBPs).length + ' rolDetectado=' + (arbolRolUsado || 'N/A'));
+      var topJDdiag = {};
+      data.registros.forEach(function(r) {
+        if (r.jd) topJDdiag[normKey(r.jd)] = r.jd;
+        if (r.ja) topJDdiag[normKey(r.ja)] = r.ja;
+      });
+      // Buscar matches parciales del nombre del usuario en JD/JA
+      var pistasParciales = [];
+      if (nk) {
+        var nkWords = nk.split(/\s+/);
+        for (var dkey in topJDdiag) {
+          for (var nkw = 0; nkw < nkWords.length; nkw++) {
+            if (nkWords[nkw].length > 2 && dkey.indexOf(nkWords[nkw]) >= 0) {
+              pistasParciales.push(topJDdiag[dkey]);
+              break;
+            }
+          }
+        }
+      }
+      diagInfo.matchParcial = pistasParciales.slice(0, 10);
+      diagInfo.razonCero = 'El nombre "' + (nombreUsuarioInfo || '') + '" (normKey="' + (nk || '') + '") no coincidió con ningún JD/JA/Ejecutivo en los ' + forecastAntes + ' registros.';
+      if (pistasParciales.length > 0) {
+        diagInfo.razonCero += ' Nombres similares encontrados: ' + pistasParciales.slice(0, 5).join(', ');
+      }
+    }
+    
+    // V100-CLEAN: CONFIRMACIÓN FINAL ANTES DEL RETURN - tamaño exacto de respuesta
+    _auditLog('[V100-FC-RETURN] filtro=' + filtro + ' | forecast=' + forecast.length + 
+      ' equipoTotal=' + equipoTotalActivos + ' personasKPI=' + totalPersonasKPI + 
+      ' critico=' + personasCriticoKPI + ' pend=' + personasPendienteKPI + ' alDia=' + personasAlDiaKPI +
+      ' %cumpl=' + pctCumplimientoKPI + ' | BUILD=' + BUILD_GS);
+    
+    // V100-FIX-v2: Para JEFE, ELIMINAR completamente metadata pesada y simplificar registros
+    // para evitar que google.script.run falle por tamaño de respuesta
+    var _esJefe = (rolUsuario !== 'ADMIN' && rolUsuario !== 'CAPACITY');
+    var _returnJerIndex = {};
+    var _returnJerIndexBP = {};
+    var _returnPosGlobal = {};
+    var _returnForecast = forecast;
+    
+    if (_esJefe) {
+      // JEFE: NO enviar metadata pesada — enviar vacío
+      // jerarquiaIndex/BP/posicionGlobal quedan {} (vacíos)
+      
+      // V101-FIX: Reducción ADICIONAL — eliminar campos redundantes/pesados de cada registro
+      // El frontend NECESITA: bp, nombre, pais, jefeDirecto, jefeArea, jefeDepartamento,
+      //   subgerente, gerente, gerenteSr, director, ejecutivo, area, negocio, zona, areaCanon,
+      //   nombreCurso, curso, vencimiento, fechaVencimiento, habilitacion, diasRestantes, status,
+      //   statusReal, mesVencimiento, anioVencimiento, base, esNuevoIngreso, esHCC, sinCursos,
+      //   cuentaKPI, jefeDirectoBP
+      // NO necesita para render: correo, posicion, statusRaw, supervisor (para JEFE)
+      _returnForecast = forecast.map(function(r) {
+        return {
+          bp: r.bp,
+          nombre: r.nombre,
+          pais: r.pais,
+          jefeDirecto: r.jefeDirecto || '',
+          jefeDirectoBP: r.jefeDirectoBP || '',
+          jefeArea: r.jefeArea || '',
+          jefeDepartamento: r.jefeDepartamento || '',
+          subgerente: r.subgerente || '',
+          gerente: r.gerente || '',
+          gerenteSr: r.gerenteSr || '',
+          director: r.director || '',
+          ejecutivo: r.ejecutivo || '',
+          area: r.area,
+          negocio: r.negocio || '',
+          zona: r.zona || '',
+          areaCanon: r.areaCanon || '',
+          nombreCurso: r.nombreCurso,
+          curso: r.curso,
+          vencimiento: r.vencimiento,
+          fechaVencimiento: r.fechaVencimiento || r.vencimiento,
+          habilitacion: r.habilitacion,
+          diasRestantes: r.diasRestantes,
+          status: r.status,
+          statusReal: r.statusReal || r.status,
+          mesVencimiento: r.mesVencimiento,
+          anioVencimiento: r.anioVencimiento,
+          base: r.base,
+          esNuevoIngreso: r.esNuevoIngreso || false,
+          esHCC: r.esHCC || false,
+          sinCursos: r.sinCursos || false,
+          cuentaKPI: r.cuentaKPI === true
+        };
+      });
+      
+      // V101: Estimar tamaño aproximado de respuesta
+      var _sampleStr = JSON.stringify(_returnForecast.slice(0, 5));
+      var _estimatedSize = Math.round((_sampleStr.length / 5) * _returnForecast.length / 1024);
+      _auditLog('[V101-FIX-SIZE] JEFE: metadata={} | forecast=' + _returnForecast.length + ' registros | ~' + _estimatedSize + 'KB estimado | BUILD=' + BUILD_GS);
+    } else {
+      // Admin/Capacity: enviar metadata completa
+      _returnJerIndex = (data.metadata && data.metadata.jerarquiaIndex) ? data.metadata.jerarquiaIndex : {};
+      _returnJerIndexBP = (data.metadata && data.metadata.jerarquiaIndexBP) ? data.metadata.jerarquiaIndexBP : {};
+      _returnPosGlobal = (data.metadata && data.metadata.posicionGlobal) ? data.metadata.posicionGlobal : {};
+      _auditLog('[V100-FIX-SIZE] ADMIN: jerIndex=' + Object.keys(_returnJerIndex).length + ' jerIndexBP=' + Object.keys(_returnJerIndexBP).length + ' posGlobal=' + Object.keys(_returnPosGlobal).length);
+    }
+    
+    return {
+      forecast: _returnForecast,
+      jefes: Object.keys(jefesSet),
+      jefesArea: Object.keys(jefesAreaSet),
+      jefesCorreoMap: _esJefe ? {} : jefesCorreoMap,
+      equipoTotalActivos: equipoTotalActivos,
+      equipoTotalActivosSinHCC: equipoTotalActivosSinHCC,
+      totalHCCPersonas: totalHCCPersonas,
+      totalNIPersonas: totalNIPersonas,
+      totalNuevosIngresos: totalNuevosIngresosArbol,
+      niBPsList: _esJefe ? [] : niBPsList,
+      totalPersonasBase: totalActivos,
+      totalPersonasForecast: totalPersonasKPI,
+      totalPersonasPlanificacion: data.metadata ? data.metadata.totalPlanLeido : 0,
+      miCadenaJerarquica: (typeof miCadena !== 'undefined') ? miCadena : null,
+      rolAutoDetectado: (arbol) ? (arbol.rolAutoDetectado || 'COLABORADOR') : null,
+      nivelAgrupacion: (typeof nivelAgrupacion !== 'undefined') ? (nivelAgrupacion || '') : '',
+      campoAgrupacion: (typeof campoAgrupacion !== 'undefined') ? (campoAgrupacion || '') : '',
+      _diag: _esJefe ? { filtroAplicado: diagInfo.filtroAplicado || '', registrosBackend: diagInfo.registrosBackend || 0, registrosTrasFiltro: diagInfo.registrosTrasFiltro || 0, rolDetectado: diagInfo.rolDetectado || '', razonCero: diagInfo.razonCero || '' } : diagInfo,
+      _audit: {
+        usuario: nombreUsuarioInfo || '',
+        roles: arbolRoles,
+        rolUsado: arbolRolUsado,
+        personas: totalPersonasKPI,
+        critico: personasCriticoKPI,
+        pendiente: personasPendienteKPI,
+        alDia: personasAlDiaKPI,
+        checkPersonas: checkOK,
+        fuentePLAN: registrosDePlan,
+        fuenteBASE: registrosDeBase,
+        pctCumplimiento: pctCumplimientoKPI,
+        arbolPersonas: _esJefe ? [] : ((arbol && arbol.personas) ? arbol.personas.slice(0, 20).map(function(p) { return { bp: p.bp, nombre: p.nombre }; }) : [])
+      },
+      _drilldownDiag: _esJefe ? null : _ddDiag,
+      fuente: fuente,
+      build: BUILD_GS,
+      _wcAudit: null,
+      _v47Debug: null,
+      jerarquiaIndex: _returnJerIndex,
+      jerarquiaIndexBP: _returnJerIndexBP,
+      posicionGlobal: _returnPosGlobal,
+      _perf: { backendTotalMs: elapsedByBase }
+    };
+  } catch(e) {
+    Logger.log('◀◀◀ END getForecastDataByBase("' + tipoBase + '") [ERROR] ' + e.message + ' | stack: ' + (e.stack || 'N/A'));
+    return { error: 'getForecastDataByBase: ' + e.message, forecast: [] };
+  }
+}
+
+/**
+ * Adapter: Obtiene datos HCC de todas las bases para el forecast
+ * @param {number} dias - No usado directamente
+ */
+function getForecastHCCFromAllBases(dias, fuente) {
+  // V51: Obtener info del usuario para aplicar jerarquía (antes pasaba {} → sin filtro)
+  var usr = getUsuarioActual() || {};
+  var uInfo = {
+    nombre: usr.nombre || '',
+    email: usr.email || Session.getActiveUser().getEmail() || '',
+    role: (usr.rol || '').toUpperCase(),  // V51e-FIX: stored as 'rol', frontend expects 'role'
+    pais: usr.pais || '',
+    area: usr.area || '',
+    bp: usr.bp || '',
+    capacityFilter: usr.capacityFilter || null
+  };
+  _log('[V1-HCC] Llamando getForecastDataByBase con email=' + uInfo.email + ' rol=' + uInfo.role);
+  return getForecastDataByBase('HCC', dias, uInfo, fuente);
+}
+
+/**
+ * Retorna la biblioteca de cursos organizada por base (lee de BIBLIOTECA FINAL)
+ * Para el frontend: tabla filtrable por base (javascript.html) y mapa por base (forecast.html)
+ */
+function getBibliotecaFinal() {
+  try {
+    // Validar permisos: solo ADMIN puede acceder a Biblioteca
+    var usr = getUsuarioActual();
+    if (usr) {
+      var rolUpper = (usr.rol || '').toUpperCase();
+      if (rolUpper !== 'ADMIN') {
+        Logger.log('getBibliotecaFinal: acceso denegado para rol ' + rolUpper);
+        return { success: false, error: 'Acceso denegado. Solo ADMIN puede acceder a Biblioteca.', cursos: [], cursosMap: {} };
+      }
+    }
+    
+    // V21d: Construir biblioteca desde CURSOS_POR_BASE (fuente canónica), NO desde hoja BIBLIOTECA FINAL
+    // Esto evita cursos fantasma, duplicados y typos
+    var cursos = [];
+    var totalPorBase = {};
+    var cursosMap = {};
+    var baseMap = { 'LATAM': 'LATAM_SUR', 'CHILE': 'CL', 'RAMPA': 'RAMPA', 'NAM': 'NAM_EU' };
+    var baseKeys = ['LATAM', 'CHILE', 'RAMPA', 'NAM'];
+    
+    for (var bi = 0; bi < baseKeys.length; bi++) {
+      var base = baseKeys[bi];
+      var cursosBase = CURSOS_POR_BASE[base] || [];
+      var whitelist = COURSES_BY_BASE[base] || [];
+      var frontendBase = baseMap[base] || base;
+      cursosMap[frontendBase] = {};
+      var count = 0;
+      var dedupSet = {};
+      
+      for (var ci = 0; ci < cursosBase.length; ci++) {
+        var curso = cursosBase[ci];
+        var idCanon = curso.id;
+        
+        // Normalizar ID por si hay alias
+        var idNorm = normalizarSigla(idCanon) || idCanon;
+        
+        // Solo incluir si está en whitelist
+        if (whitelist.indexOf(idCanon) < 0 && whitelist.indexOf(idNorm) < 0) continue;
+        
+        // Deduplicar por ID normalizado
+        if (dedupSet[idNorm]) continue;
+        dedupSet[idNorm] = true;
+        
+        cursos.push({ base: base, sigla: idNorm, nombre: curso.nombre || idNorm });
+        cursosMap[frontendBase][idNorm] = curso.nombre || idNorm;
+        count++;
+      }
+      totalPorBase[base] = count;
+    }
+
+    Logger.log('getBibliotecaFinal (canónica): ' + cursos.length + ' cursos, bases: ' + JSON.stringify(totalPorBase));
+    return {
+      success: true,
+      cursos: cursos,
+      cursosMap: cursosMap,
+      totalPorBase: totalPorBase
+    };
+  } catch(e) {
+    Logger.log('Error getBibliotecaFinal: ' + e.message);
+    return { success: false, error: e.message, cursos: [], cursosMap: {} };
+  }
+}
+
+/**
+ * Retorna configuración de la app (URL base para correos)
+ */
+function getConfiguracion() {
+  try {
+    var url = ScriptApp.getService().getUrl();
+    return { appUrl: url || '' };
+  } catch(e) {
+    return { appUrl: '', error: e.message };
+  }
+}
+
+/**
+ * Crea un Excel en Google Drive con los datos del forecast actual
+ */
+
+// ═══ Export/File functions moved to Codigo_Archivos.gs ═══

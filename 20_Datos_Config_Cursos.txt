@@ -1,0 +1,301 @@
+// ═══════════════════════════════════════════════════════════════
+// CODIGO_DATOS.gs — Lectura de Datos, Normalizacion, Discovery
+// Responsabilidades:
+//   - Parsing de fechas (parseFechaLatina)
+//   - Clasificacion de status (normalizarStatus, _clasificarStatusReal)
+//   - Discovery dinamico de columnas (descubrirColumnasCursos, buscarColumnaEncabezado)
+//   - Configuracion de cursos y bases (CURSOS_POR_BASE, CONFIG_BASE, etc.)
+//   - Normalizacion de textos, BPs, siglas (normKey, normBP, normalizarSigla)
+//   - Parsing de filtro Capacity (parseCapacityFilter)
+//   - Arbol jerarquico (buildArbolJerarquico)
+//   - Filtros de empleados (esEmpleadoActivo, esEmpleadoKPI, esNuevoIngreso)
+//   - Curso aplicable (esCursoAplicable, calcularHabilitacionPersona)
+//   - Biblioteca de cursos (getBiblioteca, getBibliotecaPorBase)
+//   - Lectura generica de hojas (leerHoja, leerHojaBase, leerHojaBase_raw)
+//   - Datos regionales (getRegionalData)
+// ═══════════════════════════════════════════════════════════════
+
+// ===================== PARSE FECHA LATINA =====================
+/**
+
+/**
+ * Clasifica el status REAL basado en fecha de vencimiento vs HOY.
+ * Reglas estrictas:
+ *   - Si status NO es VENCIDO → retornar tal cual
+ *   - Si fecha vacia/invalida → SIN_FECHA_VENCIDO
+ *   - Si fechaVenc < HOY → VENCIDO_REAL
+ *   - Si fechaVenc >= HOY → VENCERA (proyeccion futura)
+ * @param {string} status - Status normalizado (VENCIDO, HABILITADO, etc.)
+ * @param {number|null} dias - Dias restantes (negativo = vencido)
+ * @param {string} vencimiento - Fecha como string DD/MM/YYYY
+ * @returns {string} Status real: VENCIDO_REAL, VENCERA, SIN_FECHA_VENCIDO, o el status original
+ */
+function _clasificarStatusReal(status, dias, vencimiento) {
+  try {
+    if (status !== 'VENCIDO') return status;
+    
+    var fp = parseFechaLatina(vencimiento);
+    if (fp && fp.date) {
+      return fp.dias < 0 ? 'VENCIDO_REAL' : 'VENCERA';
+    }
+    
+    if (typeof dias === 'number') {
+      return dias < 0 ? 'VENCIDO_REAL' : 'VENCERA';
+    }
+    
+    return 'SIN_FECHA_VENCIDO';
+  } catch(e) {
+    // Fallback seguro: si algo falla, retornar el status original
+    return status || 'VENCIDO';
+  }
+}
+
+/**
+ * Parsea fechas en formato dd/mm/yyyy (formato latino)
+ * Corrige el problema de Chile donde las fechas se interpretan mal
+ * @param {any} fecha - String "15/04/2026" o Date object
+ * @returns {Object} { date: Date, str: "15/04/2026", dias: number }
+ */
+function parseFechaLatina(fecha) {
+  if (!fecha) return { date: null, str: '', dias: null };
+  
+  var d = null;
+  var str = '';
+  
+  // Si ya es Date
+  if (fecha instanceof Date && !isNaN(fecha)) {
+    d = fecha;
+    str = Utilities.formatDate(d, Session.getScriptTimeZone(), 'dd/MM/yyyy');
+  } 
+  // Si es string
+  else if (typeof fecha === 'string') {
+    fecha = fecha.trim();
+    // Detectar fechas vacias/invalidas
+    var upper = fecha.toUpperCase();
+    if (!fecha || fecha === '-' || fecha === '--' || upper === 'N/A' || upper === 'NA' || 
+        upper === 'ND' || upper === 'S/D' || upper === 'SD' || upper === 'NO APLICA' || 
+        upper === 'SIN FECHA' || upper === 'PENDIENTE' || upper === 'DOES NOT APPLY' ||
+        upper === 'NOT APPLICABLE' || upper === 'NO CORRESPONDE') {
+      return { date: null, str: '', dias: null };
+    }
+    
+    // Formato dd/mm/yyyy o d/m/yyyy (con o sin ceros)
+    var partes = fecha.split('/');
+    if (partes.length === 3) {
+      var dia = parseInt(partes[0], 10);
+      var mes = parseInt(partes[1], 10) - 1; // Meses 0-indexed
+      var anio = parseInt(partes[2], 10);
+      
+      // Si el anio es 2 digitos, asumir 20xx
+      if (anio < 100) anio += 2000;
+      
+      // Validar rangos
+      if (dia >= 1 && dia <= 31 && mes >= 0 && mes <= 11 && anio >= 2000 && anio <= 2100) {
+        d = new Date(anio, mes, dia);
+        str = fecha;
+      }
+    }
+    // Formato yyyy-mm-dd (ISO)
+    else if (fecha.indexOf('-') > 0) {
+      var partesISO = fecha.split('-');
+      if (partesISO.length === 3) {
+        var anioISO = parseInt(partesISO[0], 10);
+        var mesISO = parseInt(partesISO[1], 10) - 1;
+        var diaISO = parseInt(partesISO[2], 10);
+        if (diaISO >= 1 && diaISO <= 31 && mesISO >= 0 && mesISO <= 11 && anioISO >= 2000) {
+          d = new Date(anioISO, mesISO, diaISO);
+          str = Utilities.formatDate(d, Session.getScriptTimeZone(), 'dd/MM/yyyy');
+        }
+      }
+    }
+  }
+  // Si es numero (serial de Excel)
+  else if (typeof fecha === 'number') {
+    if (fecha > 30000 && fecha < 100000) {
+      // Rango valido de serial Excel
+      d = new Date((fecha - 25569) * 86400 * 1000);
+      str = Utilities.formatDate(d, Session.getScriptTimeZone(), 'dd/MM/yyyy');
+    }
+  }
+  
+  // Calcular dias restantes con timezone consistente
+  var dias = null;
+  if (d && !isNaN(d)) {
+    var hoy = new Date();
+    hoy.setHours(0, 0, 0, 0);
+    d.setHours(0, 0, 0, 0);
+    dias = Math.floor((d.getTime() - hoy.getTime()) / (1000 * 60 * 60 * 24));
+  }
+  
+  return { date: d, str: str, dias: dias };
+}
+
+// ===================== BÚSQUEDA DINÁMICA DE COLUMNAS =====================
+/**
+ * Busca el índice de una columna por palabras clave en el encabezado
+ * @param {Array} headerRow - Fila de encabezados
+ * @param {Array} keywords - Palabras a buscar (ej: ['jefe directo', 'supervisor'])
+ * @returns {number} - Índice de la columna o -1 si no encuentra
+ */
+function buscarColumnaEncabezado(headerRow, keywords) {
+  for (var c = 0; c < headerRow.length; c++) {
+    var header = (headerRow[c] || '').toString().trim().toLowerCase();
+    for (var k = 0; k < keywords.length; k++) {
+      if (header.indexOf(keywords[k].toLowerCase()) >= 0) {
+        return c;
+      }
+    }
+  }
+  return -1;
+}
+
+/**
+ * Obtiene las columnas de jerarquía dinámicamente para CHILE
+ * Busca en los encabezados las palabras clave
+ */
+// ===================== CURSOS POR BASE - MAPEO EXACTO =====================
+// Cada curso tiene: id (interno), nombre (para mostrar), header (texto EXACTO del encabezado en Excel)
+// Los sufijos cambian según la base:
+//   LATAM/CHILE: HAB → "header HAB" o "header HABILITACIÓN", VENC → "header VENC", STATUS → "header STATUS"
+//   RAMPA:       HAB → "header HABILITACIÓN", VENC → "header VENCIMIENTO", STATUS → "header STATUS"
+//   NAM:         HAB → header solo, VENC → "header NEXT", STATUS → "header STATUS"
+
+var CURSOS_POR_BASE = {
+  LATAM: [
+    { id: "MMPP", nombre: "Mercancías Peligrosas", header: "MMPP" },
+    { id: "MOC", nombre: "Manual de operaciones de carga", header: "MOC" },
+    { id: "CRM", nombre: "CRM- Factores Humanos", header: "CRM" },
+    { id: "SGSO", nombre: "Sistema de gestión seguridad", header: "SGSO" },
+    { id: "AVSEC", nombre: "Interferencia Ilícita Carga", header: "AVSEC" },
+    { id: "HSE", nombre: "Seguridad Laboral", header: "Seguridad Laboral" },
+    { id: "BATERIAS", nombre: "Exp. Acep. Baterías", header: "BATERIAS" },
+    { id: "PSICO", nombre: "Sustancias Psicoactivas", header: "PSICOACTIVAS" },
+    { id: "SIN", nombre: "Seguridad Información", header: "SIN" },
+    { id: "PRE", nombre: "Plan Respuesta Emergencias", header: "PRE" },
+    { id: "LIVE", nombre: "Livestock", header: "LIVESTOCK" },
+    { id: "PETS", nombre: "Pets", header: "PETS" },
+    { id: "PHARMA", nombre: "Pharma CEIV", header: "PHARMA" }
+  ],
+  CHILE: [
+    { id: "MMPP", nombre: "Mercancías Peligrosas", header: "MMPP" },
+    { id: "MOC", nombre: "Manual Operaciones", header: "MOC" },
+    { id: "CRM", nombre: "CRM Factores Humanos", header: "CRM" },
+    { id: "SGSO", nombre: "SGSO", header: "SGSO" },
+    { id: "HSE", nombre: "Seguridad Laboral", header: "Seguridad Laboral" },
+    { id: "GRUA", nombre: "GRÚA HORQUILLA", header: "Grúa Horquilla" },
+    { id: "SCCA", nombre: "Seguridad de la Carga y el Correo Aéreo", header: "SCCA" },
+    { id: "CSA", nombre: "Concientización Seg. Aero.", header: "CSA" },
+    { id: "LITIO", nombre: "Baterías Litio", header: "BAT. LITIO" },
+    { id: "RX", nombre: "Rayos X", header: "OP. RX" },
+    { id: "RADIO", nombre: "Protección Radiológica", header: "P. RADIOLOGICA" },
+    { id: "PETS", nombre: "Pets", header: "PETS" },
+    { id: "LIVESTOCK", nombre: "Livestock", header: "LIVESTOCK" }
+  ],
+  RAMPA: [
+    { id: "WB", nombre: "Peso y Balance", header: "W&B" },
+    { id: "MOT", nombre: "Manual Op. Terrestres", header: "MOT" },
+    { id: "AVSEC", nombre: "Interferencia Ilícita", header: "AVSEC" },
+    { id: "CRM", nombre: "CRM", header: "CRM" },
+    { id: "SGSO", nombre: "SGSO", header: "SGSO" },
+    { id: "MMPP", nombre: "MMPP (IATA)", header: "MMPP" },
+    { id: "HSE", nombre: "Seguridad Laboral", header: "LABORAL" },
+    { id: "SCCA", nombre: "Seguridad de la Carga y el Correo Aéreo", header: "SCCA" },
+    { id: "MOC", nombre: "MOC", header: "MOC" },
+    { id: "MONTCARGA", nombre: "MONTACARGA", header: "MONTCARGA" },
+    { id: "TSAGA", nombre: "TSA General Awareness", header: "TSA GA" },
+    { id: "AMADEUS", nombre: "AMADEUS", header: "AMADEUS" },
+    { id: "PRE", nombre: "Plan Emergencias", header: "PRE" }
+  ],
+  NAM: [
+    { id: "CRM", nombre: "CRM", header: "CRM" },
+    { id: "MOC", nombre: "MOC", header: "MOC" },
+    { id: "FORKLIFT", nombre: "Forklift", header: "FORKLIFT" },
+    { id: "MMPP", nombre: "MMPP General", header: "MMPP" },
+    { id: "DG6", nombre: "DG6 (MMPP Acep)", header: "DG6" },
+    { id: "DG7", nombre: "DG7 (MMPP Ops)", header: "DG7" },
+    { id: "DG8", nombre: "DG8 (MMPP Bodega)", header: "DG8" },
+    { id: "TSADOC", nombre: "TSA Documental", header: "TSA DOC" },
+    { id: "HSE", nombre: "Seguridad Laboral", header: "HSE" },
+    { id: "SGSO", nombre: "SGSO", header: "SGSO" },
+    { id: "AVSEC", nombre: "AVSEC", header: "AVSEC" },
+    { id: "TSAGA", nombre: "TSA GA", header: "TSA GA" },
+    { id: "BATERIAS", nombre: "Exp. Acep. Baterías", header: "BATERIAS" },
+    { id: "SIN", nombre: "Seguridad Información", header: "SIN" },
+    { id: "PRE", nombre: "Plan Respuesta Emergencias", header: "PRE" },
+    { id: "LIVESTOCK", nombre: "Livestock", header: "LIVESTOCK" },
+    { id: "PETS", nombre: "Pets", header: "PETS" },
+    { id: "PHARMA", nombre: "Pharma CEIV", header: "PHARMA" }
+  ]
+};
+
+// Sufijos de VENCIMIENTO por base (para buscar en encabezados de hoja BASE)
+var SUFIJOS_VENC = { LATAM: 'VENC', CHILE: 'VENC', RAMPA: 'VENCIMIENTO', NAM: 'NEXT' };
+
+// ===================== WHITELIST ESTRICTA POR BASE (claves internas de ALIAS_CURSOS) =====================
+// Solo estos cursos cuentan para KPI/%. La tabla puede mostrar mas, pero el calculo usa esto.
+var COURSES_BY_BASE = {
+  CHILE: ['MMPP','MOC','CRM','SGSO','HSE','GRUA','SCCA','CSA','BATERIAS','RX','RADIO','PETS','LIVESTOCK'],
+  LATAM: ['MMPP','MOC','CRM','SGSO','AVSEC','HSE','BATERIAS','PSICO','SIN','PRE','LIVESTOCK','PETS','PHARMA'],
+  RAMPA: ['WB','MOT','AVSEC','CRM','SGSO','MMPP','HSE','SCCA','MOC','MONTCARGA','TSAGA'],
+  NAM:   ['CRM','MOC','FORKLIFT','MMPP','DG6','DG7','DG8','TSADOC','HSE','SGSO','AVSEC','TSAGA','BATERIAS','SIN','PRE','LIVESTOCK','PETS','PHARMA']
+};
+
+// ===================== VENTANAS POR VENCER (solo forecast) =====================
+var VENTANA_POR_VENCER = {
+  NAM: 120, RAMPA: 120,
+  CHILE: 90, LATAM: 90
+};
+var SUFIJOS_HAB  = { LATAM: ['HAB','HABILITACIÓN','HABILITACION'], CHILE: ['HAB','HABILITACIÓN','HABILITACION'], RAMPA: ['HABILITACIÓN','HABILITACION','HAB'], NAM: [] };
+var SUFIJOS_DAYS = { LATAM: ['DAYS'], CHILE: ['DAYS'], RAMPA: ['DAYS'], NAM: ['DAYS EXP','0YS','DAYS'] };
+var SUFIJOS_STATUS = { LATAM: ['STATUS'], CHILE: ['STATUS'], RAMPA: ['STATUS'], NAM: ['STATUS'] };
+var SUFIJOS_PLAN = { LATAM: ['PLAN'], CHILE: ['PLAN'], RAMPA: ['PLAN'], NAM: ['PLAN'] };
+
+// ===================== V72: RAMPA CURSOS NO OPERATIVOS =====================
+// Cursos excluidos del KPI y vistas en RAMPA (configurable desde admin)
+var RAMPA_CURSOS_NO_OPERATIVOS = ['AMADEUS'];
+
+/**
+ * V72: Verifica si AMADEUS está habilitado para RAMPA (configurable desde admin)
+ * Por defecto: false (AMADEUS excluido)
+ */
+function isAmadeusEnabledRAMPA() {
+  try {
+    var val = PropertiesService.getScriptProperties().getProperty('RAMPA_INCLUDE_AMADEUS');
+    return val === 'true';
+  } catch(e) { return false; }
+}
+
+/**
+ * V72: Toggle inclusión de AMADEUS en RAMPA (llamada desde admin panel)
+ */
+function setAmadeusRAMPA(enabled) {
+  try {
+    PropertiesService.getScriptProperties().setProperty('RAMPA_INCLUDE_AMADEUS', enabled ? 'true' : 'false');
+    // Limpiar cache de RAMPA para que el cambio surta efecto
+    var cache = CacheService.getScriptCache();
+    cache.remove('FORECAST_V72_RAMPA');
+    cache.remove('FORECAST_V72_TODO');
+    cache.remove('FORECAST_V72e_RAMPA');
+    cache.remove('FORECAST_V72e_TODO');
+    Logger.log('V72: AMADEUS RAMPA ' + (enabled ? 'ACTIVADO' : 'DESACTIVADO') + ' -- cache limpiado');
+    return { success: true, enabled: enabled };
+  } catch(e) {
+    return { success: false, error: e.message };
+  }
+}
+
+/**
+ * V72: Obtener configuración de la app para panel admin
+ */
+function getAppConfig() {
+  try {
+    var props = PropertiesService.getScriptProperties();
+    return {
+      success: true,
+      rampaIncludeAmadeus: props.getProperty('RAMPA_INCLUDE_AMADEUS') === 'true'
+    };
+  } catch(e) {
+    return { success: false, error: e.message, rampaIncludeAmadeus: false };
+  }
+}
+

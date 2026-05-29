@@ -1,0 +1,435 @@
+<!-- ======= RESUMEN ADMIN - VISTA UNIFICADA ======= -->
+<div id="section-resumen-admin" class="module-section" style="display:none;">
+  <div id="admin-unificado-content"></div>
+</div>
+
+<script>
+// ============================================================
+// VISTA ADMIN UNIFICADA - 4 BASES + HCC
+// ============================================================
+
+var adminData = { latam_sur: null, cl: null, rampa: null, nam_eu: null, hcc: null };
+var adminTipo = 'LATAM_SUR';
+var adminFiltros = { nombre: '', pais: '', jefe: '', status: '', area: '' };
+
+function loadAdminUnificado() {
+  var cont = document.getElementById('admin-unificado-content');
+  if (!cont) return;
+
+  var html = '';
+
+  // Header premium
+  html += '<div style="background:linear-gradient(135deg,#6d28d9 0%,#4338ca 50%,#3730a3 100%);color:white;padding:20px 24px;border-radius:12px;margin-bottom:16px;">';
+  html += '<div style="display:flex;justify-content:space-between;align-items:center;">';
+  html += '<div><h2 style="font-size:24px;font-weight:900;"><i class="ph ph-shield-star"></i> RESUMEN ADMIN</h2>';
+  html += '<p style="font-size:13px;opacity:0.7;margin-top:4px;">Vista unificada de todas las bases de LATAM Cargo</p></div>';
+  html += '<button onclick="refrescarAdminUnificado()" style="padding:10px 16px;background:rgba(255,255,255,0.15);border:none;border-radius:8px;color:white;cursor:pointer;font-weight:600;"><i class="ph ph-arrows-clockwise"></i> Actualizar</button>';
+  html += '</div></div>';
+
+  // Toggle 4 BASES + HCC
+  html += '<div style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-bottom:16px;">';
+  html += '<button onclick="cambiarAdminTipo(\'LATAM_SUR\')" id="btn-adm-latam" class="admin-tab ' + (adminTipo === 'LATAM_SUR' ? 'active' : '') + '"><div style="font-weight:900;">LATAM PHH</div><div style="font-size:10px;opacity:0.7;">CO, UY, PY, EC, PE, AR</div></button>';
+  html += '<button onclick="cambiarAdminTipo(\'CL\')" id="btn-adm-cl" class="admin-tab ' + (adminTipo === 'CL' ? 'active' : '') + '"><div style="font-weight:900;">Chile</div><div style="font-size:10px;opacity:0.7;">Solo CL</div></button>';
+  html += '<button onclick="cambiarAdminTipo(\'RAMPA\')" id="btn-adm-rampa" class="admin-tab ' + (adminTipo === 'RAMPA' ? 'active' : '') + '"><div style="font-weight:900;">Rampa RED</div><div style="font-size:10px;opacity:0.7;">BR, ES, CL, EC</div></button>';
+  html += '<button onclick="cambiarAdminTipo(\'NAM_EU\')" id="btn-adm-nam" class="admin-tab ' + (adminTipo === 'NAM_EU' ? 'active' : '') + '"><div style="font-weight:900;">NAM & EU</div><div style="font-size:10px;opacity:0.7;">Norteamérica</div></button>';
+  html += '<button onclick="cambiarAdminTipo(\'HCC\')" id="btn-adm-hcc" class="admin-tab hcc ' + (adminTipo === 'HCC' ? 'active' : '') + '"><div style="font-weight:900;">HCC</div><div style="font-size:10px;opacity:0.7;">Todas las bases</div></button>';
+  html += '</div>';
+
+  // KPIs
+  html += '<div id="adm-kpis" style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px;"></div>';
+
+  // Filtros
+  html += '<div class="card-container" style="padding:16px;margin-bottom:16px;">';
+  html += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;"><i class="ph ph-funnel" style="color:#6d28d9;"></i><span style="font-weight:700;color:#374151;">Filtros</span></div>';
+  html += '<div id="filtros-container"></div>';
+  html += '</div>';
+
+  // Tabla
+  html += '<div id="adm-tabla" class="card-container" style="overflow:hidden;"></div>';
+
+  cont.innerHTML = html;
+  cargarAdminData();
+}
+
+function refrescarAdminUnificado() {
+  adminData = { latam_sur: null, cl: null, rampa: null, nam_eu: null, hcc: null };
+  // Limpiar cache
+  google.script.run.clearAllCache();
+  cargarAdminData();
+}
+
+function cambiarAdminTipo(tipo) {
+  adminTipo = tipo;
+
+  // Actualizar estilos de botones
+  ['LATAM_SUR', 'CL', 'RAMPA', 'NAM_EU', 'HCC'].forEach(function(t) {
+    var btnId = t === 'LATAM_SUR' ? 'btn-adm-latam' : t === 'CL' ? 'btn-adm-cl' : t === 'RAMPA' ? 'btn-adm-rampa' : t === 'NAM_EU' ? 'btn-adm-nam' : 'btn-adm-hcc';
+    var btn = document.getElementById(btnId);
+    if (btn) {
+      btn.classList.remove('active');
+      if (t === tipo) btn.classList.add('active');
+    }
+  });
+
+  cargarAdminData();
+}
+
+function renderFiltrosAdmin() {
+  var cont = document.getElementById('filtros-container');
+  if (!cont) return;
+
+  var html = '<div style="display:grid;grid-template-columns:repeat(6,1fr);gap:12px;">';
+  html += '<div><label style="display:block;font-size:11px;font-weight:700;color:#6b7280;margin-bottom:4px;">NOMBRE / BP</label><input type="text" id="adm-nombre" class="input-filter" placeholder="Buscar..." onkeyup="adminFiltros.nombre=this.value.toLowerCase();renderAdminTabla()"/></div>';
+  html += '<div><label style="display:block;font-size:11px;font-weight:700;color:#6b7280;margin-bottom:4px;">PAÍS</label><select id="adm-pais" class="input-filter" onchange="adminFiltros.pais=this.value;renderAdminTabla()"><option value="">Todos</option></select></div>';
+  html += '<div><label style="display:block;font-size:11px;font-weight:700;color:#6b7280;margin-bottom:4px;">ÁREA</label><select id="adm-area" class="input-filter" onchange="adminFiltros.area=this.value;renderAdminTabla()"><option value="">Todas</option></select></div>';
+  html += '<div><label style="display:block;font-size:11px;font-weight:700;color:#6b7280;margin-bottom:4px;">JEFE DIRECTO</label><select id="adm-jefe" class="input-filter" onchange="adminFiltros.jefe=this.value;renderAdminTabla()"><option value="">Todos</option></select></div>';
+  html += '<div><label style="display:block;font-size:11px;font-weight:700;color:#6b7280;margin-bottom:4px;">ESTADO</label><select id="adm-status" class="input-filter" onchange="adminFiltros.status=this.value;renderAdminTabla()"><option value="">Todos</option><option value="CON_VENCIDOS">Con vencidos</option><option value="SIN_VENCIDOS">Sin vencidos</option></select></div>';
+  html += '<div style="display:flex;align-items:flex-end;"><button onclick="limpiarAdminFiltros()" class="btn-secondary" style="width:100%;padding:10px;"><i class="ph ph-x"></i> Limpiar</button></div>';
+  html += '</div>';
+
+  cont.innerHTML = html;
+}
+
+function cargarAdminData() {
+  var key = adminTipo.toLowerCase();
+
+  // Mostrar loading
+  document.getElementById('adm-kpis').innerHTML = '<div style="grid-column:span 4;text-align:center;padding:24px;"><div style="display:inline-block;width:32px;height:32px;border:4px solid #6d28d9;border-top-color:transparent;border-radius:50%;animation:spin 1s linear infinite;"></div><p style="color:#6b7280;margin-top:12px;">Cargando ' + adminTipo + '...</p></div>';
+  document.getElementById('adm-tabla').innerHTML = '';
+
+  // Si es HCC, llamar función específica
+  if (adminTipo === 'HCC') {
+    google.script.run
+      .withSuccessHandler(function(data) {
+        if (data.error) {
+          document.getElementById('adm-kpis').innerHTML = '<div style="grid-column:span 4;background:#fef2f2;padding:16px;border-radius:8px;color:#dc2626;"><i class="ph ph-warning"></i> Error: ' + data.error + '</div>';
+          return;
+        }
+        adminData['hcc'] = data;
+        renderFiltrosAdmin();
+        poblarAdminFiltros();
+        renderAdminKPIs();
+        renderAdminTabla();
+      })
+      .withFailureHandler(function(e) {
+        document.getElementById('adm-kpis').innerHTML = '<div style="grid-column:span 4;background:#fef2f2;padding:16px;border-radius:8px;color:#dc2626;"><i class="ph ph-warning"></i> Error: ' + e + '</div>';
+      })
+      .getStudentsHCCFromAllBases();
+  } else {
+    google.script.run
+      .withSuccessHandler(function(data) {
+        if (data.error) {
+          document.getElementById('adm-kpis').innerHTML = '<div style="grid-column:span 4;background:#fef2f2;padding:16px;border-radius:8px;color:#dc2626;"><i class="ph ph-warning"></i> Error: ' + data.error + '</div>';
+          return;
+        }
+        adminData[key] = data;
+        renderFiltrosAdmin();
+        poblarAdminFiltros();
+        renderAdminKPIs();
+        renderAdminTabla();
+      })
+      .withFailureHandler(function(e) {
+        document.getElementById('adm-kpis').innerHTML = '<div style="grid-column:span 4;background:#fef2f2;padding:16px;border-radius:8px;color:#dc2626;"><i class="ph ph-warning"></i> Error de conexión: ' + e + '</div>';
+      })
+      .getStudentsFromBase(adminTipo);
+  }
+}
+
+function poblarAdminFiltros() {
+  var key = adminTipo.toLowerCase();
+  var data = adminData[key];
+  if (!data || !data.students) return;
+
+  var paises = {};
+  var jefes = {};
+  var areas = {};
+
+  data.students.forEach(function(s) {
+    if (s.pais) paises[s.pais] = true;
+    if (s.jefeDirecto) jefes[s.jefeDirecto] = true;
+    if (s.area) areas[s.area] = true;
+  });
+
+  var selPais = document.getElementById('adm-pais');
+  var selJefe = document.getElementById('adm-jefe');
+  var selArea = document.getElementById('adm-area');
+
+  if (selPais) {
+    selPais.innerHTML = '<option value="">Todos los países</option>';
+    Object.keys(paises).sort().forEach(function(p) {
+      selPais.innerHTML += '<option value="' + p + '">' + p + '</option>';
+    });
+  }
+
+  if (selJefe) {
+    selJefe.innerHTML = '<option value="">Todos los jefes</option>';
+    Object.keys(jefes).sort().forEach(function(j) {
+      var jShort = j.length > 25 ? j.substring(0, 25) + '...' : j;
+      selJefe.innerHTML += '<option value="' + j + '">' + jShort + '</option>';
+    });
+  }
+
+  if (selArea) {
+    selArea.innerHTML = '<option value="">Todas las áreas</option>';
+    Object.keys(areas).sort().forEach(function(a) {
+      selArea.innerHTML += '<option value="' + a + '">' + a + '</option>';
+    });
+  }
+}
+
+function renderAdminKPIs() {
+  var cont = document.getElementById('adm-kpis');
+  var key = adminTipo.toLowerCase();
+  var data = adminData[key];
+
+  if (!data || !data.students) {
+    cont.innerHTML = '<div style="grid-column:span 4;text-align:center;padding:16px;color:#6b7280;">Sin datos</div>';
+    return;
+  }
+
+  var students = data.students;
+  var totalColaboradores = students.length;
+  
+  // V66: Contar NI para consistencia con Forecast
+  var totalNI = 0;
+  
+  // V21: KPIs basados en CUMPLIMIENTO (cursos), NO en "habilitación" 
+  var totalVencidos = 0, totalPorVencer = 0, totalProgramar = 0, totalHabilitados = 0;
+  var personasConVencidos = 0, personasSinVencidos = 0;
+  var sumCumpl = 0, cntCumpl = 0;
+  
+  students.forEach(function(s) {
+    if (s.esNuevoIngreso) { totalNI++; return; }
+    totalVencidos += (s.cursosVencidos || 0);
+    totalPorVencer += (s.cursosPorVencer || 0);
+    totalHabilitados += (s.cursosHabilitados || 0);
+    totalProgramar += (s.cursosActivos || 0) - (s.cursosVencidos || 0) - (s.cursosPorVencer || 0) - (s.cursosHabilitados || 0);
+    if ((s.cursosVencidos || 0) > 0) personasConVencidos++;
+    else personasSinVencidos++;
+    if (s.cumplimiento > 0) { sumCumpl += s.cumplimiento; cntCumpl++; }
+  });
+  if (totalProgramar < 0) totalProgramar = 0;
+  var pctCumplPromedio = cntCumpl > 0 ? Math.round(sumCumpl / cntCumpl) : 0;
+  var cumplColor = pctCumplPromedio >= 70 ? '#16a34a' : pctCumplPromedio >= 40 ? '#ca8a04' : '#dc2626';
+
+  // V66: totalEvaluables = activos - NI (consistente con Forecast)
+  var totalEvaluables = totalColaboradores - totalNI;
+
+  var html = '';
+  
+  // V21: Banner audit para transparencia
+  html += '<div style="grid-column:span 4;background:#f0f9ff;padding:10px 14px;border-radius:8px;border:1px solid #bae6fd;margin-bottom:4px;font-size:11px;color:#0c4a6e;line-height:1.5;">';
+  html += '<strong>Fuente:</strong> Hoja BASE (' + adminTipo + ') | ';
+  html += '<strong>Cumpl.:</strong> (Habilitados+PorVencer) / CursosAplicables | ';
+  html += '<strong>Colaboradores:</strong> ' + totalEvaluables + ' evaluables, ' + personasConVencidos + ' con vencidos';
+  if (totalNI > 0) html += ' | <strong>NI:</strong> ' + totalNI + ' (no impactan %)';
+  html += '</div>';
+  
+  html += '<div style="background:white;padding:16px;border-radius:12px;text-align:center;box-shadow:0 1px 3px rgba(0,0,0,0.1);"><p style="font-size:11px;font-weight:700;color:#6b7280;">COLABORADORES ACTIVOS</p><h3 style="font-size:28px;font-weight:900;color:#1f2937;">' + totalEvaluables + '</h3><p style="font-size:9px;color:#94a3b8;">Evaluables (excl. NI)</p></div>';
+  html += '<div style="background:linear-gradient(135deg,#dcfce7,#bbf7d0);padding:16px;border-radius:12px;text-align:center;border:1px solid #86efac;"><p style="font-size:11px;font-weight:700;color:#16a34a;">COLABORADORES SIN VENCIDOS</p><h3 style="font-size:28px;font-weight:900;color:#16a34a;">' + personasSinVencidos + '</h3><p style="font-size:9px;color:#94a3b8;">0 cursos vencidos</p></div>';
+  html += '<div style="background:linear-gradient(135deg,#fee2e2,#fecaca);padding:16px;border-radius:12px;text-align:center;border:1px solid #fca5a5;"><p style="font-size:11px;font-weight:700;color:#dc2626;">COLABORADORES CON VENCIDOS</p><h3 style="font-size:28px;font-weight:900;color:#dc2626;">' + personasConVencidos + '</h3><p style="font-size:9px;color:#94a3b8;">1+ curso vencido</p></div>';
+  html += '<div style="background:linear-gradient(135deg,#dbeafe,#bfdbfe);padding:16px;border-radius:12px;text-align:center;border:1px solid #93c5fd;"><p style="font-size:11px;font-weight:700;color:' + cumplColor + ';">% CUMPLIMIENTO PROMEDIO</p><h3 style="font-size:28px;font-weight:900;color:' + cumplColor + ';">' + pctCumplPromedio + '%</h3><p style="font-size:9px;color:#94a3b8;">(Hab.+PV) / Cursos Aplic.</p></div>';
+
+  cont.innerHTML = html;
+}
+
+function renderAdminTabla() {
+  var cont = document.getElementById('adm-tabla');
+  var key = adminTipo.toLowerCase();
+  var data = adminData[key];
+
+  if (!data || !data.students || data.students.length === 0) {
+    cont.innerHTML = '<div style="padding:40px;text-align:center;color:#6b7280;"><i class="ph ph-users" style="font-size:48px;margin-bottom:12px;"></i><p>No hay colaboradores en esta base</p></div>';
+    return;
+  }
+
+  // Filtrar
+  var filtered = data.students.filter(function(s) {
+    if (adminFiltros.nombre && !(s.nombre || '').toLowerCase().includes(adminFiltros.nombre) && !(s.bp || '').toLowerCase().includes(adminFiltros.nombre)) return false;
+    if (adminFiltros.pais && s.pais !== adminFiltros.pais) return false;
+    if (adminFiltros.jefe && s.jefeDirecto !== adminFiltros.jefe) return false;
+    if (adminFiltros.area && s.area !== adminFiltros.area) return false;
+    if (adminFiltros.status) {
+      // V21: Filtrar por vencidos en vez de habilitación
+      if (adminFiltros.status === 'CON_VENCIDOS' && !((s.cursosVencidos || 0) > 0)) return false;
+      if (adminFiltros.status === 'SIN_VENCIDOS' && (s.cursosVencidos || 0) > 0) return false;
+    }
+    return true;
+  });
+
+  var html = '<div style="overflow-x:auto;">';
+  html += '<table class="tabla-regional" style="width:100%;margin:0;">';
+  html += '<thead><tr style="background:#f8fafc;">';
+  html += '<th style="text-align:left;padding:12px 16px;">COLABORADOR</th>';
+  html += '<th style="text-align:center;padding:12px;">PAÍS</th>';
+  html += '<th style="text-align:left;padding:12px;">ÁREA</th>';
+  html += '<th style="text-align:left;padding:12px;">JEFE</th>';
+  html += '<th style="text-align:center;padding:12px;">CURSOS APLIC.</th>';
+  html += '<th style="text-align:center;padding:12px;">VENCIDOS</th>';
+  html += '<th style="text-align:center;padding:12px;" title="% de cursos habilitados+por vencer sobre total de cursos aplicables (whitelist).">% CUMPL.</th>';
+  html += '<th style="text-align:center;padding:12px;">ACCIONES</th>';
+  html += '</tr></thead>';
+  html += '<tbody>';
+
+  filtered.forEach(function(s) {
+    var cumpl = s.cumplimiento || 0;
+    var cumplClass = cumpl >= 80 ? 'color:#16a34a;' : cumpl >= 50 ? 'color:#ca8a04;' : 'color:#dc2626;';
+    var esHCC = (s.area || '').toUpperCase().includes('HCC');
+
+    html += '<tr style="border-bottom:1px solid #f1f5f9;">';
+    html += '<td style="padding:12px 16px;"><div style="font-weight:600;color:#1f2937;">' + (s.nombre || 'Sin nombre') + '</div><div style="font-size:11px;color:#6b7280;">BP: ' + (s.bp || '-') + (esHCC ? ' <span style="background:#f3e8ff;color:#7c3aed;padding:2px 6px;border-radius:4px;font-size:10px;">HCC</span>' : '') + '</div></td>';
+    html += '<td style="text-align:center;padding:12px;">' + getBanderaAdmin(s.pais) + '</td>';
+    html += '<td style="padding:12px;font-size:12px;color:#4b5563;">' + (s.area || '-') + '</td>';
+    html += '<td style="padding:12px;font-size:12px;color:#4b5563;">' + ((s.jefeDirecto || '-').length > 20 ? (s.jefeDirecto || '-').substring(0, 20) + '...' : (s.jefeDirecto || '-')) + '</td>';
+    html += '<td style="text-align:center;padding:12px;font-weight:700;">' + (s.cursosActivos || 0) + '</td>';
+    html += '<td style="text-align:center;padding:12px;font-weight:700;' + ((s.cursosVencidos || 0) > 0 ? 'color:#dc2626;' : 'color:#16a34a;') + '">' + (s.cursosVencidos || 0) + '</td>';
+    html += '<td style="text-align:center;padding:12px;font-weight:700;' + cumplClass + '">' + cumpl + '%</td>';
+    html += '<td style="text-align:center;padding:12px;">';
+    html += '<button onclick="verCursosColaborador(\'' + s.bp + '\', \'' + adminTipo + '\')" style="padding:6px 10px;background:#eef2ff;color:#4f46e5;border:none;border-radius:6px;cursor:pointer;margin-right:4px;" title="Ver cursos"><i class="ph ph-book-open"></i></button>';
+    html += '</td>';
+    html += '</tr>';
+  });
+
+  html += '</tbody></table></div>';
+  html += '<div style="padding:12px 16px;background:#f8fafc;border-top:1px solid #e5e7eb;font-size:13px;color:#6b7280;">Mostrando ' + filtered.length + ' de ' + data.students.length + ' colaboradores</div>';
+
+  cont.innerHTML = html;
+}
+
+function getBanderaAdmin(pais) {
+  if (!pais) return '<span style="color:#9ca3af;">-</span>';
+  var p = (pais || '').toUpperCase().trim();
+  if (p.includes('CHILE') || p === 'CL' || p === 'SCL') p = 'CL';
+  if (p.includes('COLOM') || p === 'CO' || p === 'BOG') p = 'CO';
+  if (p.includes('PERU') || p === 'PE' || p === 'LIM') p = 'PE';
+  if (p.includes('ARGENT') || p === 'AR' || p === 'EZE') p = 'AR';
+  if (p.includes('BRASIL') || p === 'BR' || p === 'GRU') p = 'BR';
+  if (p.includes('MEXICO') || p === 'MX' || p === 'MEX') p = 'MX';
+  if (p.includes('USA') || p === 'US' || p === 'MIA') p = 'US';
+  if (p.includes('ECUADOR') || p === 'EC' || p === 'UIO') p = 'EC';
+  
+  var banderas = { 'CO':'🇨🇴', 'CL':'🇨🇱', 'PE':'🇵🇪', 'EC':'🇪🇨', 'BR':'🇧🇷', 'AR':'🇦🇷', 'MX':'🇲🇽', 'UY':'🇺🇾', 'PY':'🇵🇾', 'US':'🇺🇸', 'ES':'🇪🇸' };
+  return '<span style="font-size:18px;" title="' + pais + '">' + (banderas[p] || '🏳️') + '</span>';
+}
+
+function limpiarAdminFiltros() {
+  adminFiltros = { nombre: '', pais: '', jefe: '', status: '', area: '' };
+  ['adm-nombre', 'adm-pais', 'adm-jefe', 'adm-status', 'adm-area'].forEach(function(id) {
+    var el = document.getElementById(id);
+    if (el) el.value = '';
+  });
+  renderAdminTabla();
+}
+
+function verCursosColaborador(bp, tipoBase) {
+  var modal = document.createElement('div');
+  modal.id = 'modal-cursos-admin';
+  modal.className = 'modal-overlay';
+  modal.style.cssText = 'display:flex;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:9999;justify-content:center;align-items:center;';
+  modal.innerHTML = '<div style="background:white;border-radius:16px;max-width:800px;width:90%;max-height:85vh;overflow:hidden;">' +
+    '<div style="padding:16px 20px;background:linear-gradient(135deg,#4f46e5,#7c3aed);color:white;display:flex;justify-content:space-between;align-items:center;">' +
+    '<h3 style="font-weight:800;font-size:16px;"><i class="ph ph-book-open"></i> Cursos del Colaborador (BP: ' + bp + ')</h3>' +
+    '<button onclick="cerrarModalCursosAdmin()" style="background:rgba(255,255,255,0.2);border:none;color:white;padding:8px 12px;border-radius:6px;cursor:pointer;"><i class="ph ph-x"></i></button>' +
+    '</div>' +
+    '<div id="modal-cursos-content" style="padding:20px;max-height:calc(85vh - 120px);overflow-y:auto;"><div style="text-align:center;padding:40px;"><div style="display:inline-block;width:32px;height:32px;border:4px solid #4f46e5;border-top-color:transparent;border-radius:50%;animation:spin 1s linear infinite;"></div><p style="color:#6b7280;margin-top:12px;">Cargando cursos...</p></div></div>' +
+    '</div>';
+  document.body.appendChild(modal);
+
+  google.script.run
+    .withSuccessHandler(function(data) {
+      var cont = document.getElementById('modal-cursos-content');
+      if (data.error) {
+        cont.innerHTML = '<div style="padding:20px;background:#fef2f2;color:#dc2626;border-radius:8px;">' + data.error + '</div>';
+        return;
+      }
+
+      var cursos = data.cursos || [];
+      var est = data.estudiante || {};
+
+      var html = '<div style="margin-bottom:16px;padding:12px 16px;background:#f8fafc;border-radius:8px;">';
+      html += '<p style="font-weight:700;color:#1f2937;margin-bottom:4px;">' + (est.nombre || 'Sin nombre') + '</p>';
+      html += '<p style="font-size:13px;color:#6b7280;">Correo: ' + (est.correo || '-') + ' | País: ' + (est.pais || '-') + ' | Jefe: ' + (est.jefe || '-') + '</p>';
+      html += '</div>';
+
+      if (cursos.length === 0) {
+        html += '<div style="text-align:center;padding:32px;color:#6b7280;"><i class="ph ph-check-circle" style="font-size:48px;color:#16a34a;margin-bottom:12px;"></i><p>Sin cursos asignados</p></div>';
+      } else {
+        html += '<table style="width:100%;border-collapse:collapse;font-size:13px;"><thead style="background:#f1f5f9;"><tr>';
+        html += '<th style="padding:10px;text-align:left;font-weight:700;color:#374151;">CURSO</th>';
+        html += '<th style="padding:10px;text-align:center;">HABILITACIÓN</th>';
+        html += '<th style="padding:10px;text-align:center;">VENCIMIENTO</th>';
+        html += '<th style="padding:10px;text-align:center;">DÍAS</th>';
+        html += '<th style="padding:10px;text-align:center;">STATUS</th>';
+        html += '</tr></thead><tbody>';
+
+        cursos.forEach(function(c) {
+          var statusStyle = c.status === 'VENCIDO' ? 'background:#fef2f2;color:#dc2626;' : c.status === 'POR VENCER' ? 'background:#fef9c3;color:#ca8a04;' : 'background:#dcfce7;color:#16a34a;';
+          html += '<tr style="border-bottom:1px solid #f1f5f9;">';
+          html += '<td style="padding:10px;"><span style="font-weight:600;">' + (c.siglas || '-') + '</span> <span style="color:#6b7280;font-size:12px;">' + (c.nombre || '') + '</span></td>';
+          html += '<td style="padding:10px;text-align:center;">' + (c.habilitacion || '-') + '</td>';
+          html += '<td style="padding:10px;text-align:center;">' + (c.vencimiento || '-') + '</td>';
+          html += '<td style="padding:10px;text-align:center;font-weight:700;">' + (c.diasRestantes || '-') + '</td>';
+          html += '<td style="padding:10px;text-align:center;"><span style="display:inline-block;padding:4px 10px;border-radius:6px;font-size:11px;font-weight:700;' + statusStyle + '">' + (c.status || '-') + '</span></td>';
+          html += '</tr>';
+        });
+
+        html += '</tbody></table>';
+      }
+
+      cont.innerHTML = html;
+    })
+    .withFailureHandler(function(e) {
+      document.getElementById('modal-cursos-content').innerHTML = '<div style="padding:20px;background:#fef2f2;color:#dc2626;border-radius:8px;">Error: ' + e + '</div>';
+    })
+    .getStudentDashboard(bp, tipoBase);
+}
+
+function cerrarModalCursosAdmin() {
+  var modal = document.getElementById('modal-cursos-admin');
+  if (modal) modal.remove();
+}
+</script>
+
+<style>
+.admin-tab {
+  padding:12px 8px;
+  background:white;
+  border:2px solid #e5e7eb;
+  border-radius:10px;
+  cursor:pointer;
+  text-align:center;
+  transition:all 0.2s;
+  color:#4b5563;
+}
+.admin-tab:hover {
+  border-color:#6d28d9;
+  background:#faf5ff;
+}
+.admin-tab.active {
+  border-color:#6d28d9;
+  background:linear-gradient(135deg,#6d28d9,#7c3aed);
+  color:white;
+}
+.admin-tab.hcc {
+  background:#fdf4ff;
+  border-color:#e879f9;
+  color:#a21caf;
+}
+.admin-tab.hcc.active {
+  background:linear-gradient(135deg,#c026d3,#a855f7);
+  border-color:#c026d3;
+  color:white;
+}
+.input-filter {
+  width:100%;
+  padding:10px 12px;
+  border:1px solid #e5e7eb;
+  border-radius:8px;
+  font-size:13px;
+  outline:none;
+  transition:border-color 0.2s;
+}
+.input-filter:focus {
+  border-color:#6d28d9;
+}
+</style>

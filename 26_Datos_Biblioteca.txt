@@ -1,0 +1,217 @@
+// ===================== BIBLIOTECA FINAL =====================
+// La hoja BIBLIOTECA FINAL tiene la siguiente estructura (según screenshot):
+// Col I(8): DASHBOARD PHH RED - campo (ej: "MMPP HABILITACIÓN")
+// Col K(10): NOMBRE completo para PHH RED (ej: "Mercancías Peligrosas")
+// Col L(11): TRAINING-CL - campo
+// Col M(12): NOMBRE completo para Training CL
+// Col N(13): DASHBOARD RAMPA - campo
+// Col O(14): NOMBRE completo para RAMPA
+// Col P(15): CONTROL NORTE - campo
+// Col Q(16): NOMBRE completo para NAM
+//
+// Cada curso tiene ~5 filas (HAB, VENC, DAYS, STATUS, PLAN).
+// Extraemos la SIGLA quitando el sufijo y mapeamos al NOMBRE COMPLETO.
+
+function getBiblioteca() {
+  try {
+    var ss = getSpreadsheet('MAESTRO');
+    var sh = ss.getSheetByName('BIBLIOTECA FINAL');
+    if (!sh) { Logger.log('BIBLIOTECA: Hoja no encontrada'); return []; }
+    var data = sh.getDataRange().getDisplayValues();
+    var cursos = [];
+    var siglasVistas = {};
+    var sufijos = ['HABILITACIÓN', 'HABILITACION', 'VENCIMIENTO', 'VENC', 'DAYS', '0YS', 'STATUS',
+                   'PLAN', 'NEXT', 'HAB', 'Aceptación', 'C'];
+    
+    function extraerSigla(campo) {
+      var s = _limpiarSiglaRaw(campo);
+      if (!s) return '';
+      var sufOrdenados = sufijos.slice().sort(function(a,b) { return b.length - a.length; });
+      for (var k = 0; k < sufOrdenados.length; k++) {
+        var suf = sufOrdenados[k].toUpperCase();
+        if (s.length > suf.length && s.indexOf(suf) > 0) {
+          s = s.replace(suf, '').trim();
+        }
+      }
+      s = s.replace(/^NOMBRE\s*/i, '').replace(/^CURSO\s*/i, '').trim();
+      return s;
+    }
+    
+    // Pares de columnas: [campo_col, nombre_col]
+    var pares = [
+      [8, 10],   // I=PHH RED campo, K=nombre
+      [11, 12],  // L=Training CL campo, M=nombre
+      [13, 14],  // N=RAMPA campo, O=nombre
+      [15, 16]   // P=Control Norte campo, Q=nombre
+    ];
+    
+    for (var i = 1; i < data.length; i++) {
+      for (var p = 0; p < pares.length; p++) {
+        var campo = (data[i][pares[p][0]] || '').toString().trim();
+        var nombre = (data[i][pares[p][1]] || '').toString().trim();
+        if (!campo || !nombre) continue;
+        
+        var sigla = extraerSigla(campo);
+        if (!sigla || sigla.length < 2) continue;
+        
+        var siglaKey = normalizarSigla(sigla);
+        if (!siglasVistas[siglaKey]) {
+          siglasVistas[siglaKey] = true;
+          cursos.push({ sigla: sigla, nombre: nombre });
+        }
+      }
+    }
+    
+    // Fallback columna A
+    for (var i = 1; i < data.length; i++) {
+      var siglaA = (data[i][0] || '').toString().trim();
+      var nombreB = (data[i][1] || '').toString().trim();
+      if (siglaA && nombreB) {
+        var siglaKeyA = normalizarSigla(siglaA);
+        if (!siglasVistas[siglaKeyA]) {
+          siglasVistas[siglaKeyA] = true;
+          cursos.push({ sigla: siglaA, nombre: nombreB });
+        }
+      }
+    }
+    
+    Logger.log('BIBLIOTECA: ' + cursos.length + ' cursos encontrados: ' + cursos.map(function(c) { return c.sigla + '=' + c.nombre; }).join(', '));
+    return cursos;
+  } catch(e) { 
+    Logger.log('Error getBiblioteca: ' + e.message);
+    return []; 
+  }
+}
+
+/**
+ * Lee BIBLIOTECA FINAL y retorna cursos POR BASE.
+ * Cada base tiene su propio listado de cursos basado en las columnas de la hoja.
+ * Formato: { LATAM: [{id, nombre, header, siglaOriginal}], CHILE: [...], RAMPA: [...], NAM: [...] }
+ */
+var _bibPorBaseCache = null;
+function getBibliotecaPorBase() {
+  if (_bibPorBaseCache) return _bibPorBaseCache;
+  
+  var result = { LATAM: [], CHILE: [], RAMPA: [], NAM: [] };
+  
+  try {
+    var ss = getSpreadsheet('MAESTRO');
+    var sh = ss.getSheetByName('BIBLIOTECA FINAL');
+    if (!sh) { Logger.log('getBibliotecaPorBase: Hoja no encontrada'); return result; }
+    var data = sh.getDataRange().getDisplayValues();
+    if (data.length < 2) return result;
+    
+    var headers = data[0];
+    Logger.log('BIBLIOTECA FINAL headers: ' + JSON.stringify(headers));
+    
+    // Auto-detectar pares [campo_col, nombre_col, base] desde headers
+    // Buscar patrones: "CAMPO <base>" + "NOMBRE <base>" o similar
+    var basePatterns = {
+      LATAM: ['PHH', 'PHH RED', 'LATAM', 'DASHBOARD PHH'],
+      CHILE: ['CL', 'CHILE', 'TRAINING CL', 'TRAINING - CL'],
+      RAMPA: ['RAMPA', 'DASHBOARD RAMPA'],
+      NAM: ['NAM', 'CONTROL NORTE', 'NAM & EU', 'NAM&EU', 'USA']
+    };
+    
+    var pares = [];
+    // Hardcoded fallback pares (columnas originales)
+    var paresFallback = [
+      [8, 10, 'LATAM'],
+      [11, 12, 'CHILE'],
+      [13, 14, 'RAMPA'],
+      [15, 16, 'NAM']
+    ];
+    
+    // Intentar auto-deteccion: buscar pares de columnas "CAMPO"/"NOMBRE" por base
+    var paresDetectados = {};
+    for (var ci = 0; ci < headers.length; ci++) {
+      var hNorm = normKey(headers[ci]);
+      if (!hNorm) continue;
+      
+      for (var base in basePatterns) {
+        if (paresDetectados[base]) continue;
+        var patterns = basePatterns[base];
+        for (var pi = 0; pi < patterns.length; pi++) {
+          var pat = normKey(patterns[pi]);
+          if (hNorm.indexOf(pat) >= 0 || hNorm.indexOf('CAMPO') >= 0) {
+            // Buscar columna "NOMBRE" cercana (dentro de 3 columnas)
+            for (var ni = ci + 1; ni <= ci + 3 && ni < headers.length; ni++) {
+              var nNorm = normKey(headers[ni]);
+              if (nNorm && (nNorm.indexOf('NOMBRE') >= 0 || nNorm.indexOf('CURSO') >= 0 || nNorm.indexOf(pat) >= 0)) {
+                paresDetectados[base] = [ci, ni];
+                break;
+              }
+            }
+            if (paresDetectados[base]) break;
+          }
+        }
+      }
+    }
+    
+    // Usar pares detectados si los hay, sino fallback
+    for (var fb = 0; fb < paresFallback.length; fb++) {
+      var baseName = paresFallback[fb][2];
+      if (paresDetectados[baseName]) {
+        pares.push([paresDetectados[baseName][0], paresDetectados[baseName][1], baseName]);
+      } else {
+        pares.push([paresFallback[fb][0], paresFallback[fb][1], baseName]);
+      }
+    }
+    
+    Logger.log('BIBLIOTECA pares usados: ' + JSON.stringify(pares));
+    
+    var sufijos = ['HABILITACION', 'VENCIMIENTO', 'VENC', 'DAYS', '0YS', 'STATUS',
+                   'PLAN', 'NEXT', 'HAB', 'ACEPTACION'];
+    // V39: Removed single-char suffix "C" — it corrupted course names containing C
+    // (e.g., "PSICOACTIVAS" → "PSIOACTIVAS"). The ALIAS_CURSOS map handles CRM C, MMPP C, etc.
+    
+    function extraerSigla(campo) {
+      var s = _limpiarSiglaRaw(campo);
+      if (!s) return '';
+      var sufOrdenados = sufijos.slice().sort(function(a,b) { return b.length - a.length; });
+      for (var k = 0; k < sufOrdenados.length; k++) {
+        var suf = sufOrdenados[k];
+        if (suf.length > 1 && s.length > suf.length && s.indexOf(suf) > 0) {
+          s = s.replace(suf, '').trim();
+        }
+      }
+      s = s.replace(/^NOMBRE\s*/i, '').replace(/^CURSO\s*/i, '').trim();
+      return s;
+    }
+    
+    var vistoPorBase = { LATAM: {}, CHILE: {}, RAMPA: {}, NAM: {} };
+    
+    for (var i = 1; i < data.length; i++) {
+      for (var p = 0; p < pares.length; p++) {
+        var campo = (data[i][pares[p][0]] || '').toString().trim();
+        var nombre = (data[i][pares[p][1]] || '').toString().trim();
+        if (!campo || !nombre) continue;
+        
+        var sigla = extraerSigla(campo);
+        if (!sigla || sigla.length < 2) continue;
+        
+        var base = pares[p][2];
+        var siglaKey = normalizarSigla(sigla);
+        
+        if (!vistoPorBase[base][siglaKey]) {
+          vistoPorBase[base][siglaKey] = true;
+          result[base].push({
+            id: siglaKey, nombre: nombre, header: sigla, siglaOriginal: campo
+          });
+        }
+      }
+    }
+    
+    for (var b in result) {
+      Logger.log('BIBLIOTECA POR BASE ' + b + ': ' + result[b].length + ' cursos: ' + result[b].map(function(c) { return c.id; }).join(', '));
+    }
+  } catch(e) {
+    Logger.log('Error getBibliotecaPorBase: ' + e.message);
+  }
+  
+  _bibPorBaseCache = result;
+  return result;
+}
+
+var _bibCache = null;
+

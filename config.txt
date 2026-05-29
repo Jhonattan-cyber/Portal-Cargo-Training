@@ -1,0 +1,68 @@
+<!-- ======= CONFIGURACION SECTION ======= -->
+<div id="section-config" class="module-section" style="display:none;">
+  <div class="card-container" style="max-width:700px;">
+    <div class="card-header">
+      <h3 style="font-weight:700;color:#1e293b;">Configuracion</h3>
+    </div>
+    <div style="padding:20px;">
+      <div style="margin-bottom:24px;">
+        <h4 style="font-weight:700;color:#374151;margin-bottom:8px;"><i class="ph ph-user" style="margin-right:4px;"></i> Mi Perfil</h4>
+        <div style="background:#f8fafc;padding:16px;border-radius:10px;font-size:14px;">
+          <p><strong>Nombre:</strong> <span id="config-nombre">-</span></p>
+          <p style="margin-top:4px;"><strong>Email:</strong> <span id="config-email">-</span></p>
+          <p style="margin-top:4px;"><strong>Rol:</strong> <span id="config-rol">-</span></p>
+          <p style="margin-top:4px;"><strong>Base:</strong> <span id="config-base">-</span></p>
+        </div>
+      </div>
+      <div style="margin-bottom:24px;">
+        <h4 style="font-weight:700;color:#374151;margin-bottom:8px;"><i class="ph ph-key" style="margin-right:4px;"></i> Seguridad</h4>
+        <button onclick="mostrarCambiarPassword()" style="padding:10px 20px;background:#6366f1;color:white;border:none;border-radius:8px;font-weight:700;cursor:pointer;font-size:14px;">Cambiar Contrasena</button>
+      </div>
+
+      <!-- ADMIN: Gestion de contrasenas ELIMINADA (V78-SEC) -->
+      <!-- Solo se mantiene "Cambiar Contrasena" personal y reset por codigo -->
+
+      <!-- V72: ADMIN: Configuracion RAMPA — Cursos No Operativos -->
+      <div id="admin-rampa-config-section" style="display:none;">
+        <div style="border-top:1px solid #e2e8f0;padding-top:20px;">
+          <h4 style="font-weight:700;color:#374151;margin-bottom:12px;"><i class="ph ph-gear" style="margin-right:4px;"></i> Configuracion RAMPA</h4>
+          <div style="background:#f8fafc;border-radius:10px;padding:16px;">
+            <div style="display:flex;justify-content:space-between;align-items:center;">
+              <div>
+                <p style="font-weight:600;color:#1e293b;font-size:14px;">Incluir curso Amadeus en KPIs</p>
+                <p style="font-size:11px;color:#94a3b8;margin-top:2px;">Si se activa, AMADEUS contara en los KPIs y criticos de RAMPA</p>
+              </div>
+              <label style="position:relative;display:inline-block;width:48px;height:26px;cursor:pointer;" data-testid="rampa-amadeus-toggle">
+                <input type="checkbox" id="config-rampa-amadeus" onchange="toggleAmadeusRAMPA(this.checked)" style="opacity:0;width:0;height:0;">
+                <span id="amadeus-toggle-slider" style="position:absolute;top:0;left:0;right:0;bottom:0;background:#cbd5e1;border-radius:26px;transition:.3s;"></span>
+                <span id="amadeus-toggle-dot" style="position:absolute;top:3px;left:3px;width:20px;height:20px;background:white;border-radius:50%;transition:.3s;box-shadow:0 1px 3px rgba(0,0,0,.2);"></span>
+              </label>
+            </div>
+            <p id="config-rampa-amadeus-status" style="font-size:11px;color:#64748b;margin-top:8px;">Estado: <strong>Desactivado</strong> (Amadeus excluido)</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- V92: ADMIN: Toggle Recordatorio de Cursos -->
+      <div id="admin-recordatorio-section" style="display:none;" data-testid="admin-recordatorio-section">
+        <div style="border-top:1px solid #e2e8f0;padding-top:20px;">
+          <h4 style="font-weight:700;color:#374151;margin-bottom:12px;"><i class="ph ph-envelope" style="margin-right:4px;"></i> Recordatorio de Cursos</h4>
+          <div style="background:#f8fafc;border-radius:10px;padding:16px;">
+            <div style="display:flex;justify-content:space-between;align-items:center;">
+              <div>
+                <p style="font-weight:600;color:#1e293b;font-size:14px;">Habilitar envio de recordatorios</p>
+                <p style="font-size:11px;color:#94a3b8;margin-top:2px;">Los jefes podran enviar correos de recordatorio a su equipo sobre cursos vencidos o proximos a vencer</p>
+              </div>
+              <label style="position:relative;display:inline-block;width:48px;height:26px;cursor:pointer;" data-testid="admin-recordatorio-toggle-label">
+                <input type="checkbox" id="admin-toggle-recordatorio" data-testid="admin-toggle-recordatorio" onchange="toggleRecordatorio()" style="opacity:0;width:0;height:0;">
+                <span id="recordatorio-toggle-slider" style="position:absolute;top:0;left:0;right:0;bottom:0;background:#cbd5e1;border-radius:26px;transition:.3s;"></span>
+                <span id="recordatorio-toggle-dot" style="position:absolute;top:3px;left:3px;width:20px;height:20px;background:white;border-radius:50%;transition:.3s;box-shadow:0 1px 3px rgba(0,0,0,.2);"></span>
+              </label>
+            </div>
+            <p id="admin-recordatorio-status" style="font-size:11px;color:#64748b;margin-top:8px;">Estado: <strong>Desactivado</strong></p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>

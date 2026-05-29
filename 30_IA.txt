@@ -1,0 +1,743 @@
+// ═══════════════════════════════════════════════════════════════
+// CODIGO_IA.gs — Modulo de Inteligencia Artificial (Vertex AI)
+// V2.1: Tono humano, inspeccion de estructura, busqueda segmentada
+// Responsabilidades:
+//   - Deteccion de intents (metricas, BP, estructura, segmento, analisis)
+//   - Interaccion con BibliotecaVertexAI
+//   - Contexto enriquecido con datos reales + estructura de fuentes
+//   - Dashboard KPIs auto-load + resumen IA
+//   - Inspeccion de hojas/columnas de datos reales
+//   - Busqueda filtrada por area, jefe, base, curso
+// ═══════════════════════════════════════════════════════════════
+
+// ── PROMPT BASE: Tono humano, directo, analitico ──
+var _CT_PERSONA = 'Eres un analista de capacitacion dentro de LATAM Cargo. '
+  + 'Hablas como un colega experto: directo, claro, sin formalidades. '
+  + 'NUNCA uses "Estimado", "Cordial saludo", tono de correo ni introducciones largas. '
+  + 'Ve al grano. Usa datos concretos. Si hay un problema, dilo claro. '
+  + 'Si puedes sugerir una accion, hazlo al final. '
+  + 'Si el usuario pide algo que no esta en los datos, dilo honestamente, no inventes. '
+  + 'Responde en espanol. Ejemplo de tu tono: '
+  + '"Tienes 45 vencidos, Chile sigue siendo la base mas critica con 18. '
+  + 'Te sugiero empezar por los 3 jefes con mas acumulacion." '
+  + 'Otro ejemplo: "En HCC encontre 12 personas, 3 con cursos vencidos. Aqui va el detalle..."';
+
+// ═══════════════════════════════════════════════
+// INTENT DETECTION (mejorado con 6 categorias)
+// ═══════════════════════════════════════════════
+function _ctDetectIntent(pregunta) {
+  var q = (pregunta || '').toLowerCase().trim();
+  var qClean = q.replace(/[^a-z0-9\s]/g, '').trim();
+
+  // 1) Greeting
+  var greetWords = ['hola', 'buenas', 'buenos dias', 'buenas tardes', 'buenas noches', 'hey', 'hi', 'hello', 'que tal', 'como estas'];
+  if (qClean.split(/\s+/).length <= 4) {
+    for (var gi = 0; gi < greetWords.length; gi++) {
+      if (qClean === greetWords[gi] || qClean.indexOf(greetWords[gi]) === 0) return 'greeting';
+    }
+  }
+
+  // 2) Glosario
+  var glosKw = ['glosario', 'siglas', 'que significa', 'significado', 'abreviatura', 'nomenclatura', 'diccionario'];
+  for (var gk = 0; gk < glosKw.length; gk++) {
+    if (q.indexOf(glosKw[gk]) >= 0) return 'glosario';
+  }
+
+  // 3) ESTRUCTURA DE DATOS — preguntas sobre hojas, columnas, esquema
+  var structKw = ['columna', 'columnas', 'encabezado', 'encabezados', 'titulo', 'titulos de', 'como esta armado', 'estructura', 'esquema', 'que hojas', 'nombres de hojas', 'que campos', 'que datos tiene', 'de donde saca', 'fuente de datos', 'como se lee', 'que contiene', 'formato del excel', 'como esta el excel', 'que tiene el sheet', 'cabeceras'];
+  for (var sk = 0; sk < structKw.length; sk++) {
+    if (q.indexOf(structKw[sk]) >= 0) return 'estructura_datos';
+  }
+
+  // 4) BUSQUEDA POR SEGMENTO — area, unidad, gerencia, jefe especifico
+  var segKw = ['area ', 'del area', 'de la area', 'unidad ', 'gerencia ', 'de hcc', ' hcc', 'seccion ', 'departamento ', 'equipo de ', 'personas de ', 'gente de ', 'cuantos hay en ', 'cuantas personas', 'quienes son de ', 'quienes estan en ', 'quien esta en ', 'empleados de ', 'colaboradores de '];
+  var isSegment = false;
+  for (var sgk = 0; sgk < segKw.length; sgk++) {
+    if (q.indexOf(segKw[sgk]) >= 0) { isSegment = true; break; }
+  }
+  if (isSegment) return 'segmento';
+
+  // 5) BP — persona especifica
+  var bpExplicit = q.match(/\bbp\D{0,3}(\d{5,10})\b/g) || [];
+  var hashBP = q.match(/#(\d{5,10})\b/g) || [];
+  var allBPMatches = bpExplicit.concat(hashBP);
+  var ctxBP = ['colaborador', 'empleado', 'persona', 'perfil', 'historico', 'historial', 'cursos de', 'cursos del', 'vencimiento de', 'vencimientos de'];
+  var hasCtx = false;
+  for (var ci = 0; ci < ctxBP.length; ci++) { if (q.indexOf(ctxBP[ci]) >= 0) { hasCtx = true; break; } }
+  var allNums = q.match(/\d{5,10}/g) || [];
+  if (allBPMatches.length > 0 || (hasCtx && allNums.length > 0)) {
+    var bpAnalKw = ['indica', 'podrias', 'dime', 'tiene', 'fechas', 'que cursos', 'cuales', 'detalle', 'analiza', 'explica', 'necesita', 'falta', 'requiere', 'debe', 'como esta', 'como va', 'situacion'];
+    var usarIA = false;
+    for (var bak = 0; bak < bpAnalKw.length; bak++) { if (q.indexOf(bpAnalKw[bak]) >= 0) { usarIA = true; break; } }
+    if (usarIA) return 'ia';
+    if (allNums.length >= 2) return 'multi_bp';
+    return 'bp_historico';
+  }
+
+  // 6) IA libre — analisis, recomendaciones
+  var iaKw = ['analiza', 'analisis', 'explica', 'por que', 'recomienda', 'recomendacion', 'sugiere', 'sugerencia', 'que opinas', 'como mejorar', 'que hago', 'que deberia', 'ayuda con', 'interpreta', 'diagnostico', 'evaluacion', 'evalua', 'estrategia', 'priorizar', 'prioridades', 'plan de accion', 'que piensas', 'compara', 'comparacion', 'tendencia', 'proyeccion', 'prediccion', 'ia', 'inteligencia artificial', 'vertex'];
+  for (var iak = 0; iak < iaKw.length; iak++) {
+    if (q.indexOf(iaKw[iak]) >= 0) return 'ia';
+  }
+
+  // 7) Reportes estructurados
+  var rules = [
+    { intent: 'top_vencidos',    kw: ['top jefe', 'jefes vencid', 'ranking jefe', 'mas vencido', 'peor jefe', 'top 10', 'top vencid'] },
+    { intent: 'sin_data',        kw: ['sin data', 'sin dato', 'sin curso', 'sin plan', 'falta dato', 'sin asignar', 'sin informacion', 'usuarios sin'] },
+    { intent: 'inconsistencias', kw: ['inconsistencia', 'duplicado', 'error de dato', 'problema de dato', 'sin jefe', 'anomalia', 'dato malo', 'limpieza'] },
+    { intent: 'criticos',        kw: ['critico', 'urgente', 'por base', 'criticidad', 'emergencia', 'riesgo', 'vencidos por base', 'cursos critico'] },
+    { intent: 'resumen',         kw: ['resumen', 'general', 'estado general', 'panorama', 'dashboard', 'cuanto', 'cuantos'] }
+  ];
+  for (var ri = 0; ri < rules.length; ri++) {
+    for (var ki = 0; ki < rules[ri].kw.length; ki++) {
+      if (q.indexOf(rules[ri].kw[ki]) >= 0) return rules[ri].intent;
+    }
+  }
+
+  // Default → IA
+  return 'ia';
+}
+
+function _ctExtractAllBPs(pregunta) {
+  var nums = (pregunta || '').match(/\d{5,10}/g) || [];
+  var seen = {}, result = [];
+  for (var i = 0; i < nums.length; i++) { if (!seen[nums[i]]) { seen[nums[i]] = true; result.push(nums[i]); } }
+  return result;
+}
+
+// ═══════════════════════════════════════════════
+// INSPECCION DE ESTRUCTURA DE DATOS
+// ═══════════════════════════════════════════════
+
+/**
+ * Inspecciona la estructura real de las hojas del Sheet maestro.
+ * Retorna nombres de hojas, encabezados, cantidad de filas.
+ */
+function _ctGetDataStructure() {
+  try {
+    var ss = getSpreadsheet('MAESTRO');
+    if (!ss) return { error: 'No se pudo abrir el Sheet maestro' };
+    var sheets = ss.getSheets();
+    var result = [];
+    for (var i = 0; i < sheets.length; i++) {
+      var sh = sheets[i];
+      var name = sh.getName();
+      // Skip system/internal sheets
+      if (name.indexOf('_') === 0 || name === 'CONFIG' || name === 'LOG' || name === 'REGISTRO_OUTPUTS') continue;
+      var lastRow = sh.getLastRow();
+      var lastCol = sh.getLastColumn();
+      var headers = [];
+      if (lastRow > 0 && lastCol > 0) {
+        var headerRow = sh.getRange(1, 1, 1, lastCol).getValues()[0];
+        headers = headerRow.map(function(h) { return String(h || '').trim(); }).filter(function(h) { return h.length > 0; });
+      }
+      result.push({
+        nombre: name,
+        filas: Math.max(0, lastRow - 1),
+        columnas: headers.length,
+        encabezados: headers
+      });
+    }
+    return { success: true, hojas: result };
+  } catch (e) {
+    return { error: e.message };
+  }
+}
+
+/**
+ * Inspecciona la estructura de una base especifica (CHILE, RAMPA, LATAM, NAM).
+ * Lee los encabezados de la hoja correspondiente.
+ */
+function _ctGetBaseStructure(baseName) {
+  try {
+    var config = typeof _CONFIG_BASES !== 'undefined' ? _CONFIG_BASES : null;
+    if (!config) {
+      // Fallback: intentar abrir por nombre de hoja
+      var ss = getSpreadsheet('MAESTRO');
+      if (!ss) return { error: 'No se pudo abrir MAESTRO' };
+      var sh = ss.getSheetByName(baseName);
+      if (!sh) return { error: 'Hoja "' + baseName + '" no encontrada' };
+      var lastCol = sh.getLastColumn();
+      var headers = lastCol > 0 ? sh.getRange(1, 1, 1, lastCol).getValues()[0].map(function(h) { return String(h||'').trim(); }).filter(function(h) { return h; }) : [];
+      return { success: true, base: baseName, columnas: headers };
+    }
+    return { success: true, base: baseName, nota: 'Config disponible' };
+  } catch (e) {
+    return { error: e.message };
+  }
+}
+
+// ═══════════════════════════════════════════════
+// BUSQUEDA POR SEGMENTO (area, jefe, unidad)
+// ═══════════════════════════════════════════════
+
+/**
+ * Busca empleados que coincidan con un criterio en cualquier campo.
+ * Ejemplo: _ctSearchBySegment(emps, 'hcc') busca en area, organizacion, unidad
+ */
+function _ctSearchBySegment(emps, termino) {
+  if (!termino || !emps) return [];
+  var t = termino.toLowerCase().trim();
+  var matches = [];
+  for (var i = 0; i < emps.length; i++) {
+    var e = emps[i];
+    var fields = [
+      e.area, e.organizacion, e.unidad, e.gerencia, e.seccion,
+      e.jefe, e.jefeDirecto, e._base, e.negocio, e.zona, e.posicion
+    ];
+    for (var f = 0; f < fields.length; f++) {
+      if (fields[f] && String(fields[f]).toLowerCase().indexOf(t) >= 0) {
+        matches.push(e);
+        break;
+      }
+    }
+  }
+  return matches;
+}
+
+/**
+ * Extrae el termino de busqueda de segmento de la pregunta.
+ * Ejemplo: "cuantas personas hay en HCC" → "hcc"
+ */
+function _ctExtractSegmentTerm(pregunta) {
+  var q = (pregunta || '').toLowerCase();
+  // Patrones comunes
+  var patterns = [
+    /(?:en|de|del|la)\s+(?:area|unidad|gerencia|seccion|departamento)\s+(?:de\s+)?([a-z0-9\s]+)/,
+    /(?:personas|gente|empleados|colaboradores)\s+(?:de|en|del)\s+([a-z0-9\s]+)/,
+    /(?:cuantos|cuantas)\s+(?:hay|tiene|estan)\s+en\s+([a-z0-9\s]+)/,
+    /(?:de|en)\s+(hcc|gcc|occ|scc|mcc|latam\s*cargo|hub|rampa|nave|bodega|plataforma)/i
+  ];
+  for (var i = 0; i < patterns.length; i++) {
+    var match = q.match(patterns[i]);
+    if (match && match[1]) return match[1].trim();
+  }
+  // Fallback: buscar acronimos en mayusculas en la pregunta original
+  var acronyms = (pregunta || '').match(/\b[A-Z]{2,6}\b/g);
+  if (acronyms && acronyms.length > 0) return acronyms[0].toLowerCase();
+  return null;
+}
+
+// ═══════════════════════════════════════════════
+// KPIs (computacion rapida)
+// ═══════════════════════════════════════════════
+function _ctComputeKPIs(emps) {
+  var totalPersonas = emps.length;
+  var totalVenc = 0, totalPV = 0, totalVig = 0, totalNI = 0, totalProg = 0;
+  var porBase = {}, topJefesVenc = {}, cursosVenc = {};
+
+  emps.forEach(function(e) {
+    var b = e._base || 'N/A';
+    if (!porBase[b]) porBase[b] = { personas: 0, venc: 0, pv: 0, vig: 0, ni: 0 };
+    porBase[b].personas++;
+    if (!e.cuentaKPI) { totalNI++; porBase[b].ni++; }
+    (e.cursos || []).forEach(function(c) {
+      var st = (c.statusNorm || c.status || '').toUpperCase();
+      if (st === 'VENCIDO' || st === 'CRITICO') {
+        totalVenc++; porBase[b].venc++;
+        var jefe = e.jefe || e.jefeDirecto || 'Sin jefe';
+        topJefesVenc[jefe] = (topJefesVenc[jefe] || 0) + 1;
+        var sigla = c.sigla || c.curso || 'N/A';
+        cursosVenc[sigla] = (cursosVenc[sigla] || 0) + 1;
+      }
+      else if (st === 'POR_VENCER' || st === 'POR VENCER' || st === 'PROXIMO') { totalPV++; porBase[b].pv++; }
+      else if (st === 'VIGENTE' || st === 'OK' || st === 'HABILITADO' || st === 'COMPLETADO') { totalVig++; porBase[b].vig++; }
+      else if (st === 'PROGRAMAR' || st === 'POR_PROGRAMAR') totalProg++;
+    });
+  });
+
+  var denom = totalVig + totalVenc + totalPV + totalProg;
+  return {
+    activos: totalPersonas - totalNI, ni: totalNI, vencidos: totalVenc, porVencer: totalPV,
+    vigentes: totalVig, programar: totalProg,
+    cumplimiento: denom > 0 ? Math.round(totalVig / denom * 100) : 0,
+    porBase: porBase, topJefesVenc: topJefesVenc, cursosVenc: cursosVenc
+  };
+}
+
+// ═══════════════════════════════════════════════
+// API: Dashboard KPIs (carga rapida sin IA)
+// ═══════════════════════════════════════════════
+function getControlTowerKPIs(baseFilter) {
+  try {
+    var usr = getUsuarioActual();
+    if (!usr || (usr.rol || '').toUpperCase() !== 'ADMIN') return { error: 'Acceso denegado' };
+    var k = _ctComputeKPIs(_ctLoadEmps(baseFilter || 'TODO'));
+    return { success: true, kpis: { activos: k.activos, ni: k.ni, vencidos: k.vencidos, porVencer: k.porVencer, vigentes: k.vigentes, cumplimiento: k.cumplimiento } };
+  } catch (e) { return { error: e.message }; }
+}
+
+// ═══════════════════════════════════════════════
+// API: Resumen IA automatico al entrar
+// ═══════════════════════════════════════════════
+function getControlTowerAutoSummary(baseFilter) {
+  try {
+    var usr = getUsuarioActual();
+    if (!usr || (usr.rol || '').toUpperCase() !== 'ADMIN') return { error: 'Acceso denegado' };
+    var base = baseFilter || 'TODO';
+    var emps = _ctLoadEmps(base);
+    var k = _ctComputeKPIs(emps);
+
+    var jefesArr = Object.keys(k.topJefesVenc).map(function(j) { return j + ': ' + k.topJefesVenc[j]; });
+    jefesArr.sort(function(a, b) { return parseInt(b.split(':')[1]) - parseInt(a.split(':')[1]); });
+    var top3 = jefesArr.slice(0, 3).join('; ');
+    var basesCrit = Object.keys(k.porBase).filter(function(b) { return k.porBase[b].venc > 10; })
+      .map(function(b) { return b + ' (' + k.porBase[b].venc + ' venc)'; }).join(', ');
+
+    var prompt = _CT_PERSONA + '\n\n'
+      + 'Genera un resumen ejecutivo de 2-3 lineas del estado actual. '
+      + 'Ve directo al dato mas importante y cierra con una sugerencia de accion.\n\n'
+      + 'DATOS: ' + k.activos + ' activos, ' + k.vencidos + ' vencidos, '
+      + k.porVencer + ' por vencer, ' + k.vigentes + ' vigentes. Cumplimiento: ' + k.cumplimiento + '%. '
+      + 'Bases criticas: ' + (basesCrit || 'ninguna >10 vencidos') + '. '
+      + 'Top jefes: ' + (top3 || 'N/A') + '.';
+
+    var aiSummary = BibliotecaVertexAI.ejecutarPrompt(prompt);
+    return { success: true, summary: aiSummary || 'Datos cargados.', kpis: { activos: k.activos, ni: k.ni, vencidos: k.vencidos, porVencer: k.porVencer, vigentes: k.vigentes, cumplimiento: k.cumplimiento } };
+  } catch (e) {
+    Logger.log('[CT-AUTO-SUMMARY-ERROR] ' + e.message);
+    return { success: false, error: e.message };
+  }
+}
+
+// ═══════════════════════════════════════════════
+// CORE: Vertex AI — Respuesta principal
+// Maneja: metricas, BP, estructura, segmento, analisis libre
+// ═══════════════════════════════════════════════
+function _ctAskVertexAI(pregunta, emps, base) {
+  try {
+    var k = _ctComputeKPIs(emps);
+    var intent = _ctDetectIntent(pregunta);
+    var contextoExtra = '';
+
+    // ── ENRIQUECIMIENTO SEGUN INTENT ──
+
+    // A) Estructura de datos
+    if (intent === 'estructura_datos') {
+      var struct = _ctGetDataStructure();
+      if (struct.success && struct.hojas) {
+        contextoExtra += '\n=== ESTRUCTURA REAL DE LAS FUENTES DE DATOS ===\n';
+        for (var si = 0; si < struct.hojas.length; si++) {
+          var h = struct.hojas[si];
+          contextoExtra += 'Hoja: "' + h.nombre + '" | ' + h.filas + ' filas | Columnas: ' + h.encabezados.join(', ') + '\n';
+        }
+        contextoExtra += '\nResponde usando esta informacion real. Describe las hojas, columnas y estructura que el usuario pregunte.\n';
+      }
+    }
+
+    // B) Busqueda por segmento (area, unidad, etc.)
+    if (intent === 'segmento') {
+      var term = _ctExtractSegmentTerm(pregunta);
+      if (term) {
+        var segMatches = _ctSearchBySegment(emps, term);
+        contextoExtra += '\n=== BUSQUEDA POR SEGMENTO: "' + term + '" ===\n';
+        contextoExtra += 'Resultados: ' + segMatches.length + ' personas encontradas\n';
+        if (segMatches.length > 0 && segMatches.length <= 50) {
+          var segVenc = 0, segPV = 0, segVig = 0;
+          for (var mi = 0; mi < segMatches.length; mi++) {
+            var m = segMatches[mi];
+            contextoExtra += '- BP: ' + (m.bp || m.BP || 'N/A') + ' | ' + (m.nombre || m.nombreCompleto || 'N/A')
+              + ' | Area: ' + (m.area || m.organizacion || 'N/A') + ' | Jefe: ' + (m.jefe || m.jefeDirecto || 'N/A')
+              + ' | Base: ' + (m._base || 'N/A');
+            var cursosResumen = [];
+            (m.cursos || []).forEach(function(c) {
+              var st = (c.statusNorm || c.status || '').toUpperCase();
+              if (st === 'VENCIDO' || st === 'CRITICO') { segVenc++; cursosResumen.push(c.sigla + ':VENCIDO'); }
+              else if (st === 'POR_VENCER' || st === 'POR VENCER') { segPV++; cursosResumen.push(c.sigla + ':POR_VENCER'); }
+              else if (st === 'VIGENTE' || st === 'OK' || st === 'HABILITADO') segVig++;
+            });
+            if (cursosResumen.length > 0) contextoExtra += ' | Cursos criticos: ' + cursosResumen.join(', ');
+            contextoExtra += '\n';
+          }
+          contextoExtra += 'Resumen segmento: ' + segVenc + ' vencidos, ' + segPV + ' por vencer, ' + segVig + ' vigentes\n';
+        } else if (segMatches.length > 50) {
+          contextoExtra += '(Demasiados resultados para listar individualmente, mostrando agregados)\n';
+          var sv = 0, sp = 0;
+          segMatches.forEach(function(m) { (m.cursos||[]).forEach(function(c) { var s=(c.statusNorm||'').toUpperCase(); if(s==='VENCIDO'||s==='CRITICO')sv++; else if(s.indexOf('VENCER')>=0)sp++; }); });
+          contextoExtra += 'Vencidos: ' + sv + ', Por vencer: ' + sp + '\n';
+        }
+        contextoExtra += '\nResponde usando estos datos reales del segmento.\n';
+      }
+    }
+
+    // C) BP individual
+    var bpMencionados = (pregunta || '').match(/\d{5,10}/g) || [];
+    if (bpMencionados.length > 0 && intent !== 'estructura_datos') {
+      var bpVistos = {};
+      for (var bi = 0; bi < bpMencionados.length && bi < 5; bi++) {
+        var bpBuscado = bpMencionados[bi];
+        if (bpVistos[bpBuscado]) continue;
+        bpVistos[bpBuscado] = true;
+        for (var ei = 0; ei < emps.length; ei++) {
+          var emp = emps[ei];
+          if (String(emp.bp || emp.BP || emp.id || '') === bpBuscado) {
+            contextoExtra += '\n=== PERFIL BP ' + bpBuscado + ' ===\n';
+            contextoExtra += 'Nombre: ' + (emp.nombre || emp.nombreCompleto || 'N/A') + '\n';
+            contextoExtra += 'Base: ' + (emp._base || 'N/A') + ' | Area: ' + (emp.area || emp.organizacion || 'N/A') + '\n';
+            contextoExtra += 'Jefe: ' + (emp.jefe || emp.jefeDirecto || 'N/A') + ' | KPI: ' + (emp.cuentaKPI ? 'Si' : 'No (NI)') + '\n';
+            contextoExtra += 'Cursos:\n';
+            (emp.cursos || []).forEach(function(c) {
+              contextoExtra += '  - ' + (c.sigla || c.curso || 'N/A') + ' | ' + (c.statusNorm || c.status || 'N/A');
+              if (c.fechaVencimiento || c.vencimiento || c.expira) contextoExtra += ' | Vence: ' + (c.fechaVencimiento || c.vencimiento || c.expira);
+              if (c.fechaCompletado || c.completado || c.realizado) contextoExtra += ' | Completado: ' + (c.fechaCompletado || c.completado || c.realizado);
+              contextoExtra += '\n';
+            });
+            break;
+          }
+        }
+      }
+    }
+
+    // ── CONSTRUIR PROMPT COMPLETO ──
+    var top5J = Object.keys(k.topJefesVenc).map(function(j) { return { n: j, v: k.topJefesVenc[j] }; });
+    top5J.sort(function(a, b) { return b.v - a.v; });
+    var top5C = Object.keys(k.cursosVenc).map(function(c) { return { s: c, v: k.cursosVenc[c] }; });
+    top5C.sort(function(a, b) { return b.v - a.v; });
+    var basesRes = Object.keys(k.porBase).map(function(b) {
+      var d = k.porBase[b]; return b + ': ' + (d.personas-d.ni) + ' activos, ' + d.venc + ' venc, ' + d.pv + ' por vencer, ' + d.vig + ' vig';
+    }).join('\n');
+
+    var prompt = _CT_PERSONA + '\n\n'
+      + '=== DATOS (Base: ' + base + ') ===\n'
+      + 'Activos: ' + k.activos + ' | NI: ' + k.ni + ' | Vencidos: ' + k.vencidos
+      + ' | Por vencer: ' + k.porVencer + ' | Vigentes: ' + k.vigentes + ' | Cumplimiento: ' + k.cumplimiento + '%\n'
+      + 'Por base:\n' + basesRes + '\n'
+      + 'Top jefes vencidos: ' + top5J.slice(0,5).map(function(j){return j.n+': '+j.v;}).join('; ') + '\n'
+      + 'Top cursos vencidos: ' + top5C.slice(0,5).map(function(c){return c.s+': '+c.v;}).join('; ') + '\n';
+
+    if (contextoExtra) prompt += contextoExtra;
+
+    prompt += '\n=== PREGUNTA ===\n' + pregunta + '\n\n'
+      + 'Responde directo con datos concretos. No inventes. Si el dato esta, usalo. Si no esta, dilo honestamente.';
+
+    var respuestaIA = BibliotecaVertexAI.ejecutarPrompt(prompt);
+    var titulo = 'Analisis IA';
+    if (intent === 'estructura_datos') titulo = 'Estructura de Datos';
+    else if (intent === 'segmento') titulo = 'Busqueda: ' + (_ctExtractSegmentTerm(pregunta) || '').toUpperCase();
+    else if (bpMencionados.length > 0) titulo = 'Perfil BP ' + bpMencionados[0];
+
+    return {
+      tipo: 'ia_response', titulo: titulo, subtitulo: 'Vertex AI — ' + base,
+      respuesta: respuestaIA || 'Sin respuesta.',
+      contexto: { colaboradores: k.activos, vencidos: k.vencidos, cumplimiento: k.cumplimiento + '%' }
+    };
+  } catch (e) {
+    Logger.log('[CT-VERTEX-ERROR] ' + e.message);
+    var fallback = _ctReport_ambiguo();
+    fallback.nota = 'IA no disponible: ' + e.message;
+    return fallback;
+  }
+}
+
+// ═══════════════════════════════════════════════
+// TEST
+// ═══════════════════════════════════════════════
+function testVertexAI() {
+  try {
+    var response = BibliotecaVertexAI.ejecutarPrompt('Responde en una linea: que es capacitacion?');
+    Logger.log('[VERTEX-TEST] OK: ' + response);
+    return { success: true, response: response };
+  } catch (e) {
+    Logger.log('[VERTEX-TEST] ERROR: ' + e.message);
+    return { success: false, error: e.message };
+  }
+}
+
+// ═══════════════════════════════════════════════
+// FORECAST AI BOT — Analisis contextual del Forecast
+// ═══════════════════════════════════════════════
+
+var _FC_AI_PERSONA = 'Eres un analista de cumplimiento de capacitacion dentro de LATAM Cargo. '
+  + 'Hablas directo, sin formalidades. Tu rol es ayudar a PRIORIZAR acciones. '
+  + 'NUNCA uses "Estimado", saludos de correo, ni frases de relleno. '
+  + 'Ve al dato importante primero. Luego sugiere acciones concretas. '
+  + 'Si ves un riesgo, dilo claro. Si hay un patron, destacalo. '
+  + 'Responde en espanol. Ejemplo: "Este mes tienes 23 vencimientos criticos, '
+  + 'concentrados en MMPP y CRM. Chile acumula el 40%. Te sugiero empezar '
+  + 'por los 5 jefes con mas vencidos acumulados."';
+
+/**
+ * API principal del bot IA en Forecast.
+ * Carga datos reales del Forecast y los pasa como contexto a Vertex AI.
+ * @param {string} pregunta - Pregunta del usuario
+ * @param {string} baseFilter - Base seleccionada (HCC, LATAM_SUR, CL, RAMPA, NAM_EU, TODO)
+ * @return {Object} Respuesta estructurada para el frontend
+ */
+function forecastAskQuestion(pregunta, baseFilter) {
+  try {
+    var t0 = new Date().getTime();
+    var usr = getUsuarioActual();
+    if (!usr) return { error: 'No hay sesion activa' };
+    var rol = (usr.rol || '').toUpperCase();
+    if (rol !== 'ADMIN' && rol !== 'CAPACITY') return { error: 'Acceso denegado. Solo Admin/Capacity.' };
+
+    var base = baseFilter || 'HCC';
+    var intent = _ctDetectIntent(pregunta);
+
+    // Greeting rapido sin cargar datos
+    if (intent === 'greeting') {
+      return {
+        tipo: 'ayuda', titulo: 'Hola! Soy el asistente de Forecast.',
+        mensaje: 'Puedo analizar vencimientos, prioridades, cursos criticos y ayudarte a decidir que hacer primero.',
+        sugerencias: [
+          { label: 'Cursos criticos', query: 'Cuales son los cursos mas criticos este mes' },
+          { label: 'Base mas expuesta', query: 'Que base tiene mas riesgo' },
+          { label: 'Prioridades hoy', query: 'Que deberia priorizar hoy' },
+          { label: 'Jefes con mas riesgo', query: 'Que jefes concentran mas vencidos' },
+          { label: 'Urgentes', query: 'Cuantos casos urgentes tengo' }
+        ],
+        intent: 'greeting', evidencia: 'Tiempo: ' + ((new Date().getTime() - t0) / 1000).toFixed(1) + 's'
+      };
+    }
+
+    // Glosario no necesita forecast
+    if (intent === 'glosario') {
+      var glosResult = _ctReport_glosario();
+      glosResult.intent = 'glosario';
+      glosResult.evidencia = 'Tiempo: ' + ((new Date().getTime() - t0) / 1000).toFixed(1) + 's';
+      return glosResult;
+    }
+
+    // Cargar datos reales del Forecast
+    var fcData = _fcLoadForecastData(base, usr);
+    if (!fcData || !fcData.success) return { error: 'No se pudieron cargar datos del Forecast: ' + ((fcData && fcData.error) || 'desconocido') };
+
+    // Construir contexto enriquecido
+    var ctx = _fcBuildContext(fcData, base, pregunta, intent);
+
+    // Construir prompt
+    var prompt = _FC_AI_PERSONA + '\n\n' + ctx
+      + '\n=== PREGUNTA DEL USUARIO ===\n' + pregunta + '\n\n'
+      + 'Responde directo con datos. Si puedes priorizar, hazlo. '
+      + 'Si hay acciones concretas, sugierelas. No inventes datos.';
+
+    var aiResp = BibliotecaVertexAI.ejecutarPrompt(prompt);
+    var titulo = 'Analisis Forecast';
+    if (intent === 'estructura_datos') titulo = 'Estructura de Datos';
+    else if (intent === 'segmento') titulo = 'Analisis por Segmento';
+    else if (intent === 'criticos') titulo = 'Cursos Criticos';
+    else if (intent === 'top_vencidos') titulo = 'Jefes con Riesgo';
+
+    var elapsed = new Date().getTime() - t0;
+    return {
+      tipo: 'ia_response',
+      titulo: titulo,
+      subtitulo: 'Vertex AI — Forecast ' + base,
+      respuesta: aiResp || 'Sin respuesta de la IA.',
+      contexto: {
+        colaboradores: fcData.kpis.totalColaboradores || 0,
+        vencidos: _fcCountVencidos(fcData),
+        cumplimiento: (fcData.kpis.pctCumplPromedio || 0) + '%',
+        cursos: fcData.kpis.totalCursos || 0
+      },
+      intent: intent,
+      evidencia: 'Base: ' + base + ' | Tiempo: ' + (elapsed / 1000).toFixed(1) + 's | Datos en tiempo real'
+    };
+  } catch (e) {
+    Logger.log('[FC-AI-ERROR] ' + e.message);
+    return { error: 'Error al procesar: ' + e.message };
+  }
+}
+
+/**
+ * Carga datos del Forecast para el bot IA.
+ */
+function _fcLoadForecastData(base, usr) {
+  try {
+    var usuarioInfo = {
+      nombre: usr.nombre || '', email: usr.email || '',
+      role: (usr.rol || '').toUpperCase(), pais: usr.pais || '',
+      area: usr.area || '', bp: usr.bp || '',
+      baseOrigen: usr.base || '', capacityFilter: usr.capacityFilter || null
+    };
+    return getForecastDataByCourse(base, 'CONSOLIDADO');
+  } catch (e) {
+    Logger.log('[FC-AI-LOAD] Error: ' + e.message);
+    return { success: false, error: e.message };
+  }
+}
+
+/**
+ * Cuenta total de vencidos en los datos del forecast.
+ */
+function _fcCountVencidos(fcData) {
+  var total = 0;
+  (fcData.cursos || []).forEach(function(c) { total += (c.vencidos || 0); });
+  return total;
+}
+
+/**
+ * Construye contexto enriquecido del Forecast para Vertex AI.
+ */
+function _fcBuildContext(fcData, base, pregunta, intent) {
+  var cursos = fcData.cursos || [];
+  var kpis = fcData.kpis || {};
+  var ctx = '=== DATOS DEL FORECAST (Base: ' + base + ') ===\n';
+  ctx += 'Total cursos: ' + kpis.totalCursos + ' | Colaboradores unicos: ' + kpis.totalColaboradores + '\n';
+  ctx += 'Cumplimiento promedio: ' + kpis.pctCumplPromedio + '% | Confirmados en planificacion: ' + kpis.totalConfirmados + '\n\n';
+
+  // Top cursos por vencidos
+  var topVenc = cursos.filter(function(c) { return c.vencidos > 0; })
+    .sort(function(a, b) { return b.vencidos - a.vencidos; }).slice(0, 10);
+  if (topVenc.length > 0) {
+    ctx += '=== TOP CURSOS CON MAS VENCIDOS ===\n';
+    topVenc.forEach(function(c, i) {
+      ctx += (i + 1) + '. ' + c.sigla + ' (' + (c.nombre || c.sigla) + '): '
+        + c.vencidos + ' vencidos, ' + c.porVencer + ' por vencer, '
+        + c.alDia + ' al dia (' + c.pctAlDia + '% cumplimiento). '
+        + 'Total: ' + c.total + ' personas.\n';
+    });
+    ctx += '\n';
+  }
+
+  // Top cursos por urgencia (menor % cumplimiento)
+  var topUrgentes = cursos.filter(function(c) { return c.total >= 5; })
+    .sort(function(a, b) { return a.pctAlDia - b.pctAlDia; }).slice(0, 5);
+  if (topUrgentes.length > 0) {
+    ctx += '=== CURSOS MAS URGENTES (menor cumplimiento) ===\n';
+    topUrgentes.forEach(function(c) {
+      ctx += c.sigla + ': ' + c.pctAlDia + '% cumplimiento (' + c.vencidos + ' vencidos de ' + c.total + ')\n';
+    });
+    ctx += '\n';
+  }
+
+  // Distribucion mensual: cuantos vencen este mes y los proximos 3
+  var mesActual = fcData.anioActual ? new Date().getMonth() + 1 : null;
+  if (mesActual && fcData.monthKeys) {
+    var meses3 = fcData.monthKeys.slice(1, 4); // proximo trimestre (sin _ANT)
+    ctx += '=== VENCIMIENTOS PROXIMOS (trimestre) ===\n';
+    meses3.forEach(function(mk) {
+      var totalMes = 0;
+      cursos.forEach(function(c) { if (c.meses && c.meses[mk]) totalMes += c.meses[mk].t; });
+      var parts = mk.split('-');
+      var MESES = ['', 'Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
+      ctx += MESES[parseInt(parts[1], 10)] + ' ' + parts[0] + ': ' + totalMes + ' certificaciones por gestionar\n';
+    });
+    ctx += '\n';
+  }
+
+  // Anteriores acumulados
+  var anteriores = 0;
+  cursos.forEach(function(c) { if (c.meses && c.meses['_ANT']) anteriores += c.meses['_ANT'].v; });
+  if (anteriores > 0) {
+    ctx += 'ATENCION: ' + anteriores + ' certificaciones vencidas de periodos anteriores sin resolver.\n\n';
+  }
+
+  // Planificacion en curso
+  var totalSel = 0, totalConf = 0, totalPre = 0;
+  cursos.forEach(function(c) { totalSel += (c.sel || 0); totalConf += (c.conf || 0); totalPre += (c.pre || 0); });
+  if (totalSel + totalConf + totalPre > 0) {
+    ctx += '=== PLANIFICACION ACTIVA ===\n';
+    ctx += 'Seleccionados: ' + totalSel + ' | Pre-confirmados: ' + totalPre + ' | Confirmados: ' + totalConf + '\n\n';
+  }
+
+  // Detalle de participantes por area/jefe si es segmento
+  if (intent === 'segmento') {
+    var term = _ctExtractSegmentTerm(pregunta);
+    if (term) {
+      ctx += '=== BUSQUEDA POR SEGMENTO: "' + term + '" ===\n';
+      var found = 0;
+      cursos.forEach(function(c) {
+        (c.parts || []).forEach(function(p) {
+          if ((p.a || '').toLowerCase().indexOf(term) >= 0 ||
+              (p.b || '').toLowerCase().indexOf(term) >= 0 ||
+              (p.p || '').toLowerCase().indexOf(term) >= 0) {
+            found++;
+          }
+        });
+      });
+      ctx += 'Participantes que coinciden con "' + term + '": ' + found + '\n\n';
+    }
+  }
+
+  // Estructura de datos si se pide
+  if (intent === 'estructura_datos') {
+    var struct = _ctGetDataStructure();
+    if (struct.success && struct.hojas) {
+      ctx += '=== ESTRUCTURA DE FUENTES DE DATOS ===\n';
+      for (var si = 0; si < struct.hojas.length; si++) {
+        var h = struct.hojas[si];
+        ctx += 'Hoja: "' + h.nombre + '" | ' + h.filas + ' filas | Columnas: ' + h.encabezados.join(', ') + '\n';
+      }
+      ctx += '\n';
+    }
+  }
+
+  return ctx;
+}
+
+/**
+ * KPIs rapidos del Forecast para carga inicial (sin IA).
+ */
+function getForecastKPIs(baseFilter) {
+  try {
+    var usr = getUsuarioActual();
+    if (!usr) return { error: 'No hay sesion' };
+    var fcData = _fcLoadForecastData(baseFilter || 'HCC', usr);
+    if (!fcData || !fcData.success) return { error: fcData ? fcData.error : 'Sin datos' };
+
+    var totalVenc = _fcCountVencidos(fcData);
+    var totalPV = 0, totalAlDia = 0;
+    (fcData.cursos || []).forEach(function(c) { totalPV += (c.porVencer || 0); totalAlDia += (c.alDia || 0); });
+
+    return {
+      success: true,
+      kpis: {
+        cursos: fcData.kpis.totalCursos || 0,
+        colaboradores: fcData.kpis.totalColaboradores || 0,
+        vencidos: totalVenc,
+        porVencer: totalPV,
+        cumplimiento: (fcData.kpis.pctCumplPromedio || 0)
+      }
+    };
+  } catch (e) { return { error: e.message }; }
+}
+
+/**
+ * Resumen automatico del Forecast con IA (para carga inicial).
+ */
+function getForecastAutoSummary(baseFilter) {
+  try {
+    var usr = getUsuarioActual();
+    if (!usr) return { error: 'No hay sesion' };
+    var base = baseFilter || 'HCC';
+    var fcData = _fcLoadForecastData(base, usr);
+    if (!fcData || !fcData.success) return { success: false, error: fcData ? fcData.error : 'Sin datos' };
+
+    var totalVenc = _fcCountVencidos(fcData);
+    var kpis = fcData.kpis || {};
+    var cursos = fcData.cursos || [];
+
+    // Top 3 cursos mas criticos
+    var top3 = cursos.filter(function(c) { return c.vencidos > 0; })
+      .sort(function(a, b) { return b.vencidos - a.vencidos; }).slice(0, 3)
+      .map(function(c) { return c.sigla + ': ' + c.vencidos + ' vencidos'; }).join('; ');
+
+    var prompt = _FC_AI_PERSONA + '\n\n'
+      + 'Dame un resumen ejecutivo de 2-3 lineas del Forecast actual. '
+      + 'Ve directo al riesgo principal y cierra con UNA accion sugerida.\n\n'
+      + 'DATOS: Base ' + base + '. ' + (kpis.totalColaboradores || 0) + ' colaboradores, '
+      + totalVenc + ' vencidos, ' + (kpis.pctCumplPromedio || 0) + '% cumplimiento. '
+      + 'Top cursos criticos: ' + (top3 || 'ninguno relevante') + '.';
+
+    var aiSummary = BibliotecaVertexAI.ejecutarPrompt(prompt);
+
+    var totalPV = 0, totalAlDia = 0;
+    cursos.forEach(function(c) { totalPV += (c.porVencer || 0); totalAlDia += (c.alDia || 0); });
+
+    return {
+      success: true, summary: aiSummary || 'Datos cargados.',
+      kpis: {
+        cursos: kpis.totalCursos || 0,
+        colaboradores: kpis.totalColaboradores || 0,
+        vencidos: totalVenc,
+        porVencer: totalPV,
+        cumplimiento: kpis.pctCumplPromedio || 0
+      }
+    };
+  } catch (e) {
+    Logger.log('[FC-AI-SUMMARY-ERROR] ' + e.message);
+    return { success: false, error: e.message };
+  }
+}
+

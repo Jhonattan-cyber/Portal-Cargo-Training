@@ -1,0 +1,39 @@
+<!-- ======= BIBLIOTECA SECTION ======= -->
+<div id="section-biblioteca" class="module-section" style="display:none;">
+  <div class="card-container">
+    <div class="card-header" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;">
+      <div>
+        <h3 style="font-weight:700;color:#1e293b;">BIBLIOTECA DE CURSOS</h3>
+        <p style="font-size:12px;color:#94a3b8;margin-top:2px;">Fuente: BIBLIOTECA FINAL del Maestro. Filtrar por base para ver cursos aplicables.</p>
+      </div>
+      <div id="bib-totals" style="font-size:12px;color:#64748b;"></div>
+    </div>
+    
+    <!-- Filtros -->
+    <div style="padding:12px 16px;display:flex;gap:12px;align-items:center;flex-wrap:wrap;border-bottom:1px solid #e2e8f0;" data-testid="bib-filters">
+      <select id="bib-filter-base" onchange="filtrarBiblioteca()" style="padding:6px 12px;border:1px solid #d1d5db;border-radius:8px;font-size:13px;background:white;" data-testid="bib-filter-base">
+        <option value="">Todas las Bases</option>
+        <option value="CHILE">Chile</option>
+        <option value="RAMPA">Rampa</option>
+        <option value="LATAM">LATAM PHH</option>
+        <option value="NAM">NAM</option>
+      </select>
+      <input id="bib-filter-search" type="text" placeholder="Buscar curso..." oninput="filtrarBiblioteca()" style="padding:6px 12px;border:1px solid #d1d5db;border-radius:8px;font-size:13px;flex:1;min-width:200px;" data-testid="bib-filter-search" />
+      <span id="bib-count" style="font-size:12px;color:#94a3b8;"></span>
+    </div>
+    
+    <!-- Tabla -->
+    <div style="overflow-x:auto;max-height:70vh;">
+      <table id="bib-table" style="width:100%;border-collapse:collapse;font-size:13px;" data-testid="bib-table">
+        <thead style="background:#f1f5f9;position:sticky;top:0;">
+          <tr>
+            <th style="padding:10px 16px;text-align:left;font-weight:700;color:#475569;border-bottom:2px solid #e2e8f0;">Sigla</th>
+            <th style="padding:10px 16px;text-align:left;font-weight:700;color:#475569;border-bottom:2px solid #e2e8f0;">Nombre Completo</th>
+            <th style="padding:10px 16px;text-align:center;font-weight:700;color:#475569;border-bottom:2px solid #e2e8f0;">Base</th>
+          </tr>
+        </thead>
+        <tbody id="bib-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+</div>

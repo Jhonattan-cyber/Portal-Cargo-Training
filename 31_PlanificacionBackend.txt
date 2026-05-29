@@ -1,0 +1,4010 @@
+// ===============================
+// PlanificacionBackend.gs — V103 Flujo Operativo Completo
+// SELECCIONADO → PRECONFIRMADO_JEFE → CITADO → CONFIRMADO
+// (ASISTENCIA pertenece al flujo de Instructores, no a Planning)
+// ===============================
+
+// === CONFIG ===
+var PLAN_CALENDAR_SS_KEY = 'PLAN_CALENDAR_SS_ID';
+var PLAN_CALENDAR_TAB = 'EVENTOS';
+var PLAN_REG_SHEET = 'PLAN_REGISTRO';
+var PLAN_LIBROS_SHEET = 'PLAN_LIBROS';
+var PLAN_SOL_SHEET = 'PLAN_SOLICITUDES';
+var PLAN_LOG_SHEET = 'PLAN_LOG';
+var PLAN_CONFIG_CORREOS_SHEET = 'PLAN_CONFIG_CORREOS';
+
+
+// V2.5: Nota mínima aprobatoria — también accesible desde la app principal
+var _NOTA_MIN_DEFAULT_PLAN = 60;
+
+function _getNotaMinAprobatoriaPlan() {
+  try {
+    var val = PropertiesService.getScriptProperties().getProperty('NOTA_MIN_APROBATORIA');
+    if (val !== null && val !== '' && !isNaN(Number(val))) return Number(val);
+  } catch (e) {}
+  return _NOTA_MIN_DEFAULT_PLAN;
+}
+
+function setNotaMinAprobatoriaPlan(nota) {
+  var usr = getUsuarioActual();
+  if (!usr || (usr.rol || '').toUpperCase() !== 'ADMIN') return { success: false, error: 'Solo ADMIN' };
+  var n = Number(nota);
+  if (isNaN(n) || n < 0 || n > 100) return { success: false, error: 'Nota debe estar entre 0 y 100' };
+  PropertiesService.getScriptProperties().setProperty('NOTA_MIN_APROBATORIA', String(n));
+  _auditLog('[CONFIG] NOTA_MIN_APROBATORIA cambiado a ' + n + ' por ' + usr.email);
+  return { success: true, nota: n };
+}
+
+function getNotaMinConfigPlan() {
+  var nota = _getNotaMinAprobatoriaPlan();
+  return { nota: nota, isDefault: nota === _NOTA_MIN_DEFAULT_PLAN };
+}
+
+
+// === V102-TEST: MODO PRUEBA ===
+// Modos: OFF (produccion), SIMULACION (sin correos), TEST (correos a email de prueba)
+function getTestModeConfig() {
+  try {
+    var props = PropertiesService.getScriptProperties();
+    var modo = props.getProperty('PLAN_TEST_MODE') || 'OFF';
+    var emailTest = props.getProperty('PLAN_TEST_EMAIL') || '';
+    return { modo: modo, emailTest: emailTest, activo: modo !== 'OFF' };
+  } catch(e) { return { modo: 'OFF', emailTest: '', activo: false }; }
+}
+
+function setTestModeConfig(config) {
+  var usr = getUsuarioActual();
+  if (!usr) return { success: false, error: 'No autenticado' };
+  var rol = (usr.rol || '').toUpperCase();
+  if (rol !== 'ADMIN' && rol !== 'CAPACITY') return { success: false, error: 'Solo ADMIN o CAPACITY pueden cambiar el modo de prueba' };
+  var props = PropertiesService.getScriptProperties();
+  var modo = (config.modo || 'OFF').toUpperCase();
+  if (modo !== 'OFF' && modo !== 'SIMULACION' && modo !== 'TEST') modo = 'OFF';
+  props.setProperty('PLAN_TEST_MODE', modo);
+  if (config.emailTest) props.setProperty('PLAN_TEST_EMAIL', config.emailTest.trim());
+  _logPlan(usr.email, 'TEST_MODE_CAMBIO', '', 'Modo: ' + modo + (config.emailTest ? ' | Email: ' + config.emailTest : ''));
+  return { success: true, config: getTestModeConfig() };
+}
+
+// Helper: Decide si enviar correo, a quien, y si es test
+function _resolverEnvioCorreoPlan(emailReal) {
+  var cfg = getTestModeConfig();
+  if (!cfg.activo) return { enviar: true, destino: emailReal, esTest: false, modo: 'OFF' };
+  if (cfg.modo === 'SIMULACION') return { enviar: false, destino: '', esTest: true, modo: 'SIMULACION' };
+  if (cfg.modo === 'TEST') {
+    var destino = cfg.emailTest || '';
+    return { enviar: destino.indexOf('@') >= 0, destino: destino, esTest: true, modo: 'TEST' };
+  }
+  return { enviar: true, destino: emailReal, esTest: false, modo: 'OFF' };
+}
+
+// Helper: Obtener marca TEST para NOVEDAD si modo prueba activo
+function _getTestMark() {
+  var cfg = getTestModeConfig();
+  return cfg.activo ? 'TEST' : '';
+}
+
+// Limpiar registros marcados como TEST
+function limpiarRegistrosTest() {
+  var usr = getUsuarioActual();
+  if (!usr) return { success: false, error: 'No autenticado' };
+  var rol = (usr.rol || '').toUpperCase();
+  if (rol !== 'ADMIN' && rol !== 'CAPACITY') return { success: false, error: 'Solo ADMIN o CAPACITY' };
+  var ss = _getMenteSS();
+  var sh = ss.getSheetByName(PLAN_REG_SHEET);
+  if (!sh) return { success: false, error: 'Hoja no encontrada' };
+  var data = sh.getDataRange().getValues();
+  var eliminados = 0;
+  // Eliminar de abajo hacia arriba para no desplazar indices
+  for (var r = data.length - 1; r >= 1; r--) {
+    var novedad = String(data[r][19] || '').toUpperCase().trim();
+    if (novedad === 'TEST') {
+      sh.deleteRow(r + 1);
+      eliminados++;
+    }
+  }
+  _invalidateExecCache(PLAN_REG_SHEET);
+  _invalidatePlanCache();
+  _logPlan(usr.email, 'LIMPIAR_TEST', '', eliminados + ' registros TEST eliminados');
+  return { success: true, eliminados: eliminados };
+}
+
+// === PER-EXECUTION CACHE ===
+// Evita leer la misma hoja multiples veces dentro de una ejecucion GAS.
+// Se invalida automaticamente al escribir (_invalidateExecCache).
+var _execCache = {};
+
+function _readSheetCached(sheetName) {
+  if (_execCache[sheetName]) return _execCache[sheetName];
+  var ss = _getMenteSS();
+  var sh = ss.getSheetByName(sheetName);
+  if (!sh || sh.getLastRow() < 2) { _execCache[sheetName] = []; return []; }
+  _execCache[sheetName] = sh.getDataRange().getValues();
+  return _execCache[sheetName];
+}
+
+function _invalidateExecCache(sheetName) {
+  if (sheetName) { delete _execCache[sheetName]; }
+  else { _execCache = {}; }
+}
+
+// === PERF TIMER ===
+function _perfStart() { return new Date().getTime(); }
+function _perfLog(label, t0) { Logger.log('[PERF] ' + label + ': ' + (new Date().getTime() - t0) + 'ms'); }
+
+/**
+ * V4-UX: Formatear fecha cruda a formato amigable
+ * Input:  "Tue Mar 03 2026 22:00:00 GMT-0500 (hora estándar de Colombia)" o Date object o ISO string
+ * Output: "03 Mar 2026 – 10:00 PM" (formato corto y legible)
+ */
+function _formatFechaAmigable(val) {
+  if (!val) return '';
+  try {
+    var d;
+    if (val instanceof Date) {
+      d = val;
+    } else {
+      d = new Date(String(val));
+    }
+    if (isNaN(d.getTime())) return String(val).substring(0, 20); // fallback
+    var tz = Session.getScriptTimeZone() || 'America/Bogota';
+    return Utilities.formatDate(d, tz, "dd MMM yyyy '–' hh:mm a");
+  } catch(e) {
+    return String(val).substring(0, 20);
+  }
+}
+
+// V2: Helper — getActiveSpreadsheet() retorna null en web apps
+function _getMenteSS() {
+  return getSpreadsheet('MAESTRO');
+}
+
+// === HEADERS ===
+var PLAN_REG_HEADERS = [
+  'REG_ID','EVENTO_ID','SIGLA','FECHA_CLASE','INSTRUCTOR','SALA',
+  'BP','NOMBRE','EMAIL','PAIS','AREA','JEFE_DIRECTO','EMAIL_JEFE',
+  'ESTADO_CONTACTO','FECHA_ESTADO','NOTA_CONTACTO',
+  'JEFE_NOTIFICADO','FECHA_NOTIF_JEFE',
+  'ESTADO_ASISTENCIA','NOVEDAD',
+  'CAPACITY','FECHA_REGISTRO',
+  'COMENTARIO_JEFE','ORIGEN_DECISION',
+  'BASE',  // V102: Campo de base (NAM_EU, HCC, RAMPA, etc.) para lógica condicional de flujo
+  'RESULTADO',   // V2.4: APROBADO | REPROBADO | '' (vacío si no asistió o pendiente)
+  'NOTA_CURSO',  // V2.4: Calificación numérica del instructor
+  'ESTADO_CORPORATIVO',  // V2.8: '' | FORMALIZADO — cierre oficial corporativo
+  'FECHA_FORMALIZACION'  // V2.8: ISO date de formalización
+];
+var PLAN_LIBROS_HEADERS = ['LIBRO_ID','EVENTO_ID','SIGLA','FECHA_CLASE','TIPO','URL','PARTICIPANTES','GENERADO_POR','FECHA_GENERACION'];
+var PLAN_SOL_HEADERS = ['SOL_ID','EVENTO_ID','SIGLA','FECHA_CLASE','TIPO_CAMBIO','DETALLE','SOLICITADO_POR','FECHA_SOLICITUD','ESTADO','RESUELTO_POR','FECHA_RESOLUCION','NOTA_ADMIN'];
+var PLAN_LOG_HEADERS = ['TS','USUARIO','ACCION','EVENTO_ID','DETALLE'];
+var PLAN_CONFIG_CORREOS_HEADERS = ['JEFE_NOMBRE','JEFE_EMAIL','JEFE_BACKUP_EMAIL','PLANNING_CC','ACTIVO'];
+
+// === ESTADOS ===
+// V103: Flujo Planning: SELECCIONADO → PRE_CONFIRMADO (jefe aprueba) → CONFIRMADO (Planning asigna)
+// ASISTIO/NO_ASISTIO pertenecen al flujo de Instructores (App 2), no a Planning
+// Estados legacy (PRECONFIRMADO_JEFE, CITADO, NO_CONTACTADO) se mantienen para datos historicos
+var ESTADOS_CONTACTO = {
+  'SELECCIONADO':        { color: '#f59e0b', label: 'Seleccionado', order: 1 },
+  'PRE_CONFIRMADO':      { color: '#8b5cf6', label: 'Pre-confirmado', order: 2 },
+  'PRECONFIRMADO_JEFE':  { color: '#8b5cf6', label: 'Pre-confirmado', order: 2, legacy: true },
+  'CITADO':              { color: '#3b82f6', label: 'En proceso', order: 3, legacy: true },
+  'CONFIRMADO':          { color: '#22c55e', label: 'Confirmado', order: 4 },
+  'NO_CONTACTADO':       { color: '#94a3b8', label: 'En proceso', order: 0, legacy: true },
+  'RECHAZADO':           { color: '#ef4444', label: 'Rechazado', order: -1 }
+};
+
+// V102: Mapeo de display — PRE_CONFIRMADO como paso intermedio visible
+var ESTADOS_DISPLAY = {
+  'SELECCIONADO':        { color: '#f59e0b', label: 'Seleccionado', grupo: 'SELECCIONADO' },
+  'PRE_CONFIRMADO':      { color: '#8b5cf6', label: 'Pre-confirmado', grupo: 'PRE_CONFIRMADO' },
+  'PRECONFIRMADO_JEFE':  { color: '#8b5cf6', label: 'Pre-confirmado', grupo: 'PRE_CONFIRMADO' },
+  'CITADO':              { color: '#3b82f6', label: 'Pre-confirmado', grupo: 'PRE_CONFIRMADO' },
+  'NO_CONTACTADO':       { color: '#94a3b8', label: 'Pre-confirmado', grupo: 'PRE_CONFIRMADO' },
+  'CONFIRMADO':          { color: '#22c55e', label: 'Confirmado',     grupo: 'CONFIRMADO' },
+  'RECHAZADO':           { color: '#ef4444', label: 'Rechazado',      grupo: 'RECHAZADO' }
+};
+
+// V103: ESTADOS_ASISTENCIA removido de Planning — pertenece al flujo de Instructores (App 2)
+
+// V2.8: ESTADOS OPERATIVOS — Capa post-curso (asistencia/resultado/formalizacion)
+// Calcula el estado compuesto visible para Planificacion
+var ESTADOS_OPERATIVOS = {
+  'FORMALIZADO':        { color: '#059669', label: 'Formalizado',        bg: '#d1fae5', icon: 'check-double' },
+  'APROBADO_PEND_FORM': { color: '#16a34a', label: 'Aprobado (Pend. Form.)', bg: '#dcfce7', icon: 'check-circle' },
+  'REPROBADO':          { color: '#dc2626', label: 'Reprobado',          bg: '#fee2e2', icon: 'x-circle' },
+  'NO_ASISTIO':         { color: '#ea580c', label: 'No asistio',         bg: '#fff7ed', icon: 'user-minus' },
+  'ASISTIO_PEND_EVAL':  { color: '#0284c7', label: 'Asistio (Pend. Eval.)', bg: '#e0f2fe', icon: 'clock' },
+  'PRE_CURSO':          { color: '#64748b', label: '',                   bg: '', icon: '' }  // Sin dato post-curso — usar ESTADO_CONTACTO
+};
+
+/**
+ * V2.8: Calcula el estado operativo compuesto de un registro
+ * Combina ESTADO_ASISTENCIA + RESULTADO + ESTADO_CORPORATIVO
+ * @param {Object} opts - { asistencia, resultado, corporativo }
+ * @returns {string} Key de ESTADOS_OPERATIVOS
+ */
+function _getEstadoOperativo(asistencia, resultado, corporativo) {
+  var asist = String(asistencia || '').toUpperCase().trim();
+  var res = String(resultado || '').toUpperCase().trim();
+  var corp = String(corporativo || '').toUpperCase().trim();
+
+  if (asist === 'ASISTIO') {
+    if (res === 'APROBADO') {
+      return corp === 'FORMALIZADO' ? 'FORMALIZADO' : 'APROBADO_PEND_FORM';
+    } else if (res === 'REPROBADO') {
+      return 'REPROBADO';
+    } else {
+      return 'ASISTIO_PEND_EVAL';
+    }
+  } else if (asist === 'NO_ASISTIO') {
+    return 'NO_ASISTIO';
+  }
+  return 'PRE_CURSO'; // Sin datos post-curso
+}
+
+/**
+ * V2.8: Determina si un registro con estado operativo permite reprogramacion
+ * APROBADO y FORMALIZADO bloquean. REPROBADO y NO_ASISTIO permiten.
+ */
+function _estadoOperativoBloqueaReprogramacion(estOp) {
+  return estOp === 'FORMALIZADO' || estOp === 'APROBADO_PEND_FORM' || estOp === 'ASISTIO_PEND_EVAL';
+}
+
+// V102: Transiciones actualizadas — NAM usa PRE_CONFIRMADO, otras bases pueden ir directo a CONFIRMADO
+var TRANSICIONES_VALIDAS = {
+  'SELECCIONADO':       ['PRE_CONFIRMADO', 'CONFIRMADO', 'RECHAZADO'],
+  'PRE_CONFIRMADO':     ['CONFIRMADO', 'RECHAZADO'],
+  'PRECONFIRMADO_JEFE': ['PRE_CONFIRMADO', 'CONFIRMADO', 'RECHAZADO'],
+  'CITADO':             ['PRE_CONFIRMADO', 'CONFIRMADO', 'RECHAZADO'],
+  'NO_CONTACTADO':      ['PRE_CONFIRMADO', 'SELECCIONADO'],
+  'CONFIRMADO':         ['PRE_CONFIRMADO', 'RECHAZADO'],
+  'RECHAZADO':          ['PRE_CONFIRMADO', 'CONFIRMADO']
+};
+
+// V2: Status labels para Forecast
+var _STATUS_LABEL = {
+  'VENCIDO_REAL': 'Vencido', 'VENCIDO': 'Vencido', 'VIGENTE': 'Vigente',
+  'AL_DIA': 'Al dia', 'PROXIMO': 'Proximo', 'CRITICO': 'Critico',
+  'PROGRAMAR': 'Programar', 'PROGRAMADO': 'Programado',
+  'SIN_CURSO': 'Sin curso', 'NO_REQUERIDO': 'No requerido'
+};
+function _cleanStatus(raw) {
+  if (!raw) return '';
+  var upper = String(raw).toUpperCase().trim();
+  return _STATUS_LABEL[upper] || String(raw).replace(/_/g, ' ');
+}
+
+function getEstadosContacto() {
+  var arr = [];
+  for (var k in ESTADOS_CONTACTO) {
+    var display = ESTADOS_DISPLAY[k] || ESTADOS_CONTACTO[k];
+    arr.push({ key: k, label: display.label, color: display.color, order: ESTADOS_CONTACTO[k].order, grupo: display.grupo || k, legacy: ESTADOS_CONTACTO[k].legacy || false });
+  }
+  arr.sort(function(a,b) { return a.order - b.order; });
+  return arr;
+}
+
+function getTransicionesValidas(estadoActual) {
+  return TRANSICIONES_VALIDAS[estadoActual] || [];
+}
+
+// === SETUP HOJAS ===
+function _ensurePlanSheets() {
+  var ss = _getMenteSS();
+  var sheets = [
+    { name: PLAN_REG_SHEET, headers: PLAN_REG_HEADERS },
+    { name: PLAN_LIBROS_SHEET, headers: PLAN_LIBROS_HEADERS },
+    { name: PLAN_SOL_SHEET, headers: PLAN_SOL_HEADERS },
+    { name: PLAN_LOG_SHEET, headers: PLAN_LOG_HEADERS },
+    { name: PLAN_CONFIG_CORREOS_SHEET, headers: PLAN_CONFIG_CORREOS_HEADERS }
+  ];
+  for (var i = 0; i < sheets.length; i++) {
+    var sh = ss.getSheetByName(sheets[i].name);
+    if (!sh) {
+      sh = ss.insertSheet(sheets[i].name);
+      sh.getRange(1, 1, 1, sheets[i].headers.length).setValues([sheets[i].headers]);
+      sh.setFrozenRows(1);
+      sh.getRange(1, 1, 1, sheets[i].headers.length)
+        .setBackground('#1B0088').setFontColor('white').setFontWeight('bold');
+    } else {
+      // V3: Agregar columnas nuevas a hojas existentes sin alterar datos
+      var existingCols = sh.getLastColumn();
+      var expectedCols = sheets[i].headers.length;
+      if (existingCols < expectedCols) {
+        var newHeaders = sheets[i].headers.slice(existingCols);
+        sh.getRange(1, existingCols + 1, 1, newHeaders.length).setValues([newHeaders]);
+        sh.getRange(1, existingCols + 1, 1, newHeaders.length)
+          .setBackground('#1B0088').setFontColor('white').setFontWeight('bold');
+        Logger.log('[V3] Columnas agregadas a ' + sheets[i].name + ': ' + newHeaders.join(', '));
+      }
+    }
+  }
+}
+
+// === CONFIG: Calendar Spreadsheet ID ===
+var PLAN_DEFAULT_SS_ID = '10JKGcAyZizBC0NXcY0TfuUrlZd5aEZdBDv2eKowngs4';
+
+function getPlanCalendarSSId() {
+  var stored = PropertiesService.getScriptProperties().getProperty(PLAN_CALENDAR_SS_KEY) || '';
+  return stored || PLAN_DEFAULT_SS_ID;
+}
+function setPlanCalendarSSId(ssId) {
+  var usr = getUsuarioActual();
+  if (!usr || (usr.rol || '').toUpperCase() !== 'ADMIN') return { success: false, error: 'Solo ADMIN' };
+  PropertiesService.getScriptProperties().setProperty(PLAN_CALENDAR_SS_KEY, ssId || '');
+  return { success: true };
+}
+
+// === LEER EVENTOS (con cache) ===
+function getEventosCalendario(filtros) {
+  var ssId = getPlanCalendarSSId();
+  if (!ssId) return { success: false, error: 'Spreadsheet del calendario no configurado' };
+  try {
+    var mesAnio = filtros && filtros.mesAnio ? filtros.mesAnio : '';
+    var cacheKey = 'PLAN_EVENTOS_' + ssId + '_' + mesAnio;
+    var cache = CacheService.getScriptCache();
+    var cached = cache.get(cacheKey);
+    if (cached) {
+      var parsed = JSON.parse(cached);
+      var siglaFiltro = filtros && filtros.sigla ? filtros.sigla.toUpperCase() : '';
+      var instructorFiltro = filtros && filtros.instructor ? filtros.instructor.toUpperCase() : '';
+      if (siglaFiltro || instructorFiltro) {
+        parsed.eventos = parsed.eventos.filter(function(ev) {
+          if (siglaFiltro && ev.sigla.toUpperCase().indexOf(siglaFiltro) < 0) return false;
+          if (instructorFiltro && ev.instructor.toUpperCase().indexOf(instructorFiltro) < 0) return false;
+          return true;
+        });
+        parsed.total = parsed.eventos.length;
+      }
+      return parsed;
+    }
+    var ss = SpreadsheetApp.openById(ssId);
+    var sh = ss.getSheetByName(PLAN_CALENDAR_TAB);
+    if (!sh) return { success: false, error: 'Hoja EVENTOS no encontrada en el calendario' };
+    var data = sh.getDataRange().getValues();
+    if (data.length < 2) return { success: true, eventos: [] };
+
+    var headers = data[0];
+    var idx = {};
+    for (var c = 0; c < headers.length; c++) {
+      var h = String(headers[c]).toUpperCase().trim();
+      if (h === 'ID') idx.id = c;
+      else if (h === 'FECHA') idx.fecha = c;
+      else if (h === 'TITULO') idx.titulo = c;
+      else if (h === 'TIPO') idx.tipo = c;
+      else if (h === 'MODALIDAD') idx.modalidad = c;
+      else if (h === 'INSTRUCTOR') idx.instructor = c;
+      else if (h === 'HORA_INICIO') idx.horaInicio = c;
+      else if (h === 'HORA_FIN') idx.horaFin = c;
+      else if (h === 'PARTICIPANTES') idx.participantes = c;
+      else if (h === 'SIGLA') idx.sigla = c;
+      else if (h === 'ESTADO') idx.estado = c;
+      else if (h === 'SALA') idx.sala = c;
+      else if (h === 'NOTA') idx.nota = c;
+      else if (h === 'DIA') idx.dia = c;
+    }
+    var siglaFiltro = filtros && filtros.sigla ? filtros.sigla.toUpperCase() : '';
+    var instructorFiltro = filtros && filtros.instructor ? filtros.instructor.toUpperCase() : '';
+    var allEventos = [];
+    for (var r = 1; r < data.length; r++) {
+      var row = data[r];
+      var estado = String(row[idx.estado] || '').toUpperCase();
+      if (estado !== 'ACTIVO') continue;
+      var fechaRaw = row[idx.fecha];
+      var fechaStr = '';
+      // V105-FIX: Usar timezone del proyecto (America/Bogota) para evitar desfase de +13min
+      // El bug se producia porque 'America/Santiago' aplicaba LMT de 1899 (-04:42:46) vs Bogota (-04:56:16)
+      var _tz = Session.getScriptTimeZone() || 'America/Bogota';
+      if (fechaRaw instanceof Date) fechaStr = Utilities.formatDate(fechaRaw, _tz, 'yyyy-MM-dd');
+      else fechaStr = String(fechaRaw || '');
+      if (mesAnio && fechaStr.substring(0, 7) !== mesAnio) continue;
+      var horaI = row[idx.horaInicio], horaF = row[idx.horaFin];
+      if (horaI instanceof Date) horaI = Utilities.formatDate(horaI, _tz, 'HH:mm'); else horaI = String(horaI || '');
+      if (horaF instanceof Date) horaF = Utilities.formatDate(horaF, _tz, 'HH:mm'); else horaF = String(horaF || '');
+      allEventos.push({
+        id: String(row[idx.id] || ''), fecha: fechaStr, titulo: String(row[idx.titulo] || ''),
+        tipo: String(row[idx.tipo] || ''), modalidad: String(row[idx.modalidad] || ''),
+        instructor: String(row[idx.instructor] || ''), horaInicio: horaI, horaFin: horaF,
+        participantes: String(row[idx.participantes] || ''), sigla: String(row[idx.sigla] || ''),
+        estado: estado, sala: String(row[idx.sala] || ''), nota: String(row[idx.nota] || ''),
+        dia: String(row[idx.dia] || '')
+      });
+    }
+    // Cache all events (before client-side filters) — V102-PERF: TTL 10min (eventos cambian poco)
+    try { cache.put(cacheKey, JSON.stringify({ success: true, eventos: allEventos, total: allEventos.length }), 600); } catch(ce) {}
+    // Apply client-side filters
+    var eventos = allEventos;
+    if (siglaFiltro || instructorFiltro) {
+      eventos = allEventos.filter(function(ev) {
+        if (siglaFiltro && ev.sigla.toUpperCase().indexOf(siglaFiltro) < 0) return false;
+        if (instructorFiltro && ev.instructor.toUpperCase().indexOf(instructorFiltro) < 0) return false;
+        return true;
+      });
+    }
+    return { success: true, eventos: eventos, total: eventos.length };
+  } catch (e) {
+    return { success: false, error: 'Error leyendo calendario: ' + e.message };
+  }
+}
+
+// === BASES DISPONIBLES ===
+function _invalidatePlanCache() {
+  try {
+    var cache = CacheService.getScriptCache();
+    cache.remove('PLAN_DASHBOARD');
+    cache.remove('PLAN_BASE_NAM_V5');
+    // V4-PERF: Limpiar caches de sugerencias al modificar registros
+    // No podemos enumerar claves, pero las invalidamos al registrar seleccion
+  } catch(e) {}
+}
+
+function getBasesDisponiblesPlan() {
+  var todas = [
+    // { key: 'HCC', label: 'HCC (Priorizados)' },
+    // { key: 'LATAM_SUR', label: 'LATAM PHH (Regional)' },
+    // { key: 'CL', label: 'Chile' },
+    // { key: 'RAMPA', label: 'Rampa' },
+    { key: 'NAM_EU', label: 'NAM & EU' }
+  ];
+  return todas;
+}
+
+// === BUSCAR EMPLEADOS ===
+// V7: Helper — convierte map de cursos en array serializable
+function _buildCursosArray(cursosMap) {
+  var arr = [];
+  for (var sigla in cursosMap) {
+    var c = cursosMap[sigla];
+    arr.push({
+      sigla: sigla,
+      nombre: c.nombre || sigla,
+      status: _cleanStatus(c.status || ''),
+      dias: c.dias,
+      vencimiento: c.vencimiento || ''
+    });
+  }
+  // Ordenar por dias (mas urgente primero)
+  arr.sort(function(a, b) {
+    var da = (a.dias !== undefined && a.dias !== '') ? Number(a.dias) : 9999;
+    var db = (b.dias !== undefined && b.dias !== '') ? Number(b.dias) : 9999;
+    return da - db;
+  });
+  return arr;
+}
+
+function buscarEmpleadosPlan(base, filtros) {
+  try {
+    var usr = getUsuarioActual();
+    var usuarioInfo = {
+      nombre: usr ? (usr.nombre || '') : '', email: usr ? (usr.email || '') : '',
+      role: 'ADMIN', pais: '', area: '', bp: '', baseOrigen: ''
+    };
+    var resultado = getForecastDataByBase(base, 365, usuarioInfo, 'PLAN_SINGLE');
+    Logger.log('[PLAN-SEARCH] base=' + base + ' forecast=' + (resultado && resultado.forecast ? resultado.forecast.length : 'null'));
+    if (!resultado) return { success: false, error: 'Sin respuesta del Forecast para base: ' + base };
+    if (resultado.error) return { success: false, error: 'Error Forecast [' + base + ']: ' + resultado.error };
+    var rows = resultado.forecast || [];
+    if (!rows.length) return { success: true, empleados: [], total: 0 };
+
+    var textoFiltro = (filtros && filtros.texto ? filtros.texto : '').toUpperCase().trim();
+    var siglaFiltro = (filtros && filtros.sigla ? filtros.sigla : '').toUpperCase().trim();
+    var siglaNorm = siglaFiltro.replace(/[\s\-_\.]+/g, '');  // V3: normalize "TSA DOC" → "TSADOC"
+    var soloVencidos = filtros && filtros.soloVencidos;
+    var conTodosLosCursos = filtros && filtros.conTodosLosCursos;
+
+    function _primerJefe(r) {
+      var niveles = [r.jefeDirecto, r.jefeArea, r.jefeDepartamento, r.subgerente, r.gerente, r.gerenteSr, r.director];
+      for (var n = 0; n < niveles.length; n++) {
+        var val = (niveles[n] || '').trim();
+        if (val && val !== '-' && val !== 'N/A' && val !== '#N/A' && val.length > 1) return val;
+      }
+      return '';
+    }
+
+    var porBP = {};
+    for (var i = 0; i < rows.length; i++) {
+      var r = rows[i];
+      var bp = String(r.bp || '').trim();
+      if (!bp) continue;
+      if (!porBP[bp]) {
+        porBP[bp] = {
+          bp: bp, nombre: r.nombre || '', correo: r.correo || '',
+          jefe: _primerJefe(r), emailJefe: '',
+          area: r.area || '', pais: r.pais || '',
+          posicion: r.posicion || '', cursos: {}
+        };
+      }
+      var cursoSigla = String(r.curso || r.sigla || '').toUpperCase().trim();
+      if (cursoSigla) {
+        porBP[bp].cursos[cursoSigla] = {
+          nombre: r.nombreCurso || r.curso || cursoSigla,
+          status: r.statusReal || r.status || '',
+          dias: r.diasRestantes,
+          vencimiento: r.fechaVencimiento || r.vencimiento || ''
+        };
+      }
+    }
+
+    // V2-FIX: Resolver emailJefe usando mapa nombre→correo de los mismos empleados
+    var _nombreToCorreo = {};
+    for (var _k in porBP) {
+      var _e = porBP[_k];
+      var _nom = (_e.nombre || '').trim().toUpperCase();
+      if (_nom && _e.correo && _e.correo.indexOf('@') >= 0) {
+        _nombreToCorreo[_nom] = _e.correo;
+      }
+    }
+    for (var _k2 in porBP) {
+      var _emp = porBP[_k2];
+      if (!_emp.emailJefe && _emp.jefe) {
+        var _jefeUp = _emp.jefe.trim().toUpperCase();
+        if (_nombreToCorreo[_jefeUp]) {
+          _emp.emailJefe = _nombreToCorreo[_jefeUp];
+        }
+      }
+    }
+
+    var empleados = [];
+    var bps = Object.keys(porBP);
+    for (var j = 0; j < bps.length; j++) {
+      var emp = porBP[bps[j]];
+      if (textoFiltro && emp.nombre.toUpperCase().indexOf(textoFiltro) < 0 && emp.bp.indexOf(textoFiltro) < 0) continue;
+      var statusCurso = '', diasVencido = '', vencimientoFecha = '', cursoNombre = '';
+      if (siglaFiltro) {
+        var cursoMatch = null;
+        // V3: Match normalizado — "TSA DOC" matchea "TSADOC" y viceversa
+        for (var ck in emp.cursos) {
+          var ckNorm = ck.replace(/[\s\-_\.]+/g, '');
+          if (ckNorm.indexOf(siglaNorm) >= 0 || siglaNorm.indexOf(ckNorm) >= 0 || ck.indexOf(siglaFiltro) >= 0) {
+            cursoMatch = emp.cursos[ck]; cursoNombre = ck; break;
+          }
+        }
+        if (!cursoMatch) continue;
+        statusCurso = cursoMatch.status; diasVencido = cursoMatch.dias; vencimientoFecha = cursoMatch.vencimiento;
+        if (soloVencidos) {
+          var esVenc = (cursoMatch.dias !== undefined && Number(cursoMatch.dias) <= 0) || (cursoMatch.status || '').toUpperCase().indexOf('VENCID') >= 0;
+          if (!esVenc) continue;
+        }
+      } else {
+        var minDias = 99999, cursoCritico = null, cursoCriticoKey = '';
+        for (var ck2 in emp.cursos) {
+          var c = emp.cursos[ck2];
+          var d = (c.dias !== undefined && c.dias !== '') ? Number(c.dias) : 99999;
+          if (d < minDias) { minDias = d; cursoCritico = c; cursoCriticoKey = ck2; }
+        }
+        if (cursoCritico) { statusCurso = cursoCritico.status; diasVencido = cursoCritico.dias; vencimientoFecha = cursoCritico.vencimiento; cursoNombre = cursoCriticoKey; }
+        if (soloVencidos && cursoCritico) {
+          var esV = (cursoCritico.dias !== undefined && Number(cursoCritico.dias) <= 0) || (cursoCritico.status || '').toUpperCase().indexOf('VENCID') >= 0;
+          if (!esV) continue;
+        }
+      }
+      empleados.push({
+        bp: emp.bp, nombre: emp.nombre, correo: emp.correo,
+        jefe: emp.jefe, emailJefe: emp.emailJefe,
+        area: emp.area, pais: emp.pais, posicion: emp.posicion,
+        statusCurso: _cleanStatus(statusCurso), diasVencido: diasVencido,
+        vencimiento: vencimientoFecha, cursoMasCritico: cursoNombre,
+        cursos: conTodosLosCursos ? _buildCursosArray(emp.cursos) : undefined
+      });
+    }
+    empleados.sort(function(a, b) {
+      var da = a.diasVencido !== undefined && a.diasVencido !== '' ? Number(a.diasVencido) : 9999;
+      var db = b.diasVencido !== undefined && b.diasVencido !== '' ? Number(b.diasVencido) : 9999;
+      return da - db;
+    });
+    return { success: true, empleados: empleados, total: empleados.length };
+  } catch (e) {
+    return { success: false, error: 'Error buscando empleados: ' + e.message };
+  }
+}
+
+/**
+ * V3: Sugerencias inteligentes para un curso
+ * Reutilizable: modal de seleccion, automatizaciones futuras, vista gestion
+ * @param {string} sigla - Sigla del curso
+ * @param {string[]} bases - Bases a consultar (ej: ['LATAM','RAMPA'])
+ * @returns {Object} { success, sugeridos, resumen }
+ */
+function getSugerenciasCurso(sigla, bases, forceRefresh) {
+  var _t0 = _perfStart();
+  if (!sigla) return { success: false, error: 'Sigla requerida' };
+  if (!bases || !bases.length) bases = ['LATAM', 'CHILE', 'RAMPA', 'NAM'];
+  // V4-PERF: Cache con CacheService (TTL 10 min) por sigla+bases
+  var sortedBases = bases.slice().sort();
+  var cacheKey = 'PLAN_SUG_' + sigla.toUpperCase().replace(/\s+/g, '') + '_' + sortedBases.join(',');
+  var cache = CacheService.getScriptCache();
+  
+  // Condicionar la lectura de la caché al flag del Frontend
+  if (!forceRefresh) {
+    try {
+      var cached = cache.get(cacheKey);
+      if (cached) {
+        _perfLog('getSugerenciasCurso (CACHE HIT)', _t0);
+        return JSON.parse(cached);
+      }
+    } catch(ce) {}
+  }
+
+  var todosEmpleados = [];
+  var erroresBases = [];
+
+  for (var b = 0; b < bases.length; b++) {
+    var base = bases[b];
+    try {
+      var resultado = buscarEmpleadosPlan(base, { sigla: sigla, texto: '', soloVencidos: false });
+      if (resultado && resultado.success && resultado.empleados) {
+        for (var e = 0; e < resultado.empleados.length; e++) {
+          resultado.empleados[e].base = base;
+        }
+        todosEmpleados = todosEmpleados.concat(resultado.empleados);
+      } else if (resultado && resultado.error) {
+        erroresBases.push(base + ': ' + resultado.error);
+      }
+    } catch(ex) {
+      erroresBases.push(base + ': ' + ex.message);
+    }
+  }
+
+  // Deduplicar por BP (un mismo empleado puede estar en varias bases)
+  var porBP = {};
+  for (var i = 0; i < todosEmpleados.length; i++) {
+    var emp = todosEmpleados[i];
+    var bp = String(emp.bp || '').trim();
+    if (!bp) continue;
+    if (!porBP[bp] || _urgenciaPuntaje(emp) < _urgenciaPuntaje(porBP[bp])) {
+      porBP[bp] = emp;
+    }
+  }
+
+  var empleados = [];
+  for (var k in porBP) empleados.push(porBP[k]);
+
+  // V2.8: Cross-check con PLAN_REGISTRO — excluir aprobados/formalizados para esta SIGLA
+  var planData = _readSheetCached(PLAN_REG_SHEET);
+  var aprobadosPorBP = {};  // BP → estado operativo (para excluir o marcar)
+  var siglaUpper = sigla.toUpperCase().replace(/\s+/g, '');
+  for (var px = 1; px < planData.length; px++) {
+    var pSigla = String(planData[px][2]).trim().toUpperCase().replace(/\s+/g, '');
+    if (pSigla !== siglaUpper) continue;
+    var pBP = String(planData[px][6]).trim();
+    var pAsist = String(planData[px][18] || '').toUpperCase();
+    var pRes = String(planData[px][25] || '').toUpperCase();
+    var pCorp = planData[px][27] !== undefined ? String(planData[px][27] || '').toUpperCase() : '';
+    var pEstOp = _getEstadoOperativo(pAsist, pRes, pCorp);
+
+    // Solo trackear estados que bloquean o informan
+    if (pEstOp === 'FORMALIZADO' || pEstOp === 'APROBADO_PEND_FORM' || pEstOp === 'ASISTIO_PEND_EVAL') {
+      aprobadosPorBP[pBP] = pEstOp;
+    } else if (pEstOp === 'REPROBADO') {
+      aprobadosPorBP[pBP] = 'REPROBADO'; // No bloquea, pero informa
+    } else if (pEstOp === 'NO_ASISTIO') {
+      aprobadosPorBP[pBP] = 'NO_ASISTIO'; // No bloquea, pero informa
+    } else {
+      // Pre-curso: marcar como programado (SELECCIONADO, CONFIRMADO, etc.)
+      var pEstContacto = String(planData[px][13]).toUpperCase();
+      if (pEstContacto !== 'RECHAZADO' && pEstContacto !== 'CANCELADO') {
+        if (!aprobadosPorBP[pBP]) aprobadosPorBP[pBP] = 'PROGRAMADO'; // Ya esta en proceso
+      }
+    }
+  }
+
+  // Filtrar: excluir aprobados/formalizados, marcar reprobados
+  var empleadosFiltrados = [];
+  var excluidos = 0;
+  for (var ef = 0; ef < empleados.length; ef++) {
+    var empBP = String(empleados[ef].bp || '').trim();
+    var estPlan = aprobadosPorBP[empBP];
+    if (estPlan === 'FORMALIZADO' || estPlan === 'APROBADO_PEND_FORM' || estPlan === 'ASISTIO_PEND_EVAL') {
+      excluidos++;
+      continue; // No sugerir — ya cumplio o en proceso post-curso
+    }
+    if (estPlan === 'REPROBADO') {
+      empleados[ef]._planStatus = 'REPROBADO'; // Marcar para UI: "Requiere repetir"
+    } else if (estPlan === 'NO_ASISTIO') {
+      empleados[ef]._planStatus = 'NO_ASISTIO'; // Marcar para UI: "No asistio previamente"
+    } else if (estPlan === 'PROGRAMADO') {
+      empleados[ef]._planStatus = 'PROGRAMADO'; // Ya en proceso
+    }
+    empleadosFiltrados.push(empleados[ef]);
+  }
+  empleados = empleadosFiltrados;
+
+  // Clasificar por urgencia
+  var vencidos = [], porVencer = [], habilitados = [], sinDato = [];
+  for (var j = 0; j < empleados.length; j++) {
+    var emp2 = empleados[j];
+    var dias = emp2.diasVencido;
+    var st = String(emp2.statusCurso || '').toUpperCase();
+    if (dias !== undefined && dias !== '' && Number(dias) <= 0) {
+      emp2.urgencia = 'VENCIDO';
+      vencidos.push(emp2);
+    } else if (dias !== undefined && dias !== '' && Number(dias) <= 90) {
+      emp2.urgencia = 'POR_VENCER';
+      porVencer.push(emp2);
+    } else if (st.indexOf('VENCID') >= 0 || st === 'SIN_FECHA_VENCIDO') {
+      emp2.urgencia = 'VENCIDO';
+      vencidos.push(emp2);
+    } else if (st.indexOf('HABILIT') >= 0 || st.indexOf('VIGENT') >= 0) {
+      emp2.urgencia = 'HABILITADO';
+      habilitados.push(emp2);
+    } else {
+      emp2.urgencia = 'SIN_DATO';
+      sinDato.push(emp2);
+    }
+  }
+
+  // Ordenar cada grupo por dias restantes
+  vencidos.sort(function(a,b) { return (Number(a.diasVencido) || -9999) - (Number(b.diasVencido) || -9999); });
+  porVencer.sort(function(a,b) { return (Number(a.diasVencido) || 9999) - (Number(b.diasVencido) || 9999); });
+
+  // Combinar: vencidos primero, luego por vencer, luego sin dato, luego habilitados
+  var sugeridos = vencidos.concat(porVencer).concat(sinDato).concat(habilitados);
+
+  var resumen = {
+    total: sugeridos.length,
+    vencidos: vencidos.length,
+    porVencer: porVencer.length,
+    habilitados: habilitados.length,
+    sinDato: sinDato.length,
+    basesConsultadas: bases,
+    errores: erroresBases,
+    excluidosAprobados: excluidos  // V2.8: Personas excluidas por ya haber aprobado/formalizado
+  };
+
+  var result = { success: true, sugeridos: sugeridos, resumen: resumen };
+
+  // V4-PERF: Guardar en cache (TTL 600s = 10 min). try/catch por limite 100KB
+  try { cache.put(cacheKey, JSON.stringify(result), 600); } catch(ce) {
+    Logger.log('[PERF] Cache put fallo para sugerencias (posible >100KB): ' + ce.message);
+  }
+
+  _perfLog('getSugerenciasCurso', _t0);
+  return result;
+}
+
+function _urgenciaPuntaje(emp) {
+  var dias = emp.diasVencido;
+  if (dias !== undefined && dias !== '') return Number(dias);
+  return 9999;
+}
+
+// ============================
+// FLUJO CORE: REGISTRO
+// ============================
+
+// 1. REGISTRAR SELECCION (estado inicial: SELECCIONADO)
+function registrarSeleccion(eventoId, eventoInfo, empleados) {
+  if (!eventoId || !empleados || !empleados.length) return { success: false, error: 'eventoId y empleados son requeridos' };
+  _ensurePlanSheets();
+  var usr = getUsuarioActual();
+  var actor = usr ? (usr.email || usr.nombre) : 'desconocido';
+  var now = new Date().toISOString();
+  var ss = _getMenteSS();
+  var sh = ss.getSheetByName(PLAN_REG_SHEET);
+  if (!sh) return { success: false, error: 'Hoja PLAN_REGISTRO no encontrada' };
+
+  var siglaEvento = String(eventoInfo.sigla || '').trim().toUpperCase();
+
+  // Control de Duplicidad V2: Verificar por ID_CURSO (SIGLA) + BP en TODA la hoja
+  // Permite re-entrada solo si el estado anterior es NO_ASISTIO, CANCELADO o RECHAZADO
+  // V2.8: Tambien permite re-entrada si REPROBADO (debe repetir curso)
+  // V2.8: BLOQUEA si APROBADO/FORMALIZADO (ya cumplio, no reprogramar)
+  // V4-PERF: usar _readSheetCached para evitar re-lectura innecesaria
+  var ESTADOS_PERMITEN_REENTRADA = { 'NO_ASISTIO': true, 'CANCELADO': true, 'RECHAZADO': true };
+  var existentesPorEvento = {}; // BP → true (mismo evento, cualquier estado)
+  var bloqueadosPorCurso = {};  // BP → { estado, eventoId } (mismo curso, estado activo)
+  var historialRechazo = {};    // V3: BP → { comentario, fecha, eventoId } para advertencias
+
+  var prData = _readSheetCached(PLAN_REG_SHEET);
+  for (var x = 1; x < prData.length; x++) {
+      var regSigla = String(prData[x][2]).trim().toUpperCase();
+      var regBP = String(prData[x][6]).trim();
+      var regEvento = String(prData[x][1]).trim();
+      var regEstadoContacto = String(prData[x][13]).trim().toUpperCase();
+      var regEstadoAsistencia = String(prData[x][18]).trim().toUpperCase();
+      var regResultado = prData[x][25] !== undefined ? String(prData[x][25] || '').toUpperCase() : '';
+      var regCorporativo = prData[x][27] !== undefined ? String(prData[x][27] || '').toUpperCase() : '';
+
+      // Track duplicados exactos del mismo evento
+      if (regEvento === eventoId) {
+        existentesPorEvento[regBP] = true;
+      }
+
+      // Track duplicados por SIGLA (ID_CURSO) en cualquier evento
+      if (regSigla === siglaEvento && regBP) {
+        // V3: Guardar historial de rechazo para advertencias
+        if (regEstadoContacto === 'RECHAZADO') {
+          historialRechazo[regBP] = {
+            comentario: String(prData[x][22] || prData[x][15] || ''),
+            fecha: String(prData[x][14] || ''),
+            eventoId: regEvento,
+            origenDecision: String(prData[x][23] || '')
+          };
+        }
+
+        // V2.8: Calcular estado operativo para anti-reprogramacion inteligente
+        var regEstOp = _getEstadoOperativo(regEstadoAsistencia, regResultado, regCorporativo);
+
+        // V2.8: Si ya aprobo/formalizo → BLOQUEAR SIEMPRE (no reprogramar)
+        if (regEstOp === 'FORMALIZADO' || regEstOp === 'APROBADO_PEND_FORM') {
+          bloqueadosPorCurso[regBP] = {
+            estado: regEstadoContacto,
+            asistencia: regEstadoAsistencia,
+            resultado: regResultado,
+            estadoOperativo: regEstOp,
+            eventoId: regEvento,
+            razon: regEstOp === 'FORMALIZADO' ? 'Ya formalizado' : 'Ya aprobo (pend. formalizacion)'
+          };
+          continue;
+        }
+
+        // V2.8: Si asistio pero pendiente evaluacion → bloquear
+        if (regEstOp === 'ASISTIO_PEND_EVAL') {
+          bloqueadosPorCurso[regBP] = {
+            estado: regEstadoContacto,
+            asistencia: regEstadoAsistencia,
+            estadoOperativo: regEstOp,
+            eventoId: regEvento,
+            razon: 'Asistio, pendiente evaluacion'
+          };
+          continue;
+        }
+
+        // V2.8: Si reprobo o no asistio → PERMITIR re-entrada (debe repetir)
+        if (regEstOp === 'REPROBADO' || regEstOp === 'NO_ASISTIO') {
+          continue; // No bloquear — puede reprogramarse
+        }
+
+        // Para estados pre-curso: usar logica original
+        var estadoPermiteReentrada = ESTADOS_PERMITEN_REENTRADA[regEstadoContacto] ||
+                                     ESTADOS_PERMITEN_REENTRADA[regEstadoAsistencia];
+        if (!estadoPermiteReentrada) {
+          bloqueadosPorCurso[regBP] = { estado: regEstadoContacto, asistencia: regEstadoAsistencia, estadoOperativo: 'PRE_CURSO', eventoId: regEvento, razon: 'Ya programado (' + regEstadoContacto + ')' };
+        }
+      }
+    }
+
+  var rows = [];
+  var duplicados = 0;
+  var bloqueados = [];
+  var advertenciasRechazo = [];
+  for (var i = 0; i < empleados.length; i++) {
+    var emp = empleados[i];
+    var bpStr = String(emp.bp || '').trim();
+
+    // Check 1: Ya existe en el mismo evento
+    if (existentesPorEvento[bpStr]) { duplicados++; continue; }
+
+    // Check 2: Ya existe en otro evento con el mismo curso y estado activo
+    if (bloqueadosPorCurso[bpStr]) {
+      var blk = bloqueadosPorCurso[bpStr];
+      bloqueados.push({
+        bp: bpStr,
+        nombre: emp.nombre || '',
+        estado: blk.estado,
+        asistencia: blk.asistencia,
+        eventoExistente: blk.eventoId
+      });
+      continue;
+    }
+
+    // V3: Advertencia de rechazo previo (no bloquea, solo informa)
+    if (historialRechazo[bpStr]) {
+      advertenciasRechazo.push({
+        bp: bpStr,
+        nombre: emp.nombre || '',
+        comentario: historialRechazo[bpStr].comentario,
+        fecha: historialRechazo[bpStr].fecha,
+        origenDecision: historialRechazo[bpStr].origenDecision
+      });
+    }
+
+    rows.push([
+      'REG-' + Utilities.getUuid().substring(0, 8),
+      String(eventoId),
+      String(eventoInfo.sigla || ''),
+      String(eventoInfo.fecha || ''),
+      String(eventoInfo.instructor || ''),
+      String(eventoInfo.sala || ''),
+      bpStr,
+      String(emp.nombre || ''),
+      String(emp.correo || ''),
+      String(emp.pais || ''),
+      String(emp.area || ''),
+      String(emp.jefe || ''),
+      String(emp.emailJefe || ''),
+      'SELECCIONADO',
+      now,
+      '',
+      'NO',
+      '',
+      'PENDIENTE',
+      _getTestMark(), // V102-TEST: Marca TEST si modo prueba activo
+      actor,
+      now,
+      '',
+      'PLANNING',
+      'NAM_EU'  // V102: BASE — Planning es exclusivo de Control Norte
+    ]);
+  }
+  if (rows.length > 0) sh.getRange(sh.getLastRow() + 1, 1, rows.length, rows[0].length).setValues(rows);
+  _invalidatePlanCache();
+  _invalidateExecCache(PLAN_REG_SHEET);
+  var logMsg = rows.length + ' seleccionados';
+  if (duplicados > 0) logMsg += ', ' + duplicados + ' dup-evento';
+  if (bloqueados.length > 0) logMsg += ', ' + bloqueados.length + ' bloqueados-curso';
+  if (advertenciasRechazo.length > 0) logMsg += ', ' + advertenciasRechazo.length + ' con rechazo previo';
+  _logPlan(actor, 'REGISTRAR_SELECCION', eventoId, logMsg);
+
+  // V103-SYNC: Sincronizar INMEDIATAMENTE al Calendario despues de agregar participantes
+  try { _sincronizarEventoCalendario(eventoId, rows.length); } catch(syncErr) { Logger.log('[V103-SYNC] Error sync post-seleccion: ' + syncErr.message); }
+
+  return { success: true, registrados: rows.length, duplicados: duplicados, bloqueados: bloqueados, advertenciasRechazo: advertenciasRechazo };
+}
+
+// 2. LEER REGISTROS DE UN EVENTO
+function getRegistrosEvento(eventoId) {
+  var _t0 = _perfStart();
+  _ensurePlanSheets();
+  var data = _readSheetCached(PLAN_REG_SHEET);
+  if (!data.length) return { success: true, registros: [], estados: getEstadosContacto(), estadosDisplay: ESTADOS_DISPLAY };
+  var registros = [];
+  for (var r = 1; r < data.length; r++) {
+    if (String(data[r][1]) !== eventoId) continue;
+    var estadoActual = String(data[r][13]);
+    var display = ESTADOS_DISPLAY[estadoActual] || { color: '#94a3b8', label: estadoActual, grupo: estadoActual };
+    registros.push({
+      regId: String(data[r][0]), eventoId: String(data[r][1]),
+      sigla: String(data[r][2]), fechaClase: String(data[r][3]),
+      instructor: String(data[r][4]), sala: String(data[r][5]),
+      bp: String(data[r][6]), nombre: String(data[r][7]),
+      email: String(data[r][8]), pais: String(data[r][9]),
+      area: String(data[r][10]), jefe: String(data[r][11]),
+      emailJefe: String(data[r][12]),
+      estadoContacto: estadoActual,
+      estadoDisplay: display.label,
+      grupoEstado: display.grupo,
+      colorEstado: display.color,
+      fechaEstado: String(data[r][14]),
+      notaContacto: String(data[r][15]),
+      jefeNotificado: String(data[r][16]),
+      fechaNotifJefe: String(data[r][17]),
+      estadoAsistencia: String(data[r][18]),
+      novedad: String(data[r][19]),
+      capacity: String(data[r][20]),
+      fechaRegistro: String(data[r][21]),
+      comentarioJefe: String(data[r][22] || ''),
+      origenDecision: String(data[r][23] || ''),
+      base: String(data[r][24] || ''),
+      resultado: data[r][25] !== undefined ? String(data[r][25] || '') : '',
+      notaCurso: data[r][26] !== undefined ? (data[r][26] !== '' ? data[r][26] : '') : '',
+      estadoCorporativo: data[r][27] !== undefined ? String(data[r][27] || '') : '',
+      fechaFormalizacion: data[r][28] !== undefined ? String(data[r][28] || '') : '',
+      estadoOperativo: _getEstadoOperativo(data[r][18], data[r][25], data[r][27]),
+      transicionesValidas: TRANSICIONES_VALIDAS[estadoActual] || []
+    });
+  }
+  _perfLog('getRegistrosEvento', _t0);
+  return { success: true, registros: registros, estados: getEstadosContacto(), estadosDisplay: ESTADOS_DISPLAY };
+}
+
+// 3. ACTUALIZAR ESTADO DE CONTACTO (con validacion de transiciones)
+// V4-PERF: _readSheetCached + batch writes
+function actualizarContacto(regId, nuevoEstado, nota) {
+  if (!regId || !nuevoEstado) return { success: false, error: 'regId y estado requeridos' };
+  if (!ESTADOS_CONTACTO[nuevoEstado]) return { success: false, error: 'Estado invalido: ' + nuevoEstado };
+  var ss = _getMenteSS();
+  var sh = ss.getSheetByName(PLAN_REG_SHEET);
+  if (!sh) return { success: false, error: 'Hoja no encontrada' };
+  var data = _readSheetCached(PLAN_REG_SHEET);
+  for (var r = 1; r < data.length; r++) {
+    if (String(data[r][0]) !== regId) continue;
+    var estadoActual = String(data[r][13]);
+    var permitidos = TRANSICIONES_VALIDAS[estadoActual] || [];
+    if (permitidos.indexOf(nuevoEstado) < 0) {
+      return { success: false, error: 'Transicion no permitida: ' + estadoActual + ' -> ' + nuevoEstado + '. Permitidos: ' + permitidos.join(', ') };
+    }
+    // V4-PERF: batch columns 14-16 en una sola escritura
+    sh.getRange(r + 1, 14, 1, 3).setValues([[nuevoEstado, new Date().toISOString(), nota || String(data[r][15] || '')]]);
+    sh.getRange(r + 1, 24).setValue('PLANNING');
+    var usr = getUsuarioActual();
+    _logPlan(usr ? usr.email : '', 'CAMBIO_ESTADO', String(data[r][1]), 'BP=' + data[r][6] + ' ' + estadoActual + ' -> ' + nuevoEstado);
+    _invalidatePlanCache();
+    _invalidateExecCache(PLAN_REG_SHEET);
+    // V103-SYNC: Sincronizar al Calendario despues de cambio de estado
+    var _evId = String(data[r][1]);
+    try { _sincronizarEventoCalendario(_evId, 0); } catch(syncErr) { Logger.log('[V103-SYNC] Sync post-estado: ' + syncErr.message); }
+    return { success: true, anterior: estadoActual, nuevo: nuevoEstado };
+  }
+  return { success: false, error: 'Registro no encontrado' };
+}
+
+// 4. CAMBIO MASIVO DE ESTADO (con validacion)
+// V4-PERF: _readSheetCached + batch writes por fila
+function actualizarContactoBulk(regIds, nuevoEstado, nota) {
+  if (!regIds || !regIds.length || !nuevoEstado) return { success: false, error: 'Parametros requeridos' };
+  if (!ESTADOS_CONTACTO[nuevoEstado]) return { success: false, error: 'Estado invalido' };
+  var ss = _getMenteSS();
+  var sh = ss.getSheetByName(PLAN_REG_SHEET);
+  if (!sh) return { success: false, error: 'Hoja no encontrada' };
+  var data = _readSheetCached(PLAN_REG_SHEET);
+  var idsSet = {};
+  for (var i = 0; i < regIds.length; i++) idsSet[regIds[i]] = true;
+  var actualizados = 0, rechazados = 0;
+  var now = new Date().toISOString();
+  for (var r = 1; r < data.length; r++) {
+    if (!idsSet[String(data[r][0])]) continue;
+    var estadoActual = String(data[r][13]);
+    var permitidos = TRANSICIONES_VALIDAS[estadoActual] || [];
+    if (permitidos.indexOf(nuevoEstado) < 0) { rechazados++; continue; }
+    // V4-PERF: batch columns 14-16 + 24 en 2 escrituras en lugar de 4
+    sh.getRange(r + 1, 14, 1, 3).setValues([[nuevoEstado, now, nota || String(data[r][15] || '')]]);
+    sh.getRange(r + 1, 24).setValue('PLANNING');
+    actualizados++;
+  }
+  var usr = getUsuarioActual();
+  _logPlan(usr ? usr.email : '', 'CAMBIO_ESTADO_BULK', '', actualizados + ' -> ' + nuevoEstado + (rechazados > 0 ? ' (' + rechazados + ' no permitidos)' : ''));
+  _invalidatePlanCache();
+  _invalidateExecCache(PLAN_REG_SHEET);
+  // V103-SYNC: Sincronizar eventos afectados al Calendario
+  var eventosAfectados = {};
+  for (var rb = 1; rb < data.length; rb++) {
+    if (idsSet[String(data[rb][0])]) eventosAfectados[String(data[rb][1])] = true;
+  }
+  for (var evKey in eventosAfectados) {
+    try { _sincronizarEventoCalendario(evKey, 0); } catch(syncErr) { Logger.log('[V103-SYNC] Sync bulk: ' + syncErr.message); }
+  }
+  return { success: true, actualizados: actualizados, rechazados: rechazados };
+}
+
+// 5. PRE-CONFIRMAR POR JEFE (V102: condicional por base)
+// NAM_EU → PRE_CONFIRMADO (flujo nuevo con paso intermedio)
+// Otras bases → CONFIRMADO directo (flujo actual)
+function preconfirmarPorJefe(regIds) {
+  if (!regIds || !regIds.length) return { success: false, error: 'Sin registros' };
+  
+  var data = _readSheetCached(PLAN_REG_SHEET);
+  var ss = _getMenteSS();
+  var sh = ss.getSheetByName(PLAN_REG_SHEET);
+  if (!sh) return { success: false, error: 'Hoja no encontrada' };
+  
+  var now = new Date().toISOString();
+  var actualizados = 0;
+  var regIdSet = {};
+  for (var i = 0; i < regIds.length; i++) regIdSet[regIds[i]] = true;
+  
+  for (var r = 1; r < data.length; r++) {
+    var regId = String(data[r][0]);
+    if (!regIdSet[regId]) continue;
+    
+    // V102: Determinar base del registro — columna 24 (index 24) o inferir de existentes
+    var base = String(data[r][24] || '').toUpperCase().trim();
+    
+    // Si no tiene base definida, intentar inferir: si viene de Planning = NAM_EU
+    if (!base) {
+      // Inferir: si el CAPACITY es un usuario de Control Norte o si hay evento asociado
+      base = 'NAM_EU'; // Default para registros de Planning (que es solo NAM)
+    }
+    
+    // V102: Flujo condicional por base
+    var nuevoEstado;
+    var nota;
+    if (base === 'NAM_EU' || base === 'NAM') {
+      nuevoEstado = 'PRE_CONFIRMADO';
+      nota = 'Pre-confirmado por jefe (NAM)';
+    } else {
+      nuevoEstado = 'CONFIRMADO';
+      nota = 'Confirmado por jefe';
+    }
+    
+    sh.getRange(r + 1, 14).setValue(nuevoEstado); // ESTADO_CONTACTO
+    sh.getRange(r + 1, 15).setValue(now);          // FECHA_ESTADO
+    sh.getRange(r + 1, 16).setValue(nota);         // NOTA_CONTACTO
+    actualizados++;
+  }
+  
+  if (actualizados > 0) {
+    _invalidateExecCache(PLAN_REG_SHEET);
+    _invalidatePlanCache();
+  }
+  return { success: true, actualizados: actualizados };
+}
+
+// 5b. CONFIRMAR POR PLANNING (V102: Planning asigna a evento → CONFIRMADO final — solo NAM)
+function confirmarPorPlanning(regIds) {
+  return actualizarContactoBulk(regIds, 'CONFIRMADO', 'Confirmado por Planning');
+}
+
+// 5c. REVERTIR A PRE_CONFIRMADO (V102: persona no puede asistir → regresa — solo NAM)
+function revertirAPreConfirmado(regIds) {
+  return actualizarContactoBulk(regIds, 'PRE_CONFIRMADO', 'Revertido a pre-confirmado');
+}
+
+// 6. NOTIFICAR JEFE (envia correo, NO cambia estado)
+function notificarJefe(regIds, emailDestino, contenido) {
+  if (!regIds || !regIds.length) return { success: false, error: 'Sin registros' };
+  var ss = _getMenteSS();
+  var sh = ss.getSheetByName(PLAN_REG_SHEET);
+  if (!sh) return { success: false, error: 'Hoja no encontrada' };
+  var data = _readSheetCached(PLAN_REG_SHEET);
+  if (!data.length) return { success: false, error: 'Sin datos' };
+  var idsSet = {};
+  for (var i = 0; i < regIds.length; i++) idsSet[regIds[i]] = true;
+  var participantes = [];
+  var jefe = '', sigla = '', fecha = '';
+  for (var r = 1; r < data.length; r++) {
+    if (!idsSet[String(data[r][0])]) continue;
+    participantes.push({ bp: String(data[r][6]), nombre: String(data[r][7]), area: String(data[r][10]) });
+    if (!jefe) jefe = String(data[r][11]);
+    if (!sigla) sigla = String(data[r][2]);
+    if (!fecha) fecha = _formatFechaAmigable(data[r][3]);
+    sh.getRange(r + 1, 17).setValue('SI');
+    sh.getRange(r + 1, 18).setValue(new Date().toISOString());
+  }
+  _invalidateExecCache(PLAN_REG_SHEET);
+  if (!participantes.length) return { success: false, error: 'No se encontraron registros' };
+  if (!emailDestino) return { success: false, error: 'Email destino requerido' };
+  var subject = contenido && contenido.subject ? contenido.subject : 'Validacion de asistencia: ' + sigla + ' — ' + fecha;
+  var body = contenido && contenido.body ? contenido.body :
+    'Estimado(a) ' + jefe + ',\n\nSolicitud de validacion para el curso ' + sigla + ' del ' + fecha + '.\n\nParticipantes propuestos:\n';
+  if (!contenido || !contenido.body) {
+    for (var p = 0; p < participantes.length; p++) {
+      body += '  ' + (p+1) + '. ' + participantes[p].nombre + ' (BP: ' + participantes[p].bp + ', ' + participantes[p].area + ')\n';
+    }
+    body += '\nPor favor ingrese a la aplicacion para aprobar o rechazar las solicitudes.';
+    var _appUrlNotif = _getWebAppUrl();
+    if (_appUrlNotif) body += '\n\nIr a la app: ' + _appUrlNotif;
+    body += '\n\nAtentamente,\nEquipo de Capacitacion';
+  }
+  try {
+    // V102-TEST: Resolver envio segun modo de prueba
+    var _envio = _resolverEnvioCorreoPlan(emailDestino);
+    if (!_envio.enviar) {
+      var usrSim = getUsuarioActual();
+      _logPlan(usrSim ? usrSim.email : '', 'CORREO_SIMULADO', '', 'notificarJefe | Destino real: ' + emailDestino + ' | ' + participantes.length + ' participantes');
+      return { success: true, enviado: false, modo: _envio.modo, destinatarioReal: emailDestino, participantes: participantes.length, mensaje: 'SIMULACION: correo no enviado (registrado en log)' };
+    }
+    MailApp.sendEmail(_envio.destino, (_envio.esTest ? '[TEST] ' : '') + subject, body);
+    var usr = getUsuarioActual();
+    _logPlan(usr ? usr.email : '', _envio.esTest ? 'NOTIFICAR_JEFE_TEST' : 'NOTIFICAR_JEFE', '', 'A: ' + _envio.destino + (_envio.esTest ? ' (real: ' + emailDestino + ')' : '') + ' | ' + participantes.length + ' participantes');
+    return { success: true, enviado: true, destinatario: _envio.destino, destinatarioReal: emailDestino, esTest: _envio.esTest, modo: _envio.modo, participantes: participantes.length };
+  } catch(e) {
+    return { success: false, error: 'Error enviando: ' + e.message };
+  }
+}
+
+// 7. ELIMINAR REGISTRO
+// V4-PERF: _readSheetCached para lectura
+function eliminarRegistro(regId) {
+  var ss = _getMenteSS();
+  var sh = ss.getSheetByName(PLAN_REG_SHEET);
+  if (!sh) return { success: false };
+  var data = _readSheetCached(PLAN_REG_SHEET);
+  for (var r = data.length - 1; r >= 1; r--) {
+    if (String(data[r][0]) === regId) {
+      sh.deleteRow(r + 1);
+      var usr = getUsuarioActual();
+      _logPlan(usr ? usr.email : '', 'ELIMINAR', String(data[r][1]), 'BP: ' + data[r][6]);
+      _invalidateExecCache(PLAN_REG_SHEET);
+      return { success: true };
+    }
+  }
+  return { success: false, error: 'No encontrado' };
+}
+
+// ============================
+// V102: OBTENER PRE-CONFIRMADOS GLOBALES (para vista de Planning)
+// Retorna todos los registros con estado PRE_CONFIRMADO, PRECONFIRMADO_JEFE, o CITADO
+// sin importar el evento, para que Planning los gestione
+// ============================
+function getPreConfirmados(filtros) {
+  var t0 = _perfStart();
+  filtros = filtros || {};
+  var data = _readSheetCached(PLAN_REG_SHEET);
+  if (!data || data.length < 2) return { success: true, registros: [], total: 0 };
+  
+  var preConfEstados = { 'PRE_CONFIRMADO': true, 'PRECONFIRMADO_JEFE': true, 'CITADO': true, 'NO_CONTACTADO': true };
+  var registros = [];
+  
+  for (var r = 1; r < data.length; r++) {
+    var estadoContacto = String(data[r][13] || '').toUpperCase().trim();
+    if (!preConfEstados[estadoContacto]) continue;
+    
+    // V102: Solo registros de Control Norte (NAM_EU)
+    var base = String(data[r][24] || '').toUpperCase().trim();
+    if (base && base !== 'NAM_EU' && base !== 'NAM') continue;
+    // Si no tiene base, asumir NAM (registros legacy de Planning)
+    
+    var sigla = String(data[r][2] || '');
+    var pais = String(data[r][9] || '');
+    var jefe = String(data[r][11] || '');
+    var origen = String(data[r][23] || '');
+    
+    // Aplicar filtros opcionales
+    if (filtros.sigla && sigla !== filtros.sigla) continue;
+    if (filtros.pais && pais !== filtros.pais) continue;
+    if (filtros.jefe && jefe.toUpperCase().indexOf(filtros.jefe.toUpperCase()) < 0) continue;
+    
+    registros.push({
+      regId: String(data[r][0]),
+      eventoId: String(data[r][1] || ''),
+      sigla: sigla,
+      fechaClase: _formatFechaAmigable(data[r][3]),
+      fechaClaseRaw: String(data[r][3] || ''),
+      instructor: String(data[r][4] || ''),
+      sala: String(data[r][5] || ''),
+      bp: String(data[r][6] || ''),
+      nombre: String(data[r][7] || ''),
+      email: String(data[r][8] || ''),
+      pais: pais,
+      area: String(data[r][10] || ''),
+      jefe: jefe,
+      emailJefe: String(data[r][12] || ''),
+      estadoContacto: estadoContacto,
+      fechaEstado: _formatFechaAmigable(data[r][14]),
+      nota: String(data[r][15] || ''),
+      origen: origen,
+      comentarioJefe: String(data[r][22] || ''),
+      fechaRegistro: _formatFechaAmigable(data[r][21])
+    });
+  }
+  
+  // Ordenar por fecha de registro (más recientes primero)
+  registros.sort(function(a, b) {
+    return (b.fechaRegistro || '').localeCompare(a.fechaRegistro || '');
+  });
+  
+  // Extraer valores únicos para filtros
+  var siglas = {}, paises = {}, jefes = {};
+  for (var i = 0; i < registros.length; i++) {
+    if (registros[i].sigla) siglas[registros[i].sigla] = true;
+    if (registros[i].pais) paises[registros[i].pais] = true;
+    if (registros[i].jefe) jefes[registros[i].jefe] = true;
+  }
+  
+  _perfLog('getPreConfirmados', t0);
+  return {
+    success: true,
+    registros: registros,
+    total: registros.length,
+    filtros: {
+      siglas: Object.keys(siglas).sort(),
+      paises: Object.keys(paises).sort(),
+      jefes: Object.keys(jefes).sort()
+    }
+  };
+}
+
+// ============================
+// V102: PROPONER DESDE JEFE (Flujo 2 — jefe propone colaborador para un curso/evento)
+// El jefe ve el calendario, elige un evento, y propone a su colaborador
+// Queda como PRE_CONFIRMADO con origen JEFE
+// ============================
+function proponerDesdeJefe(datos) {
+  if (!datos || !datos.bps || !datos.bps.length) return { success: false, error: 'Sin colaboradores seleccionados' };
+  if (!datos.eventoId) return { success: false, error: 'Debe seleccionar un evento' };
+  
+  var usr = getUsuarioActual();
+  if (!usr) return { success: false, error: 'No se pudo obtener usuario' };
+  
+  var ss = _getMenteSS();
+  var sh = ss.getSheetByName(PLAN_REG_SHEET);
+  if (!sh) return { success: false, error: 'Hoja PLAN_REGISTRO no encontrada' };
+  
+  // Leer registros existentes para validar duplicados y limite de propuestas
+  var data = _readSheetCached(PLAN_REG_SHEET);
+  var existentes = {}; // bp|sigla → estado
+  for (var r = 1; r < data.length; r++) {
+    var bp = String(data[r][6] || '');
+    var sigla = String(data[r][2] || '');
+    var estado = String(data[r][13] || '');
+    var regAsist = String(data[r][18] || '').toUpperCase();
+    var regRes = String(data[r][25] || '').toUpperCase();
+    var regCorp = data[r][27] !== undefined ? String(data[r][27] || '').toUpperCase() : '';
+    if (bp && sigla) {
+      var key = bp + '|' + sigla;
+      // V2.8: Calcular estado operativo para anti-reprogramacion
+      var regEstOp = _getEstadoOperativo(regAsist, regRes, regCorp);
+
+      // V2.8: Si ya aprobo/formalizo → bloquear siempre
+      if (regEstOp === 'FORMALIZADO' || regEstOp === 'APROBADO_PEND_FORM' || regEstOp === 'ASISTIO_PEND_EVAL') {
+        existentes[key] = (ESTADOS_OPERATIVOS[regEstOp] || {}).label || estado;
+        continue;
+      }
+      // V2.8: Si reprobo o no asistio → permitir re-propuesta
+      if (regEstOp === 'REPROBADO' || regEstOp === 'NO_ASISTIO') {
+        continue; // No bloquear
+      }
+      // Pre-curso: Solo bloquear si esta activo (no rechazado/cancelado)
+      if (estado !== 'RECHAZADO' && estado !== 'CANCELADO' && estado !== 'NO_ASISTIO') {
+        existentes[key] = estado;
+      }
+    }
+  }
+  
+  // Obtener info del evento — buscar por ID en todos los eventos del calendario
+  var evData = getEventosCalendario({});
+  var evento = null;
+  if (evData && evData.success && evData.eventos) {
+    for (var ei = 0; ei < evData.eventos.length; ei++) {
+      if (String(evData.eventos[ei].id) === String(datos.eventoId)) {
+        evento = evData.eventos[ei];
+        break;
+      }
+    }
+  }
+  
+  var insertados = 0;
+  var duplicados = 0;
+  var errores = [];
+  var now = new Date().toISOString();
+  
+  for (var i = 0; i < datos.bps.length; i++) {
+    var emp = datos.bps[i]; // { bp, nombre, email, pais, area }
+    var chkKey = (emp.bp || '') + '|' + (datos.sigla || (evento ? evento.sigla : ''));
+    
+    // Validar: jefe solo puede proponer 1 vez por persona/curso
+    if (existentes[chkKey]) {
+      duplicados++;
+      errores.push(emp.nombre + ' ya tiene registro (' + existentes[chkKey] + ')');
+      continue;
+    }
+    
+    var regId = 'REG_' + Utilities.getUuid().substring(0, 8);
+    var row = [
+      regId,
+      datos.eventoId,
+      datos.sigla || (evento ? evento.sigla : ''),
+      evento ? evento.fecha : '',
+      evento ? evento.instructor : '',
+      evento ? evento.sala : '',
+      emp.bp || '',
+      emp.nombre || '',
+      emp.email || '',
+      emp.pais || '',
+      emp.area || '',
+      emp.jefe || usr.nombre || '',
+      emp.emailJefe || usr.email || '',
+      'PRE_CONFIRMADO',
+      now,
+      'Propuesto por jefe desde calendario',
+      '', '', // JEFE_NOTIFICADO, FECHA_NOTIF_JEFE (no aplica)
+      'PENDIENTE', _getTestMark(), // V102-TEST: ESTADO_ASISTENCIA, NOVEDAD (marca TEST si modo prueba)
+      usr.email || '', // CAPACITY (en este caso el jefe actua como capacity)
+      now,
+      '', // COMENTARIO_JEFE
+      'JEFE', // ORIGEN_DECISION
+      'NAM_EU' // V102: BASE — siempre NAM_EU para propuestas de jefe
+    ];
+    sh.appendRow(row);
+    existentes[chkKey] = 'PRE_CONFIRMADO';
+    insertados++;
+  }
+  
+  _invalidateExecCache(PLAN_REG_SHEET);
+  _invalidatePlanCache();
+  _logPlan(usr.email, 'PROPUESTA_JEFE', datos.eventoId, insertados + ' propuestos, ' + duplicados + ' duplicados');
+  
+  return {
+    success: true,
+    insertados: insertados,
+    duplicados: duplicados,
+    errores: errores
+  };
+}
+
+// V102-PROACTIVO: Obtener eventos disponibles por SIGLA para que el jefe programe a su equipo
+// V102-FIX5: Matching basado en GLOSARIO DE CURSOS como fuente de verdad
+// Jerarquia: 1) Glosario SIGLA 2) Nombre curso del glosario 3) Substring apoyo 4) Fallback controlado
+function getEventosDisponiblesPorSigla(sigla, bpEmpleado) {
+  if (!sigla) return { success: false, error: 'Sin sigla' };
+  var siglaNorm = sigla.toUpperCase().trim();
+  var ssId = getPlanCalendarSSId();
+  if (!ssId) return { success: false, error: 'Calendario no configurado' };
+  try {
+    var ss = SpreadsheetApp.openById(ssId);
+    var sh = ss.getSheetByName(PLAN_CALENDAR_TAB);
+    if (!sh) return { success: false, error: 'Hoja EVENTOS no encontrada' };
+    var data = sh.getDataRange().getValues();
+    if (data.length < 2) return { success: true, eventos: [], grupos: [], total: 0, yaEnFlujo: false, estadoEnFlujo: '', debug: { totalFilas: 0 } };
+
+    // ═══════════════════════════════════════════════════════════
+    // GLOSARIO DE CURSOS — Fuente de verdad estructurada
+    // Mapea SIGLA → { nombres: [keywords del curso], siglas: [siglas alternativas en calendario] }
+    // ═══════════════════════════════════════════════════════════
+    var GLOSARIO = {
+      'MMPP 7.3':        { nombres: ['MERCANCIAS PELIGROSAS PARA AGENTES DE ACEPTACION', 'MMPP 7.3', 'DG 7.3'], siglas: ['MMPP 7.3'] },
+      'MMPP 7.4.1':      { nombres: ['MERCANCIAS PELIGROSAS PARA BODEGA AVANZADO', 'MMPP 7.4.1', 'DG 7.4.1'], siglas: ['MMPP 7.4.1'] },
+      'MMPP 7.6':        { nombres: ['MERCANCIAS PELIGROSAS PARA COORDINADOR DE OPERACIONES', 'MMPP 7.6', 'DG 7.6'], siglas: ['MMPP 7.6'] },
+      'MMPP 7.4':        { nombres: ['MERCANCIAS PELIGROSAS PARA OPERARIOS DE BODEGA', 'MERCANCIAS PELIGROSAS PARA OPERARIOS', 'MMPP 7.4', 'DG 7.4'], siglas: ['MMPP 7.4'] },
+      'PHARMA':          { nombres: ['PHARMA CEIV', 'PHARMA'], siglas: ['PHARMA CEIV', 'PHARMA'] },
+      'CRM REVA':        { nombres: ['CRM CARGA RECURRENTE', 'CRM REVA'], siglas: ['CRM REVA', 'CRM'] },
+      'CRM':             { nombres: ['CRM INICIAL CARGA', 'CRM INICIAL', 'CRM'], siglas: ['CRM'] },
+      'AVSEC':           { nombres: ['INTERFERENCIA ILICITA', 'AVSEC CARGA', 'AVSEC'], siglas: ['AVSEC'] },
+      'MOC AVA INC':     { nombres: ['MOC OPERACIONES DE CARGA INICIAL', 'MOC AVA INC'], siglas: ['MOC AVA INC', 'MOC AVA'] },
+      'MOC AVA REVA':    { nombres: ['MOC OPERACIONES DE CARGA RECURRENTE', 'MOC AVA REVA'], siglas: ['MOC AVA REVA', 'MOC AVA'] },
+      'MOC BAS REVA':    { nombres: ['MOC OPERACIONES DE CARGA BASICO RECURRENTE', 'MOC BAS REVA'], siglas: ['MOC BAS REVA', 'MOC BAS'] },
+      'MOC BAS INC':     { nombres: ['MOC OPERACIONES DE CARGA BASICO INICIAL', 'MOC BAS INC'], siglas: ['MOC BAS INC', 'MOC BAS'] },
+      'FORKLIFT TEORICO':{ nombres: ['MONTACARGA TEORICO', 'FORKLIFT TEORICO'], siglas: ['FORKLIFT TEORICO', 'MONTACARGA TEORICO'] },
+      'FORKLIFT':        { nombres: ['MONTACARGA', 'FORKLIFT'], siglas: ['FORKLIFT', 'MONTACARGA'] },
+      'TSA DOC':         { nombres: ['REGULACIONES CBP TSA DOCUMENTAL', 'REGULACIONES CBP TSA', 'TSA DOC'], siglas: ['TSA DOC'] },
+      'HSE':             { nombres: ['SEGURIDAD LABORAL', 'HSE'], siglas: ['HSE'] },
+      'SGSO':            { nombres: ['SGSO'], siglas: ['SGSO'] },
+      'TSA GA':          { nombres: ['TSA GENERAL AWARENESS', 'TSA GA'], siglas: ['TSA GA'] },
+      'E-LEARNING':      { nombres: ['E-LEARNING', 'ELEARNING'], siglas: ['E-LEARNING'] },
+      'TALLER':          { nombres: ['TALLER'], siglas: ['TALLER'] },
+      'BLOQUEO':         { nombres: ['BLOQUEO GENERAL', 'BLOQUEO'], siglas: ['BLOQUEO'] }
+    };
+
+    // Buscar en glosario la sigla del colaborador
+    var glosarioEntry = GLOSARIO[siglaNorm] || null;
+    var nombresGlosario = glosarioEntry ? glosarioEntry.nombres : [];
+    var siglasGlosario = glosarioEntry ? glosarioEntry.siglas : [];
+    var equivalenciasEncontradas = [];
+    if (glosarioEntry) {
+      equivalenciasEncontradas = nombresGlosario.slice(0, 3); // Top 3 para mostrar al usuario
+    }
+
+    // Mapear headers
+    var headers = data[0];
+    var idx = {};
+    var headersList = [];
+    for (var c = 0; c < headers.length; c++) {
+      var h = String(headers[c]).toUpperCase().trim();
+      headersList.push(h);
+      if (!idx.id && (h === 'ID' || h === 'ID_EVENTO' || h === 'EVENTO_ID')) idx.id = c;
+      if (!idx.fecha && h.indexOf('FECHA') >= 0) idx.fecha = c;
+      if (!idx.titulo && (h.indexOf('TITULO') >= 0 || h.indexOf('TITLE') >= 0 || h.indexOf('NOMBRE') >= 0)) idx.titulo = c;
+      if (!idx.instructor && h.indexOf('INSTRUCTOR') >= 0) idx.instructor = c;
+      if (!idx.horaInicio && (h === 'HORA_INICIO' || h.indexOf('HORA_I') >= 0 || h === 'INICIO')) idx.horaInicio = c;
+      if (!idx.horaFin && (h === 'HORA_FIN' || h.indexOf('HORA_F') >= 0 || h === 'FIN')) idx.horaFin = c;
+      if (!idx.sigla && h.indexOf('SIGLA') >= 0) idx.sigla = c;
+      if (!idx.estado && (h.indexOf('ESTADO') >= 0 || h === 'STATUS')) idx.estado = c;
+      if (!idx.sala && h.indexOf('SALA') >= 0) idx.sala = c;
+      if (!idx.dia && (h === 'DIA' || h === 'DÍA' || h === 'DAY')) idx.dia = c;
+    }
+    var tz = Session.getScriptTimeZone() || 'America/Santiago';
+    var hoy = new Date();
+    hoy.setHours(0, 0, 0, 0);
+    var hoyStr = Utilities.formatDate(hoy, tz, 'yyyy-MM-dd');
+    var diag = { totalFilas: data.length - 1, activos: 0, futuros: 0, matchGlosarioSigla: 0, matchGlosarioNombre: 0, matchSubstring: 0, siglasUnicas: {} };
+    var allEventosFuturos = [];
+    var matchedEventos = [];
+    var matchTipo = 'ninguno'; // glosario_sigla | glosario_nombre | substring | fallback
+
+    for (var r = 1; r < data.length; r++) {
+      var row = data[r];
+      if (idx.estado !== undefined) {
+        var estado = String(row[idx.estado] || '').toUpperCase().trim();
+        if (estado !== 'ACTIVO' && estado !== 'DISPONIBLE' && estado !== 'ABIERTO' && estado !== '') continue;
+      }
+      diag.activos++;
+      var fechaRaw = (idx.fecha !== undefined) ? row[idx.fecha] : '';
+      var fechaStr = '';
+      if (fechaRaw instanceof Date) fechaStr = Utilities.formatDate(fechaRaw, tz, 'yyyy-MM-dd');
+      else { fechaStr = String(fechaRaw || ''); if (fechaStr.length > 10) fechaStr = fechaStr.substring(0, 10); }
+      if (!fechaStr || fechaStr < hoyStr) continue;
+      diag.futuros++;
+      var evSigla = (idx.sigla !== undefined) ? String(row[idx.sigla] || '').toUpperCase().trim() : '';
+      var evTitulo = (idx.titulo !== undefined) ? String(row[idx.titulo] || '') : '';
+      var evTituloUp = evTitulo.toUpperCase();
+      var evDia = (idx.dia !== undefined) ? String(row[idx.dia] || '').toUpperCase().trim() : '';
+      diag.siglasUnicas[evSigla || '(vacio)'] = (diag.siglasUnicas[evSigla || '(vacio)'] || 0) + 1;
+      var horaI = (idx.horaInicio !== undefined) ? row[idx.horaInicio] : '';
+      var horaF = (idx.horaFin !== undefined) ? row[idx.horaFin] : '';
+      if (horaI instanceof Date) horaI = Utilities.formatDate(horaI, tz, 'HH:mm'); else horaI = String(horaI || '');
+      if (horaF instanceof Date) horaF = Utilities.formatDate(horaF, tz, 'HH:mm'); else horaF = String(horaF || '');
+      var evObj = {
+        id: (idx.id !== undefined) ? String(row[idx.id] || '') : 'ROW_' + r,
+        fecha: fechaStr, sigla: evSigla, titulo: evTitulo,
+        instructor: (idx.instructor !== undefined) ? String(row[idx.instructor] || '') : '',
+        horaInicio: horaI, horaFin: horaF,
+        sala: (idx.sala !== undefined) ? String(row[idx.sala] || '') : '',
+        dia: evDia
+      };
+      allEventosFuturos.push(evObj);
+
+      // ═══ JERARQUIA DE MATCHING ═══
+      var matched = false;
+      var nivelMatch = '';
+
+      // NIVEL 1: Match por SIGLA exacta del glosario (prioridad maxima)
+      if (glosarioEntry) {
+        // Comparar sigla del evento con las siglas del glosario
+        for (var gs = 0; gs < siglasGlosario.length; gs++) {
+          if (evSigla === siglasGlosario[gs].toUpperCase()) { matched = true; nivelMatch = 'glosario_sigla'; break; }
+        }
+        // Tambien comparar sigla del evento directamente con la sigla buscada
+        if (!matched && evSigla === siglaNorm) { matched = true; nivelMatch = 'glosario_sigla'; }
+      } else {
+        // Sin glosario: match exacto de sigla
+        if (evSigla === siglaNorm) { matched = true; nivelMatch = 'sigla_exacta'; }
+      }
+
+      // NIVEL 2: Match por NOMBRE del curso desde el glosario (en titulo o sigla del evento)
+      if (!matched && glosarioEntry) {
+        for (var gn = 0; gn < nombresGlosario.length; gn++) {
+          var keyword = nombresGlosario[gn].toUpperCase();
+          if (evSigla.indexOf(keyword) >= 0 || evTituloUp.indexOf(keyword) >= 0) {
+            matched = true; nivelMatch = 'glosario_nombre'; break;
+          }
+        }
+      }
+
+      // NIVEL 3: Substring de apoyo (solo si no hay glosario o como refuerzo)
+      if (!matched) {
+        if (evSigla.indexOf(siglaNorm) >= 0 || siglaNorm.indexOf(evSigla) >= 0) {
+          matched = true; nivelMatch = 'substring';
+        } else if (evTituloUp.indexOf(siglaNorm) >= 0) {
+          matched = true; nivelMatch = 'substring';
+        }
+      }
+
+      if (matched) {
+        evObj._nivelMatch = nivelMatch;
+        if (nivelMatch === 'glosario_sigla') diag.matchGlosarioSigla++;
+        else if (nivelMatch === 'glosario_nombre') diag.matchGlosarioNombre++;
+        else diag.matchSubstring++;
+        matchedEventos.push(evObj);
+      }
+    }
+
+    // Determinar tipo de match y filtrar
+    var allEventos = [];
+    if (diag.matchGlosarioSigla > 0 || diag.matchGlosarioNombre > 0) {
+      // HAY match por glosario → usar SOLO esos (no mezclar con substring de otros cursos)
+      allEventos = matchedEventos.filter(function(ev) { return ev._nivelMatch === 'glosario_sigla' || ev._nivelMatch === 'glosario_nombre'; });
+      matchTipo = diag.matchGlosarioSigla > 0 ? 'glosario_sigla' : 'glosario_nombre';
+    } else if (matchedEventos.length > 0) {
+      // Solo hay substring → usarlos
+      allEventos = matchedEventos;
+      matchTipo = 'substring';
+    }
+    // FALLBACK CONTROLADO: solo si CERO match y hay eventos futuros
+    var esFallbackTotal = false;
+    if (allEventos.length === 0 && allEventosFuturos.length > 0) {
+      allEventos = allEventosFuturos;
+      esFallbackTotal = true;
+      matchTipo = 'fallback';
+    }
+    // Agrupar por curso (mismo SIGLA+TITULO) con estructura de dias
+    var gruposMap = {};
+    for (var g = 0; g < allEventos.length; g++) {
+      var ev = allEventos[g];
+      var grupoKey = ev.sigla + '|' + ev.titulo;
+      if (!gruposMap[grupoKey]) {
+        gruposMap[grupoKey] = { sigla: ev.sigla, titulo: ev.titulo, instructor: ev.instructor, dias: [] };
+      }
+      gruposMap[grupoKey].dias.push(ev);
+    }
+    // Convertir a array y ordenar dias dentro de cada grupo
+    var grupos = [];
+    for (var gk in gruposMap) {
+      var grp = gruposMap[gk];
+      grp.dias.sort(function(a, b) {
+        var dA = parseInt(String(a.dia).replace(/\D/g, '')) || 99;
+        var dB = parseInt(String(b.dia).replace(/\D/g, '')) || 99;
+        if (dA !== dB) return dA - dB;
+        return (a.fecha || '').localeCompare(b.fecha || '');
+      });
+      grp.fechaInicio = grp.dias[0].fecha;
+      grp.totalDias = grp.dias.length;
+      grp.diaInicio = grp.dias[0]; // D1 o el primero
+      grupos.push(grp);
+    }
+    grupos.sort(function(a, b) { return (a.fechaInicio || '').localeCompare(b.fechaInicio || ''); });
+    // Registros existentes
+    var regSh = _getMenteSS().getSheetByName(PLAN_REG_SHEET);
+    var yaEnFlujo = false;
+    var estadoEnFlujo = '';
+    var registrosPorEvento = {};
+    if (regSh && regSh.getLastRow() > 1) {
+      var regData = regSh.getDataRange().getValues();
+      var bpNorm = (bpEmpleado || '').trim();
+      for (var rr = 1; rr < regData.length; rr++) {
+        var regSigla = String(regData[rr][2] || '').toUpperCase().trim();
+        var regBP = String(regData[rr][6] || '').trim();
+        var regEstado = String(regData[rr][13] || '').toUpperCase().trim();
+        var regEvId = String(regData[rr][1] || '');
+        if (regEvId) registrosPorEvento[regEvId] = (registrosPorEvento[regEvId] || 0) + 1;
+        if (bpNorm && regBP === bpNorm && (regSigla === siglaNorm || regSigla.indexOf(siglaNorm) >= 0 || siglaNorm.indexOf(regSigla) >= 0)) {
+          if (regEstado !== 'RECHAZADO' && regEstado !== 'CANCELADO' && regEstado !== 'NO_ASISTIO') {
+            yaEnFlujo = true;
+            estadoEnFlujo = regEstado;
+          }
+        }
+      }
+    }
+    // Enriquecer eventos con conteo de registrados
+    var eventosFlat = allEventos.map(function(ev) {
+      return {
+        id: ev.id, fecha: _formatFechaAmigable(ev.fecha), fechaRaw: ev.fecha,
+        titulo: ev.titulo, sigla: ev.sigla, instructor: ev.instructor,
+        horaInicio: ev.horaInicio, horaFin: ev.horaFin, sala: ev.sala,
+        dia: ev.dia, registrados: registrosPorEvento[ev.id] || 0
+      };
+    });
+    eventosFlat.sort(function(a, b) { return (a.fechaRaw || '').localeCompare(b.fechaRaw || ''); });
+    // Enriquecer grupos con registrados
+    for (var gi = 0; gi < grupos.length; gi++) {
+      for (var di = 0; di < grupos[gi].dias.length; di++) {
+        grupos[gi].dias[di].registrados = registrosPorEvento[grupos[gi].dias[di].id] || 0;
+        grupos[gi].dias[di].fechaFmt = _formatFechaAmigable(grupos[gi].dias[di].fecha);
+      }
+    }
+    var siglasArr = [];
+    for (var sk in diag.siglasUnicas) siglasArr.push(sk + '(' + diag.siglasUnicas[sk] + ')');
+    diag.siglasDisponibles = siglasArr;
+    diag.siglaBuscada = siglaNorm;
+    diag.resultados = eventosFlat.length;
+    diag.totalFuturos = allEventosFuturos.length;
+    diag.gruposEncontrados = grupos.length;
+    diag.matchTipo = matchTipo;
+    diag.glosarioUsado = !!glosarioEntry;
+    Logger.log('[V102-FIX5] sigla=' + siglaNorm + ': ' + eventosFlat.length + ' eventos, ' + grupos.length + ' grupos, tipo=' + matchTipo + ', glosario=' + !!glosarioEntry + ' de ' + allEventosFuturos.length + ' futuros');
+    return {
+      success: true, eventos: eventosFlat, grupos: grupos, total: eventosFlat.length,
+      yaEnFlujo: yaEnFlujo, estadoEnFlujo: estadoEnFlujo, debug: diag,
+      todosFuturos: allEventosFuturos.length, esFallbackTotal: esFallbackTotal,
+      matchTipo: matchTipo, equivalencias: equivalenciasEncontradas,
+      glosarioUsado: !!glosarioEntry, siglaBuscada: siglaNorm
+    };
+  } catch(e) {
+    return { success: false, error: 'Error: ' + e.message };
+  }
+}
+
+// V102: Obtener equipo del jefe (colaboradores bajo su mando con cursos vencidos/por vencer)
+function getEquipoJefe() {
+  var usr = getUsuarioActual();
+  if (!usr) return { success: false, error: 'No se pudo obtener usuario' };
+  
+  // Buscar en Forecast los empleados que tienen al usuario como jefe
+  var forecastData = getForecastData('TODO', usr);
+  if (!forecastData || !forecastData.success) return { success: false, error: 'Error obteniendo datos de forecast' };
+  
+  var registros = forecastData.registros || [];
+  var equipo = [];
+  var emailJefe = (usr.email || '').toUpperCase().trim();
+  var nombreJefe = (usr.nombre || '').toUpperCase().trim();
+  
+  for (var i = 0; i < registros.length; i++) {
+    var r = registros[i];
+    var jefeReg = (r.jefe || r.jefeDirecto || '').toUpperCase().trim();
+    var emailJefeReg = (r.emailJefe || '').toUpperCase().trim();
+    
+    if (emailJefeReg === emailJefe || jefeReg === nombreJefe) {
+      equipo.push({
+        bp: r.bp || '',
+        nombre: r.nombre || '',
+        email: r.email || '',
+        pais: r.pais || '',
+        area: r.area || '',
+        jefe: r.jefe || r.jefeDirecto || '',
+        emailJefe: r.emailJefe || '',
+        curso: r.curso || r.cursoNombre || '',
+        sigla: r.sigla || '',
+        status: r.status || r.statusReal || '',
+        vencimiento: r.vencimiento || r.fechaVencimiento || '',
+        habilitacion: r.habilitacion || r.fechaHabilitacion || ''
+      });
+    }
+  }
+  
+  return { success: true, equipo: equipo, total: equipo.length };
+}
+
+
+// ============================
+// GENERAR LIBRO (solo CONFIRMADOS)
+// V102-FIX5: Retorna datos completos para vista interna + crea Sheet de respaldo
+// ============================
+function crearLibroAsistencia(eventoId) {
+  var reg = getRegistrosEvento(eventoId);
+  if (!reg.success) return reg;
+  var confirmados = (reg.registros || []).filter(function(r) { return r.estadoContacto === 'CONFIRMADO'; });
+  if (!confirmados.length) return { success: false, error: 'No hay participantes CONFIRMADOS. Solo se genera lista con confirmados.' };
+  var sigla = confirmados[0].sigla || 'Curso';
+  var fechaRaw = confirmados[0].fechaClase || '';
+  var fechaLimpia = _formatFechaLimpia(fechaRaw);
+  var fechaStr = fechaLimpia || Utilities.formatDate(new Date(), 'America/Santiago', 'yyyy-MM-dd');
+  var instructor = confirmados[0].instructor || '';
+  var sala = confirmados[0].sala || '';
+  var nombreHoja = fechaStr.replace(/[^0-9a-zA-Z]/g, '_') + '_' + sigla.substring(0, 20).replace(/[^a-zA-Z0-9]/g, '');
+  var ssNuevo = SpreadsheetApp.create('LIBRO_' + nombreHoja);
+  var sheet = ssNuevo.getActiveSheet();
+  sheet.setName(nombreHoja);
+  var azul = '#1B0088';
+  sheet.getRange(2, 1, 1, 9).setValues([['', 'NOMBRE DE CURSO', '', 'FECHA INICIO', 'FECHA TERMINO', 'Horario', 'SALA', 'INSTRUCTOR/A', '']]);
+  sheet.getRange('B2:I2').setBackground(azul).setFontColor('white').setFontWeight('bold').setHorizontalAlignment('center');
+  sheet.getRange(3, 1, 1, 9).setValues([['', sigla, '', fechaStr, fechaStr, '', sala, instructor, '']]);
+  sheet.getRange('B3:C3').merge();
+  var hp = ['N', 'BP', 'NOMBRE Y APELLIDO', 'AREA', 'JEFE DIRECTO', 'ASISTENCIA', 'RESULTADO', 'NOTA', 'NOVEDAD', 'Firma'];
+  sheet.getRange(5, 1, 1, hp.length).setValues([hp]);
+  sheet.getRange(5, 1, 1, hp.length).setBackground(azul).setFontColor('white').setFontWeight('bold').setHorizontalAlignment('center');
+  sheet.setFrozenRows(5);
+  // Construir datos de participantes para retorno
+  var participantesData = [];
+  for (var i = 0; i < confirmados.length; i++) {
+    var rowNum = 6 + i;
+    var p = confirmados[i];
+    sheet.getRange(rowNum, 1, 1, hp.length).setValues([[i + 1, p.bp, p.nombre, p.area, p.jefe, '', '', '', '', '']]);
+    if (i % 2 === 0) sheet.getRange(rowNum, 1, 1, hp.length).setBackground('#FFF8DC');
+    sheet.getRange(rowNum, 6).insertCheckboxes();
+    participantesData.push({
+      n: i + 1, bp: p.bp, nombre: p.nombre, area: p.area, jefe: p.jefe,
+      email: p.email || '', pais: p.pais || '', asistencia: '', resultado: '', nota: '', novedad: ''
+    });
+  }
+  sheet.setColumnWidth(1, 35); sheet.setColumnWidth(2, 75); sheet.setColumnWidth(3, 220);
+  sheet.setColumnWidth(4, 120); sheet.setColumnWidth(5, 130); sheet.setColumnWidth(6, 80);
+  sheet.setColumnWidth(7, 60); sheet.setColumnWidth(8, 100); sheet.setColumnWidth(9, 100);
+  sheet.getRange(5, 1, confirmados.length + 1, hp.length).setBorder(true, true, true, true, true, true, '#999999', SpreadsheetApp.BorderStyle.SOLID);
+  SpreadsheetApp.flush();
+  DriveApp.getFileById(ssNuevo.getId()).setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.EDIT);
+  _guardarLibroRef(eventoId, sigla, fechaStr, 'ASISTENCIA', ssNuevo.getUrl(), confirmados.length);
+  var usr = getUsuarioActual();
+  _logPlan(usr ? usr.email : '', 'CREAR_LIBRO', eventoId, 'Confirmados: ' + confirmados.length);
+  // Sincronizar con calendario
+  _sincronizarEventoCalendario(eventoId, confirmados.length);
+  return {
+    success: true, url: ssNuevo.getUrl(), participantes: confirmados.length,
+    listaInterna: {
+      curso: { sigla: sigla, fecha: fechaStr, instructor: instructor, sala: sala },
+      alumnos: participantesData
+    }
+  };
+}
+
+// V102-FIX5: Formato de fecha limpio (sin hora, formato legible)
+function _formatFechaLimpia(val) {
+  if (!val) return '';
+  try {
+    var d;
+    if (val instanceof Date) d = val;
+    else d = new Date(String(val));
+    if (isNaN(d.getTime())) {
+      // Intentar extraer solo la parte de fecha si tiene formato ISO
+      var s = String(val);
+      if (s.length >= 10) return s.substring(0, 10);
+      return s;
+    }
+    var tz = Session.getScriptTimeZone() || 'America/Bogota';
+    return Utilities.formatDate(d, tz, 'dd MMM yyyy');
+  } catch(e) { return String(val).substring(0, 10); }
+}
+
+// V102-FIX5: Obtener lista de asistencia interna (para vista dentro de la app)
+function getListaAsistenciaInterna(eventoId) {
+  if (!eventoId) return { success: false, error: 'Sin evento' };
+  var reg = getRegistrosEvento(eventoId);
+  if (!reg.success) return reg;
+  var regs = reg.registros || [];
+  if (!regs.length) return { success: true, alumnos: [], curso: {} };
+  var sigla = regs[0].sigla || '';
+  var fechaLimpia = _formatFechaLimpia(regs[0].fechaClase);
+  var instructor = regs[0].instructor || '';
+  var sala = regs[0].sala || '';
+  // Agrupar por estado
+  var estadoCounts = {};
+  var alumnos = [];
+  for (var i = 0; i < regs.length; i++) {
+    var r = regs[i];
+    var ec = r.estadoContacto || 'DESCONOCIDO';
+    estadoCounts[ec] = (estadoCounts[ec] || 0) + 1;
+    alumnos.push({
+      n: i + 1, bp: r.bp, nombre: r.nombre, area: r.area, jefe: r.jefe,
+      email: r.email || '', pais: r.pais || '',
+      estado: ec, estadoDisplay: r.estadoDisplay || ec, colorEstado: r.colorEstado || '#94a3b8',
+      asistencia: r.estadoAsistencia || '', novedad: r.novedad || '',
+      resultado: r.resultado || '', notaCurso: r.notaCurso !== undefined ? r.notaCurso : '',
+      nota: r.notaContacto || '', origenDecision: r.origenDecision || ''
+    });
+  }
+  // Buscar libros existentes
+  var librosData = getLibrosEvento(eventoId);
+  var libros = (librosData && librosData.libros) ? librosData.libros : [];
+  return {
+    success: true,
+    curso: { sigla: sigla, fecha: fechaLimpia, instructor: instructor, sala: sala, eventoId: eventoId },
+    alumnos: alumnos, estadoCounts: estadoCounts, total: regs.length,
+    libros: libros
+  };
+}
+
+// V103-SYNC: Sincronizar datos de Planning al calendario (bidireccional)
+// Escribe PLAN_SS_ID, conteo REAL Y los participantes al PRE_REGISTRO del Calendario
+function _sincronizarEventoCalendario(eventoId, _numParticipantesHint) {
+  try {
+    var ssId = getPlanCalendarSSId();
+    if (!ssId) return;
+    var ss = SpreadsheetApp.openById(ssId);
+    var sh = ss.getSheetByName(PLAN_CALENDAR_TAB);
+    if (!sh) return;
+    var data = sh.getDataRange().getValues();
+    if (data.length < 2) return;
+    // Encontrar columnas en EVENTOS
+    var headers = data[0];
+    var colId = -1, colParticipantes = -1, colEstadoPlan = -1, colPlanSSId = -1;
+    for (var c = 0; c < headers.length; c++) {
+      var h = String(headers[c]).toUpperCase().trim();
+      if (h === 'ID' || h === 'ID_EVENTO' || h === 'EVENTO_ID') colId = c;
+      if (h === 'PARTICIPANTES' || h === 'PARTICIPANTES_PLAN' || h === 'INSCRITOS') colParticipantes = c;
+      if (h === 'ESTADO_PLAN' || h === 'STATUS_PLAN') colEstadoPlan = c;
+      if (h === 'PLAN_SS_ID' || h === 'MAESTRO_SS_ID') colPlanSSId = c;
+    }
+    // Crear columnas si no existen
+    var nextCol = headers.length;
+    if (colParticipantes < 0) {
+      sh.getRange(1, nextCol + 1).setValue('PARTICIPANTES_PLAN');
+      colParticipantes = nextCol;
+      nextCol++;
+    }
+    if (colEstadoPlan < 0) {
+      sh.getRange(1, nextCol + 1).setValue('ESTADO_PLAN');
+      colEstadoPlan = nextCol;
+      nextCol++;
+    }
+    if (colPlanSSId < 0) {
+      sh.getRange(1, nextCol + 1).setValue('PLAN_SS_ID');
+      colPlanSSId = nextCol;
+      nextCol++;
+    }
+
+    // V103-FIX: Contar participantes REALES (no usar el hint que puede ser 0)
+    var realCount = _contarParticipantesActivosEvento(eventoId);
+    var maestroId = _getMenteSS().getId();
+
+    // Buscar y actualizar el evento en EVENTOS
+    for (var r = 1; r < data.length; r++) {
+      if (colId >= 0 && String(data[r][colId]) === eventoId) {
+        sh.getRange(r + 1, colParticipantes + 1).setValue(realCount);
+        sh.getRange(r + 1, colEstadoPlan + 1).setValue(realCount > 0 ? 'SINCRONIZADO' : '');
+        sh.getRange(r + 1, colPlanSSId + 1).setValue(maestroId);
+        break;
+      }
+    }
+    Logger.log('[V103-SYNC] Evento ' + eventoId + ' sincronizado: ' + realCount + ' participantes reales');
+
+    // === ESCRIBIR PARTICIPANTES REALES AL PRE_REGISTRO DEL CALENDARIO ===
+    _sincronizarParticipantesAlCalendario(ss, eventoId);
+
+  } catch(e) {
+    Logger.log('[V103-SYNC] Error sincronizando: ' + e.message);
+  }
+}
+
+/**
+ * V103-FIX: Contar participantes ACTIVOS (no rechazados/cancelados) de un evento en PLAN_REGISTRO
+ */
+function _contarParticipantesActivosEvento(eventoId) {
+  try {
+    var data = _readSheetCached(PLAN_REG_SHEET);
+    var count = 0;
+    for (var r = 1; r < data.length; r++) {
+      if (String(data[r][1]) !== eventoId) continue;
+      var est = String(data[r][13]).toUpperCase();
+      if (est !== 'RECHAZADO' && est !== 'CANCELADO') count++;
+    }
+    return count;
+  } catch(e) { return 0; }
+}
+
+/**
+ * V103-SYNC: Escribe los participantes CONFIRMADOS de PLAN_REGISTRO al PRE_REGISTRO del Calendario
+ * Asi la App 2 siempre tiene los datos reales disponibles localmente
+ */
+function _sincronizarParticipantesAlCalendario(ssCalendario, eventoId) {
+  try {
+    // Leer participantes del MAESTRO (PLAN_REGISTRO)
+    var ssMaestro = _getMenteSS();
+    var shPlan = ssMaestro.getSheetByName(PLAN_REG_SHEET);
+    if (!shPlan || shPlan.getLastRow() < 2) return;
+
+    var planData = shPlan.getDataRange().getValues();
+    var planHeaders = planData[0];
+
+    // Lookup columnas PLAN_REGISTRO
+    var pc = {};
+    for (var c = 0; c < planHeaders.length; c++) {
+      var h = String(planHeaders[c]).toUpperCase().trim();
+      if (h === 'REG_ID') pc.regId = c;
+      else if (h === 'EVENTO_ID') pc.eventoId = c;
+      else if (h === 'SIGLA') pc.sigla = c;
+      else if (h === 'FECHA_CLASE') pc.fechaClase = c;
+      else if (h === 'INSTRUCTOR') pc.instructor = c;
+      else if (h === 'BP') pc.bp = c;
+      else if (h === 'NOMBRE') pc.nombre = c;
+      else if (h === 'EMAIL') pc.email = c;
+      else if (h === 'PAIS') pc.pais = c;
+      else if (h === 'AREA') pc.area = c;
+      else if (h === 'JEFE_DIRECTO') pc.jefe = c;
+      else if (h === 'EMAIL_JEFE') pc.emailJefe = c;
+      else if (h === 'ESTADO_CONTACTO') pc.estado = c;
+      else if (h === 'NOTA_CONTACTO') pc.nota = c;
+      else if (h === 'FECHA_REGISTRO') pc.fechaReg = c;
+      else if (h === 'BASE') pc.base = c;
+    }
+
+    if (pc.eventoId === undefined) return;
+
+    // Recolectar participantes confirmados
+    var participantes = [];
+    for (var r = 1; r < planData.length; r++) {
+      if (String(planData[r][pc.eventoId]) !== eventoId) continue;
+      var estado = String(planData[r][pc.estado] || '').toUpperCase();
+      if (estado === 'RECHAZADO' || estado === 'CANCELADO') continue;
+      participantes.push(planData[r]);
+    }
+
+    if (!participantes.length) return;
+
+    // Obtener o crear PRE_REGISTRO en el Calendario
+    var shPR = ssCalendario.getSheetByName('PRE_REGISTRO');
+    if (!shPR) {
+      shPR = ssCalendario.insertSheet('PRE_REGISTRO');
+      var prHeaders = ['REG_ID','EVENTO_ID','CURSO','FECHA_CLASE','INSTRUCTOR','FUENTE_BASE',
+        'BP','NOMBRE','EMAIL_EMPLEADO','PAIS','AREA',
+        'JEFE_DIRECTO','EMAIL_JEFE','ESTADO','MODO_ENVIO',
+        'REGISTRADO_POR','FECHA_REGISTRO','FECHA_RESPUESTA','OBSERVACIONES'];
+      shPR.getRange(1, 1, 1, prHeaders.length).setValues([prHeaders]);
+      shPR.setFrozenRows(1);
+      shPR.getRange(1, 1, 1, prHeaders.length).setBackground('#1B0088').setFontColor('white').setFontWeight('bold');
+    }
+
+    // Limpiar participantes anteriores de este evento en PRE_REGISTRO
+    var existingData = shPR.getDataRange().getValues();
+    var rowsToDelete = [];
+    for (var e = existingData.length - 1; e >= 1; e--) {
+      if (String(existingData[e][1]) === eventoId) {
+        rowsToDelete.push(e + 1);
+      }
+    }
+    // Eliminar de abajo hacia arriba para no afectar indices
+    for (var d = 0; d < rowsToDelete.length; d++) {
+      shPR.deleteRow(rowsToDelete[d]);
+    }
+
+    // Escribir participantes nuevos
+    var ts = Utilities.formatDate(new Date(), 'America/Santiago', 'yyyy-MM-dd HH:mm');
+    var nuevasFilas = [];
+    for (var p = 0; p < participantes.length; p++) {
+      var row = participantes[p];
+      var fechaClaseStr = _formatFechaLimpia(row[pc.fechaClase] || '');
+      nuevasFilas.push([
+        String(row[pc.regId] || ''),          // REG_ID
+        eventoId,                              // EVENTO_ID
+        String(row[pc.sigla] || ''),           // CURSO
+        fechaClaseStr,                         // FECHA_CLASE
+        String(row[pc.instructor] || ''),      // INSTRUCTOR
+        String(row[pc.base] || 'PLANNING'),    // FUENTE_BASE
+        String(row[pc.bp] || ''),              // BP
+        String(row[pc.nombre] || ''),          // NOMBRE
+        String(row[pc.email] || ''),           // EMAIL_EMPLEADO
+        String(row[pc.pais] || ''),            // PAIS
+        String(row[pc.area] || ''),            // AREA
+        String(row[pc.jefe] || ''),            // JEFE_DIRECTO
+        String(row[pc.emailJefe] || ''),       // EMAIL_JEFE
+        String(row[pc.estado] || ''),          // ESTADO
+        'PLANNING_SYNC',                       // MODO_ENVIO
+        'PLANNING_SYNC',                       // REGISTRADO_POR
+        ts,                                    // FECHA_REGISTRO
+        '',                                    // FECHA_RESPUESTA
+        String(row[pc.nota] || '')             // OBSERVACIONES
+      ]);
+    }
+
+    if (nuevasFilas.length > 0) {
+      shPR.getRange(shPR.getLastRow() + 1, 1, nuevasFilas.length, nuevasFilas[0].length).setValues(nuevasFilas);
+    }
+
+    Logger.log('[V103-SYNC] ' + nuevasFilas.length + ' participantes escritos al PRE_REGISTRO del Calendario para evento ' + eventoId);
+
+  } catch(e) {
+    Logger.log('[V103-SYNC] Error sincronizando participantes al calendario: ' + e.message);
+  }
+}
+
+// V102-FIX5: Sincronizar registros de Planning al calendario (bulk)
+function sincronizarConCalendario(eventoId) {
+  if (!eventoId) return { success: false, error: 'Sin evento' };
+  try {
+    var reg = getRegistrosEvento(eventoId);
+    if (!reg.success) return reg;
+    var confirmados = (reg.registros || []).filter(function(r) { return r.estadoContacto === 'CONFIRMADO'; });
+    _sincronizarEventoCalendario(eventoId, confirmados.length);
+    return { success: true, sincronizados: confirmados.length };
+  } catch(e) {
+    return { success: false, error: 'Error: ' + e.message };
+  }
+}
+
+function _guardarLibroRef(eventoId, sigla, fecha, tipo, url, participantes) {
+  try {
+    _ensurePlanSheets();
+    var ss = _getMenteSS();
+    var sh = ss.getSheetByName(PLAN_LIBROS_SHEET);
+    if (!sh) return;
+    var usr = getUsuarioActual();
+    sh.appendRow(['LIB-' + Utilities.getUuid().substring(0, 8), eventoId, sigla, fecha, tipo, url, participantes, usr ? usr.email : '', new Date().toISOString(), 'ACTIVO', '', '', '']);
+    _invalidateExecCache(PLAN_LIBROS_SHEET);
+  } catch(e) {}
+}
+
+function getLibrosEvento(eventoId, incluirAnulados) {
+  _ensurePlanSheets();
+  var data = _readSheetCached(PLAN_LIBROS_SHEET);
+  if (!data.length) return { success: true, libros: [], anulados: [] };
+  var libros = [];
+  var anulados = [];
+  for (var r = 1; r < data.length; r++) {
+    if (eventoId && String(data[r][1]) !== eventoId) continue;
+    var estadoLib = String(data[r][9] || '').toUpperCase().trim();
+    var libroObj = {
+      libroId: String(data[r][0]), eventoId: String(data[r][1]),
+      sigla: String(data[r][2]), fecha: String(data[r][3]),
+      tipo: String(data[r][4]), url: String(data[r][5]),
+      participantes: Number(data[r][6]) || 0,
+      generadoPor: String(data[r][7]), fechaGeneracion: String(data[r][8]),
+      estado: estadoLib || 'ACTIVO',
+      fechaAnulacion: String(data[r][10] || ''),
+      anuladoPor: String(data[r][11] || ''),
+      motivoAnulacion: String(data[r][12] || '')
+    };
+    if (estadoLib === 'ANULADO') {
+      anulados.push(libroObj);
+    } else {
+      libros.push(libroObj);
+    }
+  }
+  libros.reverse();
+  anulados.reverse();
+  var result = { success: true, libros: libros, anulados: anulados };
+  return result;
+}
+
+/**
+ * V104: Anular libro generado (Soft Delete)
+ * No elimina fisicamente — marca como ANULADO con trazabilidad completa
+ * @param {string} libroId - ID del libro a anular
+ * @param {string} motivo - Motivo de la anulacion (obligatorio)
+ * @returns {Object} { success, libroId, error }
+ */
+function anularLibroGenerado(libroId, motivo) {
+  if (!libroId) return { success: false, error: 'ID de libro requerido' };
+  if (!motivo || !motivo.trim()) return { success: false, error: 'El motivo de anulacion es obligatorio' };
+  var usr = getUsuarioActual();
+  if (!usr) return { success: false, error: 'No autenticado' };
+  var rol = (usr.rol || '').toUpperCase();
+  if (rol !== 'ADMIN' && rol !== 'CAPACITY') return { success: false, error: 'Solo ADMIN o CAPACITY pueden anular libros' };
+  
+  var ss = _getMenteSS();
+  var sh = ss.getSheetByName(PLAN_LIBROS_SHEET);
+  if (!sh) return { success: false, error: 'Hoja PLAN_LIBROS no encontrada' };
+  
+  var data = sh.getDataRange().getValues();
+  for (var r = 1; r < data.length; r++) {
+    if (String(data[r][0]) !== libroId) continue;
+    var estadoActual = String(data[r][9] || '').toUpperCase().trim();
+    if (estadoActual === 'ANULADO') return { success: false, error: 'Este libro ya esta anulado' };
+    
+    var now = new Date().toISOString();
+    // Columna 10: ESTADO, 11: FECHA_ANULACION, 12: ANULADO_POR, 13: MOTIVO_ANULACION
+    sh.getRange(r + 1, 10, 1, 4).setValues([['ANULADO', now, usr.email || usr.nombre, motivo.trim()]]);
+    
+    _invalidateExecCache(PLAN_LIBROS_SHEET);
+    _invalidatePlanCache();
+    _logPlan(usr.email, 'ANULAR_LIBRO', String(data[r][1]), 'Libro: ' + libroId + ' | Motivo: ' + motivo.trim());
+    
+    return { success: true, libroId: libroId, fechaAnulacion: now, anuladoPor: usr.email || usr.nombre };
+  }
+  return { success: false, error: 'Libro no encontrado: ' + libroId };
+}
+
+// ============================
+// CORREOS CON PREVIEW
+// ============================
+/**
+ * V105-FIX: Obtiene fecha + hora inicio + hora fin DIRECTAMENTE desde EVENTOS.
+ * NO usa Date parsing ni timezone conversion — los datos ya estan en hora local del evento.
+ * Retorna string formateado listo para el correo: "09 Apr 2026 — 07:13 a 15:13"
+ */
+function _getEventoFechaCorreo(eventoId) {
+  try {
+    var ssId = getPlanCalendarSSId();
+    if (!ssId) { Logger.log('[V105] No hay SS ID (ni property ni default)'); return ''; }
+    var ss = SpreadsheetApp.openById(ssId);
+    var sh = ss.getSheetByName(PLAN_CALENDAR_TAB);
+    if (!sh) { Logger.log('[V105] Hoja ' + PLAN_CALENDAR_TAB + ' no encontrada'); return ''; }
+    var data = sh.getDataRange().getValues();
+    if (data.length < 2) return '';
+    // Descubrir columnas con matching flexible
+    var headers = data[0];
+    var idxId = -1, idxFecha = -1, idxHI = -1, idxHF = -1;
+    for (var c = 0; c < headers.length; c++) {
+      var hdr = String(headers[c]).toUpperCase().trim();
+      if (hdr === 'ID') idxId = c;
+      else if (hdr === 'FECHA') idxFecha = c;
+      else if (hdr === 'HORA_INICIO' || hdr === 'HORA INICIO' || hdr === 'INICIO' || hdr.indexOf('HORA_I') >= 0) idxHI = c;
+      else if (hdr === 'HORA_FIN' || hdr === 'HORA FIN' || hdr === 'FIN' || hdr.indexOf('HORA_F') >= 0) idxHF = c;
+    }
+    if (idxId < 0) { Logger.log('[V105] Columna ID no encontrada. Headers: ' + headers.join(',')); return ''; }
+    Logger.log('[V105] Columnas encontradas: ID=' + idxId + ' FECHA=' + idxFecha + ' HI=' + idxHI + ' HF=' + idxHF);
+    // Buscar evento por ID
+    var targetId = String(eventoId).trim();
+    for (var r = 1; r < data.length; r++) {
+      var rowId = String(data[r][idxId] || '').trim();
+      if (rowId === targetId) {
+        // Extraer fecha LOCAL (sin conversion de timezone)
+        var fechaRaw = (idxFecha >= 0) ? data[r][idxFecha] : null;
+        var fechaStr = '';
+        if (fechaRaw instanceof Date) {
+          // Formatear fecha SIN hora — usar la zona del proyecto para no cambiar el dia
+          var tz = Session.getScriptTimeZone() || 'America/Santiago';
+          fechaStr = Utilities.formatDate(fechaRaw, tz, 'dd MMM yyyy');
+        } else {
+          fechaStr = String(fechaRaw || '').trim();
+        }
+        // Extraer horas como texto plano (ya son hora local del evento)
+        var horaI = (idxHI >= 0) ? data[r][idxHI] : '';
+        var horaF = (idxHF >= 0) ? data[r][idxHF] : '';
+        // Formatear horas: si son Date, extraer solo HH:mm en zona local
+        var tz2 = Session.getScriptTimeZone() || 'America/Santiago';
+        if (horaI instanceof Date) horaI = Utilities.formatDate(horaI, tz2, 'HH:mm');
+        else horaI = String(horaI || '').trim();
+        if (horaF instanceof Date) horaF = Utilities.formatDate(horaF, tz2, 'HH:mm');
+        else horaF = String(horaF || '').trim();
+        Logger.log('[V105] Evento encontrado: fecha=' + fechaStr + ' HI=' + horaI + ' HF=' + horaF);
+        // Construir string final
+        if (!fechaStr) return '';
+        var resultado = fechaStr;
+        if (horaI && horaF) {
+          resultado += ' — ' + horaI + ' a ' + horaF;
+        } else if (horaI) {
+          resultado += ' — ' + horaI;
+        }
+        return resultado;
+      }
+    }
+    Logger.log('[V105] Evento ' + targetId + ' NO encontrado en ' + (data.length - 1) + ' filas de EVENTOS');
+    return '';
+  } catch(e) {
+    Logger.log('[V105] Error critico: ' + e.message);
+    return '';
+  }
+}
+
+// V105-FIX: Helper estructurado para Mi Equipo > Pendientes.
+// Usa la misma fuente EVENTOS que Planning/Correo y evita el desfase UTC.
+function _getEventoDetallePendientes(eventoId) {
+  try {
+    var ssId = getPlanCalendarSSId();
+    if (!ssId) return null;
+
+    var ss = SpreadsheetApp.openById(ssId);
+    var sh = ss.getSheetByName(PLAN_CALENDAR_TAB);
+    if (!sh) return null;
+
+    var data = sh.getDataRange().getValues();
+    if (data.length < 2) return null;
+
+    var headers = data[0];
+    var idxId = -1, idxFecha = -1, idxHI = -1, idxHF = -1;
+    for (var c = 0; c < headers.length; c++) {
+      var hdr = String(headers[c]).toUpperCase().trim();
+      if (hdr === 'ID') idxId = c;
+      else if (hdr === 'FECHA') idxFecha = c;
+      else if (hdr === 'HORA_INICIO' || hdr === 'HORA INICIO' || hdr === 'INICIO' || hdr.indexOf('HORA_I') >= 0) idxHI = c;
+      else if (hdr === 'HORA_FIN' || hdr === 'HORA FIN' || hdr === 'FIN' || hdr.indexOf('HORA_F') >= 0) idxHF = c;
+    }
+    if (idxId < 0) return null;
+
+    var targetId = String(eventoId || '').trim();
+    var tz = Session.getScriptTimeZone();
+
+    for (var r = 1; r < data.length; r++) {
+      if (String(data[r][idxId] || '').trim() !== targetId) continue;
+
+      var fechaRaw = idxFecha >= 0 ? data[r][idxFecha] : null;
+      var fechaDisplay = '';
+      var fechaOrden = '';
+      if (fechaRaw instanceof Date) {
+        fechaDisplay = Utilities.formatDate(fechaRaw, tz, 'dd MMM yyyy');
+        fechaOrden = Utilities.formatDate(fechaRaw, tz, 'yyyy-MM-dd');
+      } else {
+        fechaDisplay = String(fechaRaw || '').trim();
+        fechaOrden = fechaDisplay;
+      }
+
+      var horaI = idxHI >= 0 ? data[r][idxHI] : '';
+      var horaF = idxHF >= 0 ? data[r][idxHF] : '';
+      if (horaI instanceof Date) horaI = Utilities.formatDate(horaI, tz, 'HH:mm');
+      else horaI = String(horaI || '').trim();
+      if (horaF instanceof Date) horaF = Utilities.formatDate(horaF, tz, 'HH:mm');
+      else horaF = String(horaF || '').trim();
+
+      var fechaTexto = fechaDisplay;
+      if (fechaTexto) {
+        if (horaI && horaF) fechaTexto += ' — ' + horaI + ' a ' + horaF;
+        else if (horaI) fechaTexto += ' — ' + horaI;
+      }
+
+      return {
+        fechaDisplay: fechaDisplay,
+        horaInicio: horaI,
+        horaFin: horaF,
+        fechaOrden: fechaOrden,
+        fechaTexto: fechaTexto
+      };
+    }
+  } catch (e) {
+    Logger.log('[V105] _getEventoDetallePendientes error: ' + e.message);
+  }
+  return null;
+}
+
+function getPreviewCorreo(eventoId, modo) {
+  var reg = getRegistrosEvento(eventoId);
+  if (!reg.success || !reg.registros || !reg.registros.length) return { success: false, error: 'Sin registros' };
+  var regs = reg.registros;
+  var sigla = regs[0].sigla || '';
+  // V105-FIX: Usar fecha y horas directamente desde EVENTOS (sin timezone shift)
+  // _formatFechaAmigable(fechaClase) causaba desfase porque fechaClase es solo "yyyy-MM-dd"
+  // y new Date("yyyy-MM-dd") se interpreta como UTC midnight, desfasando al aplicar TZ.
+  var fechaDesdeEvento = _getEventoFechaCorreo(eventoId);
+  var fecha = fechaDesdeEvento || _formatFechaAmigable(regs[0].fechaClase);
+  var instructor = regs[0].instructor || '';
+  var sala = regs[0].sala || '';
+
+  if (modo === 'JEFES') {
+    var porJefe = {};
+    for (var i = 0; i < regs.length; i++) {
+      var r = regs[i];
+      var jefeKey = r.emailJefe || r.jefe || 'sin_jefe';
+      if (!porJefe[jefeKey]) porJefe[jefeKey] = { nombre: r.jefe, email: r.emailJefe, empleados: [] };
+      porJefe[jefeKey].empleados.push(r);
+    }
+    var previews = [];
+    for (var je in porJefe) {
+      var info = porJefe[je];
+      var body = 'Estimado(a) ' + info.nombre + ',\n\n'
+        + 'Solicitud de validacion para el curso ' + sigla + ' del ' + fecha + '.\n\n'
+        + 'Participantes propuestos de su equipo:\n';
+      var participantes = [];
+      for (var k = 0; k < info.empleados.length; k++) {
+        body += '  ' + (k+1) + '. ' + info.empleados[k].nombre + ' (BP: ' + info.empleados[k].bp + ')\n';
+        participantes.push({ bp: info.empleados[k].bp, nombre: info.empleados[k].nombre, area: info.empleados[k].area });
+      }
+      body += '\n[El jefe debera ingresar a la App para aprobar o rechazar]\n\nAtentamente,\nEquipo de Capacitacion';
+      // V2-FIX: jefeId = email si existe, nombre si no (para token y matching)
+      var jefeId = (info.email && info.email.indexOf('@') >= 0) ? info.email : info.nombre;
+      previews.push({
+        destinatario: info.email || 'Sin email',
+        jefeId: jefeId,
+        nombreJefe: info.nombre,
+        subject: 'Validacion de asistencia: ' + sigla + ' — ' + fecha,
+        body: body,
+        empleados: info.empleados.length,
+        participantes: participantes
+      });
+    }
+    return { success: true, modo: 'JEFES', previews: previews, incluyeAprobacion: true, sigla: sigla, fecha: fecha, instructor: instructor, sala: sala };
+  }
+
+  if (modo === 'PARTICIPANTES') {
+    var bodyBase = 'Estimado(a) [NOMBRE],\n\n'
+      + 'Se le informa que tiene una capacitacion programada:\n\n'
+      + 'Curso: ' + sigla + '\nFecha: ' + fecha + '\nInstructor: ' + instructor + '\nSala: ' + sala + '\n\n'
+      + 'Por favor confirme su asistencia.\n\nAtentamente,\nEquipo de Capacitacion';
+    var destinatarios = [];
+    for (var d = 0; d < regs.length; d++) {
+      destinatarios.push({ nombre: regs[d].nombre, email: regs[d].email, bp: regs[d].bp });
+    }
+    return { success: true, modo: 'PARTICIPANTES', subject: 'Capacitacion programada: ' + sigla + ' — ' + fecha, bodyTemplate: bodyBase, destinatarios: destinatarios };
+  }
+  return { success: false, error: 'Modo no valido' };
+}
+
+function enviarCorreoPlan(eventoId, modo, contenidoEditado, emailPrueba) {
+  var preview = getPreviewCorreo(eventoId, modo);
+  if (!preview.success) return preview;
+
+  if (emailPrueba) {
+    // TEST SEND
+    try {
+      var subject = contenidoEditado && contenidoEditado.subject ? contenidoEditado.subject : '[PRUEBA] Correo Planning';
+      var body = contenidoEditado && contenidoEditado.body ? contenidoEditado.body : 'Preview de correo sin contenido';
+      if (modo === 'JEFES' && preview.previews && preview.previews.length > 0) {
+        var pTest = preview.previews[0];
+        // V102: Email informativo — enlace va a la App principal, sin token de aprobacion
+        var webUrlTest = _getWebAppUrl();
+        var htmlTest = _buildEmailJefeHTML(pTest.nombreJefe || 'Jefe (prueba)', preview.sigla || '', preview.fecha || '', preview.instructor || '', preview.sala || '', pTest.participantes || [], webUrlTest);
+        MailApp.sendEmail({ to: emailPrueba, subject: '[PRUEBA] ' + subject, body: body, htmlBody: htmlTest });
+      } else {
+        MailApp.sendEmail(emailPrueba, '[PRUEBA] ' + subject, body);
+      }
+      var usrTest = getUsuarioActual();
+      _logPlan(usrTest ? usrTest.email : '', 'CORREO_PRUEBA', eventoId, 'a: ' + emailPrueba + ' modo: ' + modo);
+      return { success: true, enviados: 1, modo: 'PRUEBA', destino: emailPrueba };
+    } catch(e) { return { success: false, error: e.message }; }
+  }
+
+  // REAL SEND — V102-TEST: Respetar modo de prueba
+  var enviados = 0, errores = 0, simulados = 0;
+  if (modo === 'JEFES' && preview.previews) {
+    var webAppUrl = _getWebAppUrl();
+    for (var j = 0; j < preview.previews.length; j++) {
+      var p = preview.previews[j];
+      if (!p.destinatario || p.destinatario.indexOf('@') < 0) { errores++; continue; }
+      var _envioJ = _resolverEnvioCorreoPlan(p.destinatario);
+      if (!_envioJ.enviar) { simulados++; continue; }
+      try {
+        var sub = contenidoEditado && contenidoEditado.subject ? contenidoEditado.subject : p.subject;
+        var htmlBody = _buildEmailJefeHTML(p.nombreJefe, preview.sigla || '', preview.fecha || '', preview.instructor || '', preview.sala || '', p.participantes || [], webAppUrl);
+        var plainBody = contenidoEditado && contenidoEditado.body ? contenidoEditado.body : p.body;
+        MailApp.sendEmail({ to: _envioJ.destino, subject: (_envioJ.esTest ? '[TEST] ' : '') + sub, body: plainBody, htmlBody: htmlBody });
+        enviados++;
+      } catch(e) { errores++; }
+    }
+  } else if (modo === 'PARTICIPANTES' && preview.destinatarios) {
+    for (var d = 0; d < preview.destinatarios.length; d++) {
+      var dest = preview.destinatarios[d];
+      if (!dest.email || dest.email.indexOf('@') < 0) { errores++; continue; }
+      var _envioP = _resolverEnvioCorreoPlan(dest.email);
+      if (!_envioP.enviar) { simulados++; continue; }
+      try {
+        var sub2 = contenidoEditado && contenidoEditado.subject ? contenidoEditado.subject : preview.subject;
+        var bod2 = (contenidoEditado && contenidoEditado.body ? contenidoEditado.body : preview.bodyTemplate).replace('[NOMBRE]', dest.nombre);
+        MailApp.sendEmail(_envioP.destino, (_envioP.esTest ? '[TEST] ' : '') + sub2, bod2);
+        enviados++;
+      } catch(e) { errores++; }
+    }
+  }
+  var usr2 = getUsuarioActual();
+  _logPlan(usr2 ? usr2.email : '', 'ENVIO_CORREO_' + modo, eventoId, 'enviados=' + enviados + ' errores=' + errores + ' simulados=' + simulados);
+  return { success: true, enviados: enviados, errores: errores, simulados: simulados, modo: modo };
+}
+
+// ============================
+// SOLICITUDES (Capacity → Admin)
+// ============================
+function crearSolicitudCambio(eventoId, eventoInfo, tipoCambio, detalle) {
+  _ensurePlanSheets();
+  var usr = getUsuarioActual();
+  var actor = usr ? (usr.email || usr.nombre) : '';
+  var ss = _getMenteSS();
+  var sh = ss.getSheetByName(PLAN_SOL_SHEET);
+  if (!sh) return { success: false, error: 'Hoja no encontrada' };
+  var solId = 'SOL-' + Utilities.getUuid().substring(0, 8);
+  sh.appendRow([solId, eventoId, eventoInfo.sigla || '', eventoInfo.fecha || '', tipoCambio, detalle, actor, new Date().toISOString(), 'PENDIENTE', '', '', '']);
+  _invalidateExecCache(PLAN_SOL_SHEET);
+  _logPlan(actor, 'CREAR_SOLICITUD', eventoId, tipoCambio + ': ' + detalle);
+  return { success: true, solicitudId: solId };
+}
+
+function getSolicitudesPlan(filtros) {
+  _ensurePlanSheets();
+  var data = _readSheetCached(PLAN_SOL_SHEET);
+  if (!data.length) return { success: true, solicitudes: [] };
+  var sols = [];
+  var estadoFiltro = filtros && filtros.estado ? filtros.estado.toUpperCase() : '';
+  for (var r = 1; r < data.length; r++) {
+    var estado = String(data[r][8]).toUpperCase();
+    if (estadoFiltro && estado !== estadoFiltro) continue;
+    sols.push({ solId: String(data[r][0]), eventoId: String(data[r][1]), sigla: String(data[r][2]), fechaClase: String(data[r][3]), tipoCambio: String(data[r][4]), detalle: String(data[r][5]), solicitadoPor: String(data[r][6]), fechaSolicitud: String(data[r][7]), estado: estado, resueltoPor: String(data[r][9]), fechaResolucion: String(data[r][10]), notaAdmin: String(data[r][11]) });
+  }
+  sols.reverse();
+  return { success: true, solicitudes: sols };
+}
+
+function resolverSolicitud(solId, decision, notaAdmin) {
+  var usr = getUsuarioActual();
+  if (!usr || (usr.rol || '').toUpperCase() !== 'ADMIN') return { success: false, error: 'Solo ADMIN' };
+  var ss = _getMenteSS();
+  var sh = ss.getSheetByName(PLAN_SOL_SHEET);
+  if (!sh) return { success: false };
+  var data = sh.getDataRange().getValues();
+  for (var r = 1; r < data.length; r++) {
+    if (String(data[r][0]) === solId) {
+      sh.getRange(r + 1, 9).setValue(decision);
+      sh.getRange(r + 1, 10).setValue(usr.email || usr.nombre);
+      sh.getRange(r + 1, 11).setValue(new Date().toISOString());
+      sh.getRange(r + 1, 12).setValue(notaAdmin || '');
+      _logPlan(usr.email, 'RESOLVER_SOLICITUD', String(data[r][1]), solId + ': ' + decision);
+      _invalidateExecCache(PLAN_SOL_SHEET);
+      return { success: true };
+    }
+  }
+  return { success: false, error: 'No encontrada' };
+}
+
+
+// ============================
+// KPI DRILL-DOWN FUNCTIONS
+// ============================
+
+/**
+ * Returns all registrations made by the current user (capacity field matches email)
+ */
+function getMisRegistrosPlan() {
+  try {
+    var _t0 = _perfStart();
+    var usr = getUsuarioActual();
+    if (!usr) return { success: false, error: 'Sin sesion' };
+    var emailUser = (usr.email || '').toLowerCase();
+    var data = _readSheetCached(PLAN_REG_SHEET);
+    if (!data.length) return { success: true, registros: [] };
+    var registros = [];
+    for (var r = 1; r < data.length; r++) {
+      var capacity = String(data[r][20] || '').toLowerCase();
+      if (capacity !== emailUser) continue;
+      registros.push({
+        regId: String(data[r][0]), eventoId: String(data[r][1]),
+        sigla: String(data[r][2]), fechaClase: String(data[r][3]),
+        bp: String(data[r][6]), nombre: String(data[r][7]),
+        pais: String(data[r][9]), area: String(data[r][10]),
+        jefe: String(data[r][11]),
+        estadoContacto: String(data[r][13]),
+        estadoAsistencia: String(data[r][18]),
+        fechaRegistro: String(data[r][21])
+      });
+    }
+    registros.reverse();
+    _perfLog('getMisRegistrosPlan', _t0);
+    return { success: true, registros: registros, total: registros.length };
+  } catch(e) {
+    return { success: false, error: e.message };
+  }
+}
+
+/**
+ * Returns all generated books (no event filter)
+ */
+function getTodosLibrosPlan() {
+  return getLibrosEvento(null);
+}
+
+/**
+ * V3: Vista Gestion Cross-Event para Capacity
+ * Retorna TODOS los registros del capacity agrupados por estado,
+ * con filtros disponibles y acciones rapidas
+ */
+function getRegistrosGestion() {
+  try {
+    var _t0 = _perfStart();
+    _ensurePlanSheets();
+    var usr = getUsuarioActual();
+    if (!usr) return { success: false, error: 'Sin sesion' };
+    var emailUser = (usr.email || '').toLowerCase();
+    var rolUser = (usr.rol || '').toUpperCase();
+    var data = _readSheetCached(PLAN_REG_SHEET);
+    if (!data.length) return { success: true, registros: [], filtros: {}, stats: {} };
+
+    var registros = [];
+    var cursosSet = {};
+    var paisesSet = {};
+    var eventosSet = {};
+    var stats = { seleccionados: 0, preConfirmados: 0, enProceso: 0, confirmados: 0, rechazados: 0, asistieron: 0, noAsistieron: 0, cancelados: 0, total: 0,
+      aprobados: 0, reprobados: 0, pendFormalizacion: 0, formalizados: 0, postCurso: 0 };
+
+    for (var r = 1; r < data.length; r++) {
+      var capacity = String(data[r][20] || '').toLowerCase();
+      // CAPACITY ve solo sus registros, ADMIN ve todo
+      if (rolUser === 'CAPACITY' && capacity !== emailUser) continue;
+
+      var estContacto = String(data[r][13]).toUpperCase();
+      var estAsist = String(data[r][18]).toUpperCase();
+      var sigla = String(data[r][2]).trim();
+      var pais = String(data[r][9]).trim();
+      var evId = String(data[r][1]).trim();
+      var resultado = data[r][25] !== undefined ? String(data[r][25] || '') : '';
+      var notaCurso = data[r][26] !== undefined ? (data[r][26] !== '' ? data[r][26] : '') : '';
+      var estadoCorporativo = data[r][27] !== undefined ? String(data[r][27] || '') : '';
+
+      // V2.8: Calcular estado operativo
+      var estOperativo = _getEstadoOperativo(estAsist, resultado, estadoCorporativo);
+
+      // V2.8: Determinar grupo visual — POST_CURSO si tiene datos post-curso
+      var grupo = 'SELECCIONADO';
+      if (estOperativo !== 'PRE_CURSO') {
+        grupo = 'POST_CURSO';
+      } else if (estContacto === 'CONFIRMADO') grupo = 'CONFIRMADO';
+      else if (estContacto === 'RECHAZADO') grupo = 'RECHAZADO';
+      else if (estContacto === 'PRE_CONFIRMADO' || estContacto === 'PRECONFIRMADO_JEFE' || estContacto === 'CITADO' || estContacto === 'NO_CONTACTADO') grupo = 'PRE_CONFIRMADO';
+
+      // Stats
+      stats.total++;
+      if (grupo === 'POST_CURSO') {
+        stats.postCurso++;
+        if (estOperativo === 'FORMALIZADO') stats.formalizados++;
+        else if (estOperativo === 'APROBADO_PEND_FORM') { stats.aprobados++; stats.pendFormalizacion++; }
+        else if (estOperativo === 'REPROBADO') stats.reprobados++;
+        else if (estOperativo === 'NO_ASISTIO') stats.noAsistieron++;
+        else if (estOperativo === 'ASISTIO_PEND_EVAL') stats.aprobados++; // Count as attended
+      } else if (grupo === 'SELECCIONADO') stats.seleccionados++;
+      else if (grupo === 'PRE_CONFIRMADO') stats.preConfirmados++;
+      else if (grupo === 'CONFIRMADO') stats.confirmados++;
+      else if (grupo === 'RECHAZADO') stats.rechazados++;
+      // V103: ASISTIO/NO_ASISTIO removidos — pertenecen al flujo de Instructores
+      if (estAsist === 'CANCELADO') stats.cancelados++;
+
+      // Collect filter values
+      if (sigla) cursosSet[sigla] = true;
+      if (pais) paisesSet[pais] = true;
+      if (evId) eventosSet[evId] = true;
+
+      var display = ESTADOS_DISPLAY[estContacto] || { color: '#94a3b8', label: estContacto, grupo: grupo };
+
+      registros.push({
+        regId: String(data[r][0]),
+        eventoId: evId,
+        sigla: sigla,
+        fechaClase: String(data[r][3]),
+        instructor: String(data[r][4]),
+        bp: String(data[r][6]),
+        nombre: String(data[r][7]),
+        email: String(data[r][8]),
+        pais: pais,
+        area: String(data[r][10]),
+        jefe: String(data[r][11]),
+        emailJefe: String(data[r][12]),
+        estadoContacto: estContacto,
+        estadoDisplay: display.label,
+        grupo: grupo,
+        colorEstado: display.color,
+        jefeNotificado: String(data[r][16]),
+        estadoAsistencia: estAsist,
+        resultado: resultado,
+        notaCurso: notaCurso,
+        estadoCorporativo: estadoCorporativo,
+        estadoOperativo: estOperativo,
+        comentarioJefe: String(data[r][22] || ''),
+        origenDecision: String(data[r][23] || ''),
+        fechaRegistro: String(data[r][21]),
+        fechaEstado: String(data[r][14]),
+        transicionesValidas: TRANSICIONES_VALIDAS[estContacto] || []
+      });
+    }
+
+    // Sort: most recent first
+    registros.sort(function(a, b) {
+      return (b.fechaRegistro || '').localeCompare(a.fechaRegistro || '');
+    });
+
+    var filtros = {
+      cursos: Object.keys(cursosSet).sort(),
+      paises: Object.keys(paisesSet).sort(),
+      totalEventos: Object.keys(eventosSet).length
+    };
+
+    _perfLog('getRegistrosGestion', _t0);
+    return { success: true, registros: registros, filtros: filtros, stats: stats };
+  } catch(e) {
+    return { success: false, error: e.message };
+  }
+}
+
+/**
+ * V3: Panel KPI / Informe para CAPACITY
+ * Retorna estadisticas agregadas de planificacion
+ */
+function getInformePlanificacion() {
+  try {
+    var _t0 = _perfStart();
+    _ensurePlanSheets();
+    var usr = getUsuarioActual();
+    var emailUser = usr ? (usr.email || '').toLowerCase() : '';
+    var rolUser = usr ? (usr.rol || '').toUpperCase() : '';
+    var data = _readSheetCached(PLAN_REG_SHEET);
+    var stats = {
+      seleccionados: 0, preConfirmados: 0, confirmados: 0, rechazados: 0,
+      cancelados: 0, pendientesAsist: 0,
+      totalRegistros: 0
+    };
+    var porCurso = {};
+    var porMes = {};
+    for (var r = 1; r < data.length; r++) {
+      var estContacto = String(data[r][13]).toUpperCase();
+      var estAsist = String(data[r][18]).toUpperCase();
+      var sigla = String(data[r][2]).trim();
+      var capacity = String(data[r][20] || '').toLowerCase();
+      // CAPACITY solo ve sus registros, ADMIN ve todo
+      if (rolUser === 'CAPACITY' && capacity !== emailUser) continue;
+      stats.totalRegistros++;
+    // V103: Contacto — PRE_CONFIRMADO como grupo propio — ASISTIO removido de Planning
+      if (estContacto === 'SELECCIONADO') stats.seleccionados++;
+      else if (estContacto === 'PRE_CONFIRMADO' || estContacto === 'PRECONFIRMADO_JEFE' || estContacto === 'CITADO' || estContacto === 'NO_CONTACTADO') stats.preConfirmados = (stats.preConfirmados || 0) + 1;
+      else if (estContacto === 'CONFIRMADO') stats.confirmados++;
+      else if (estContacto === 'RECHAZADO') stats.rechazados++;
+      // V103: ASISTIO/NO_ASISTIO removidos — pertenecen al flujo de Instructores
+      if (estAsist === 'CANCELADO') stats.cancelados++;
+      else if (estAsist === 'PENDIENTE' && estContacto === 'CONFIRMADO') stats.pendientesAsist++;
+      // Por curso
+      if (sigla) {
+        if (!porCurso[sigla]) porCurso[sigla] = { seleccionados: 0, confirmados: 0, rechazados: 0, cancelados: 0 };
+        if (estContacto === 'SELECCIONADO') porCurso[sigla].seleccionados++;
+        if (estContacto === 'CONFIRMADO') porCurso[sigla].confirmados++;
+        if (estContacto === 'RECHAZADO') porCurso[sigla].rechazados++;
+        // V103: ASISTIO/NO_ASISTIO removidos de Planning — pertenecen a Instructores
+        if (estAsist === 'CANCELADO') porCurso[sigla].cancelados++;
+      }
+      // Por mes
+      var fechaReg = String(data[r][21] || '');
+      if (fechaReg) {
+        var mes = fechaReg.substring(0, 7);
+        if (!porMes[mes]) porMes[mes] = 0;
+        porMes[mes]++;
+      }
+    }
+    // Convertir porCurso a array ordenado
+    var cursosArr = [];
+    for (var s in porCurso) {
+      var c = porCurso[s];
+      c.sigla = s;
+      c.total = c.seleccionados + c.confirmados + c.rechazados;
+      cursosArr.push(c);
+    }
+    cursosArr.sort(function(a, b) { return b.total - a.total; });
+    _perfLog('getInformePlanificacion', _t0);
+    return { success: true, stats: stats, porCurso: cursosArr, porMes: porMes };
+  } catch(e) {
+    return { success: false, error: e.message };
+  }
+}
+
+/**
+ * Returns solicitudes for the current user's role
+ */
+function getSolicitudesDrilldown() {
+  try {
+    var _t0 = _perfStart();
+    var usr = getUsuarioActual();
+    var rolUser = usr ? (usr.rol || '').toUpperCase() : '';
+    var data = _readSheetCached(PLAN_SOL_SHEET);
+    if (!data.length) return { success: true, solicitudes: [], rol: rolUser };
+    var sols = [];
+    for (var r = 1; r < data.length; r++) {
+      sols.push({
+        solId: String(data[r][0]), eventoId: String(data[r][1]),
+        sigla: String(data[r][2]), tipoCambio: String(data[r][3]),
+        detalle: String(data[r][4]), solicitadoPor: String(data[r][5]),
+        emailSolicitante: String(data[r][6]),
+        fechaSolicitud: String(data[r][7]),
+        estado: String(data[r][8]),
+        resueltoPor: String(data[r][9] || ''),
+        fechaResolucion: String(data[r][10] || ''),
+        nota: String(data[r][11] || '')
+      });
+    }
+    sols.reverse();
+    if (rolUser === 'ADMIN') {
+      sols.sort(function(a, b) { return (a.estado === 'PENDIENTE' ? 0 : 1) - (b.estado === 'PENDIENTE' ? 0 : 1); });
+    }
+    _perfLog('getSolicitudesDrilldown', _t0);
+    return { success: true, solicitudes: sols, rol: rolUser };
+  } catch(e) {
+    return { success: false, error: e.message };
+  }
+}
+
+
+// ============================
+// DASHBOARD
+// ============================
+function getDashboardPlanificacion() {
+  try {
+    var _t0 = _perfStart();
+    var cache = CacheService.getScriptCache();
+    var cacheKey = 'PLAN_DASHBOARD';
+    var cached = cache.get(cacheKey);
+    if (cached) {
+      var parsed = JSON.parse(cached);
+      var usr = getUsuarioActual();
+      parsed.rol = usr ? (usr.rol || '').toUpperCase() : '';
+      _perfLog('getDashboardPlanificacion (CACHE HIT)', _t0);
+      return parsed;
+    }
+    var usr = getUsuarioActual();
+    var rolUser = usr ? (usr.rol || '').toUpperCase() : '';
+    var emailUser = usr ? (usr.email || '').toLowerCase() : '';
+    var ss = _getMenteSS();
+    var ahora = new Date();
+    var mesActual = Utilities.formatDate(ahora, 'America/Santiago', 'yyyy-MM');
+    var eventosRes = getEventosCalendario({ mesAnio: mesActual });
+    var eventosEsteMes = (eventosRes.success && eventosRes.eventos) ? eventosRes.eventos.length : 0;
+
+    // Usar cache por ejecucion para PLAN_REGISTRO
+    var regData = _readSheetCached(PLAN_REG_SHEET);
+    var stats = { seleccionados: 0, preConfirmados: 0, confirmados: 0, rechazados: 0, mis: 0 };
+    for (var r = 1; r < regData.length; r++) {
+      var est = String(regData[r][13]).toUpperCase();
+      if (est === 'SELECCIONADO') stats.seleccionados++;
+      else if (est === 'PRE_CONFIRMADO' || est === 'PRECONFIRMADO_JEFE' || est === 'CITADO' || est === 'NO_CONTACTADO') stats.preConfirmados++;
+      else if (est === 'CONFIRMADO') stats.confirmados++;
+      else if (est === 'RECHAZADO') stats.rechazados++;
+      if (String(regData[r][20] || '').toLowerCase() === emailUser) stats.mis++;
+    }
+
+    // Libros: solo contar filas (rapido)
+    var libros = 0;
+    var shLib = ss.getSheetByName(PLAN_LIBROS_SHEET);
+    if (shLib && shLib.getLastRow() >= 2) libros = shLib.getLastRow() - 1;
+
+    // Solicitudes: usar cache por ejecucion
+    var solData = _readSheetCached(PLAN_SOL_SHEET);
+    var solPendientes = 0;
+    for (var s = 1; s < solData.length; s++) {
+      if (String(solData[s][8]).toUpperCase() === 'PENDIENTE') solPendientes++;
+    }
+
+    var result = {
+      success: true, rol: rolUser, mesActual: mesActual,
+      eventosEsteMes: eventosEsteMes,
+      stats: stats, libros: libros, solPendientes: solPendientes
+    };
+    try { cache.put(cacheKey, JSON.stringify(result), 300); } catch(ce) {}
+    _perfLog('getDashboardPlanificacion (FULL READ)', _t0);
+    return result;
+  } catch(e) {
+    return { success: false, error: 'Error dashboard: ' + e.message };
+  }
+}
+
+// ============================
+// WHITELIST
+// ============================
+// getPlanningWhitelist y setPlanningWhitelist movidos a Codigo.gs (version con auditoria)
+function canAccessPlanificacion() {
+  var usr = getUsuarioActual();
+  if (!usr) return false;
+  var rol = (usr.rol || '').toUpperCase();
+  if (rol === 'ADMIN') return true;
+  var whitelist = getPlanningWhitelist();
+  return whitelist.indexOf((usr.email || '').toLowerCase()) >= 0;
+}
+
+// ============================
+// ACCESS CHECK: _canAccessPlanning
+// ============================
+function _canAccessPlanning(usr) {
+  if (!usr) return false;
+  var rol = (usr.rol || '').toUpperCase();
+  if (rol === 'ADMIN') return true;
+  var whitelist = getPlanningWhitelist();
+  return whitelist.indexOf((usr.email || '').toLowerCase()) >= 0;
+}
+
+// ============================
+// LOG
+// ============================
+function _logPlan(usuario, accion, eventoId, detalle) {
+  try {
+    var ss = _getMenteSS();
+    var sh = ss.getSheetByName(PLAN_LOG_SHEET);
+    if (!sh) return;
+    sh.appendRow([new Date().toISOString(), usuario, accion, eventoId, detalle]);
+  } catch(e) {}
+}
+
+// ============================
+// V2.8: FORMALIZACION — Marcar registros como formalizados
+// ============================
+
+/**
+ * V2.8: Formalizar un registro individual
+ * Solo ADMIN y CAPACITY pueden formalizar
+ * Pre-condicion: el registro debe tener ESTADO_ASISTENCIA = ASISTIO y RESULTADO = APROBADO
+ */
+function formalizarRegistro(regId) {
+  var usr = getUsuarioActual();
+  if (!usr) return { success: false, error: 'Sin sesion' };
+  var rol = (usr.rol || '').toUpperCase();
+  if (rol !== 'ADMIN' && rol !== 'CAPACITY') return { success: false, error: 'Solo ADMIN o CAPACITY pueden formalizar' };
+
+  var ss = _getMenteSS();
+  var sh = ss.getSheetByName(PLAN_REG_SHEET);
+  if (!sh) return { success: false, error: 'Hoja no encontrada' };
+
+  _ensurePlanSheets(); // Ensure new columns exist
+
+  var data = _readSheetCached(PLAN_REG_SHEET);
+  for (var r = 1; r < data.length; r++) {
+    if (String(data[r][0]) !== regId) continue;
+
+    var asist = String(data[r][18] || '').toUpperCase();
+    var resultado = String(data[r][25] || '').toUpperCase();
+
+    if (asist !== 'ASISTIO') return { success: false, error: 'Solo se puede formalizar si asistio' };
+    if (resultado !== 'APROBADO') return { success: false, error: 'Solo se puede formalizar si aprobo' };
+    if (String(data[r][27] || '').toUpperCase() === 'FORMALIZADO') return { success: false, error: 'Ya esta formalizado' };
+
+    // Escribir ESTADO_CORPORATIVO = FORMALIZADO y FECHA_FORMALIZACION
+    var now = new Date().toISOString();
+    sh.getRange(r + 1, 28, 1, 2).setValues([['FORMALIZADO', now]]);
+    _invalidatePlanCache();
+    _invalidateExecCache(PLAN_REG_SHEET);
+    _logPlan(usr.email, 'FORMALIZAR', String(data[r][1]), 'BP=' + data[r][6] + ' formalizado');
+    return { success: true, regId: regId, bp: String(data[r][6]), nombre: String(data[r][7]) };
+  }
+  return { success: false, error: 'Registro no encontrado' };
+}
+
+/**
+ * V2.8: Formalizar multiples registros
+ */
+function formalizarBulk(regIds) {
+  if (!regIds || !regIds.length) return { success: false, error: 'Sin registros' };
+  var usr = getUsuarioActual();
+  if (!usr) return { success: false, error: 'Sin sesion' };
+  var rol = (usr.rol || '').toUpperCase();
+  if (rol !== 'ADMIN' && rol !== 'CAPACITY') return { success: false, error: 'Solo ADMIN o CAPACITY' };
+
+  var ss = _getMenteSS();
+  var sh = ss.getSheetByName(PLAN_REG_SHEET);
+  if (!sh) return { success: false, error: 'Hoja no encontrada' };
+
+  _ensurePlanSheets();
+  var data = _readSheetCached(PLAN_REG_SHEET);
+  var idsSet = {};
+  for (var i = 0; i < regIds.length; i++) idsSet[regIds[i]] = true;
+
+  var formalizados = 0, omitidos = 0;
+  var now = new Date().toISOString();
+
+  for (var r = 1; r < data.length; r++) {
+    if (!idsSet[String(data[r][0])]) continue;
+    var asist = String(data[r][18] || '').toUpperCase();
+    var resultado = String(data[r][25] || '').toUpperCase();
+    var yaFormal = String(data[r][27] || '').toUpperCase();
+
+    if (asist !== 'ASISTIO' || resultado !== 'APROBADO' || yaFormal === 'FORMALIZADO') {
+      omitidos++;
+      continue;
+    }
+
+    sh.getRange(r + 1, 28, 1, 2).setValues([['FORMALIZADO', now]]);
+    formalizados++;
+  }
+
+  _invalidatePlanCache();
+  _invalidateExecCache(PLAN_REG_SHEET);
+  _logPlan(usr.email, 'FORMALIZAR_BULK', '', formalizados + ' formalizados, ' + omitidos + ' omitidos');
+  return { success: true, formalizados: formalizados, omitidos: omitidos };
+}
+
+/**
+ * Fase 4: Historial separado — Obtener registros de auditoria
+ * Filtra PLAN_LOG por eventoId y opcionalmente por BP (en DETALLE).
+ * Retorna maximo 100 entradas, ordenadas por timestamp descendente,
+ * ya formateadas para render directo en frontend.
+ */
+function getHistorialRegistro(eventoId, bp) {
+  try {
+    var usr = getUsuarioActual();
+    if (!usr) return { success: false, error: 'Sin sesion' };
+    if (!_canAccessPlanning(usr)) return { success: false, error: 'Sin permiso' };
+
+    var ss = _getMenteSS();
+    var sh = ss.getSheetByName(PLAN_LOG_SHEET);
+    if (!sh || sh.getLastRow() < 2) return { success: true, registros: [] };
+
+    var data = sh.getDataRange().getValues();
+    // Headers: TS(0), USUARIO(1), ACCION(2), EVENTO_ID(3), DETALLE(4)
+    var evIdStr = String(eventoId).trim();
+    var bpStr = bp ? String(bp).trim() : '';
+    var results = [];
+
+    for (var r = 1; r < data.length; r++) {
+      var rowEvId = String(data[r][3]).trim();
+      if (rowEvId !== evIdStr) continue;
+
+      var detalle = String(data[r][4] || '');
+      var accionRaw = String(data[r][2]).trim();
+
+      // Filtro inteligente por BP:
+      // 1. Acciones a nivel evento (contextuales) siempre se muestran
+      // 2. Acciones individuales se filtran si contienen el BP
+      var isEventLevel = (accionRaw === 'REGISTRAR_SELECCION' || accionRaw === 'APROBACION_JEFE'
+        || accionRaw === 'NOTIFICAR_JEFE' || accionRaw === 'CREAR_LIBRO'
+        || accionRaw.indexOf('ENVIO_CORREO') === 0 || accionRaw === 'CAMBIO_ESTADO_BULK');
+
+      if (bpStr && !isEventLevel && detalle.indexOf(bpStr) < 0) continue;
+
+      var ts = data[r][0];
+      var tsStr = '';
+      if (ts instanceof Date) {
+        tsStr = Utilities.formatDate(ts, Session.getScriptTimeZone(), 'dd MMM yyyy HH:mm');
+      } else {
+        // ISO string: parsear para formato legible
+        try {
+          var d = new Date(ts);
+          if (!isNaN(d.getTime())) {
+            tsStr = Utilities.formatDate(d, Session.getScriptTimeZone(), 'dd MMM yyyy HH:mm');
+          } else {
+            tsStr = String(ts).substring(0, 16);
+          }
+        } catch(e2) {
+          tsStr = String(ts).substring(0, 16);
+        }
+      }
+
+      // Mapear accion a etiqueta legible
+      var accion = String(data[r][2]).trim();
+      var accionInfo = _mapAccionHistorial(accion);
+
+      results.push({
+        ts: tsStr,
+        tsRaw: String(data[r][0]),
+        usuario: String(data[r][1] || '').split('@')[0],
+        accion: accion,
+        accionLabel: accionInfo.label,
+        accionColor: accionInfo.color,
+        accionIcon: accionInfo.icon,
+        detalle: detalle
+      });
+    }
+
+    // Ordenar descendente por timestamp raw
+    results.sort(function(a, b) {
+      return (b.tsRaw || '').localeCompare(a.tsRaw || '');
+    });
+
+    // Limitar a 100 entradas
+    if (results.length > 100) results = results.slice(0, 100);
+
+    return { success: true, registros: results, total: results.length };
+  } catch(e) {
+    return { success: false, error: e.message };
+  }
+}
+
+/**
+ * V4: Obtener historial COMPLETO (todas las entradas del log)
+ * Para la vista Registros. Limitado a 500 entradas mas recientes.
+ * Retorna datos ya formateados para render.
+ */
+function getHistorialCompleto() {
+  try {
+    var usr = getUsuarioActual();
+    if (!usr) return { success: false, error: 'Sin sesion' };
+    if (!_canAccessPlanning(usr)) return { success: false, error: 'Sin permiso' };
+
+    var ss = _getMenteSS();
+    var sh = ss.getSheetByName(PLAN_LOG_SHEET);
+    if (!sh || sh.getLastRow() < 2) return { success: true, registros: [] };
+
+    var data = sh.getDataRange().getValues();
+    var results = [];
+
+    for (var r = 1; r < data.length; r++) {
+      var ts = data[r][0];
+      var tsStr = '';
+      if (ts instanceof Date) {
+        tsStr = Utilities.formatDate(ts, Session.getScriptTimeZone(), 'dd MMM yyyy HH:mm');
+      } else {
+        try {
+          var d = new Date(ts);
+          tsStr = !isNaN(d.getTime()) ? Utilities.formatDate(d, Session.getScriptTimeZone(), 'dd MMM yyyy HH:mm') : String(ts).substring(0, 16);
+        } catch(e2) { tsStr = String(ts).substring(0, 16); }
+      }
+
+      var accion = String(data[r][2]).trim();
+      var accionInfo = _mapAccionHistorial(accion);
+
+      results.push({
+        ts: tsStr,
+        tsRaw: String(data[r][0]),
+        usuario: String(data[r][1] || '').split('@')[0],
+        accion: accion,
+        accionLabel: accionInfo.label,
+        accionColor: accionInfo.color,
+        accionIcon: accionInfo.icon,
+        eventoId: String(data[r][3] || ''),
+        detalle: String(data[r][4] || '')
+      });
+    }
+
+    // Ordenar descendente por timestamp
+    results.sort(function(a, b) { return (b.tsRaw || '').localeCompare(a.tsRaw || ''); });
+
+    // Limitar a 500
+    if (results.length > 500) results = results.slice(0, 500);
+
+    return { success: true, registros: results, total: results.length };
+  } catch(e) {
+    return { success: false, error: e.message };
+  }
+}
+
+// ========================================
+// SEGUIMIENTO PLANNING (Control Norte) — V4
+// Vista global cross-evento de PLAN_REGISTRO
+// ========================================
+
+/** Check de acceso ligero (sin cargar data) */
+function tieneAccesoSeguimientoPlan() {
+  var usr = getUsuarioActual();
+  return usr ? _canAccessSegPlan(usr) : false;
+}
+
+function _canAccessSegPlan(usr) {
+  var rol = (usr.rol || '').toUpperCase();
+  if (rol === 'ADMIN') return true;
+  if (rol !== 'CAPACITY') return false;
+  return (usr.pais || '').toUpperCase().indexOf('CONTROL NORTE') >= 0;
+}
+
+/**
+ * Retorna todos los registros de PLAN_REGISTRO formateados
+ * para la vista de seguimiento global.
+ * Solo accesible para ADMIN o CAPACITY con CONTROL NORTE.
+ */
+function getSeguimientoPlanning() {
+  var _t0 = _perfStart();
+  try {
+    var usr = getUsuarioActual();
+    if (!usr) return { success: false, error: 'Sin sesion' };
+    if (!_canAccessSegPlan(usr)) return { success: false, error: 'Sin permiso' };
+
+    var data = _readSheetCached(PLAN_REG_SHEET);
+    if (!data || data.length < 2) return { success: true, registros: [], kpis: _buildSegKpis([]) };
+
+    var registros = [];
+    for (var r = 1; r < data.length; r++) {
+      var bp = String(data[r][6] || '').trim();
+      if (!bp) continue;
+
+      var estadoContacto = String(data[r][13] || 'SELECCIONADO').toUpperCase().trim();
+      var display = ESTADOS_CONTACTO[estadoContacto] || { label: estadoContacto, color: '#94a3b8' };
+
+      registros.push({
+        regId: String(data[r][0]),
+        eventoId: String(data[r][1]),
+        sigla: String(data[r][2] || '').trim(),
+        fechaClase: _formatFechaAmigable(data[r][3]),
+        instructor: String(data[r][4] || ''),
+        bp: bp,
+        nombre: String(data[r][7] || ''),
+        email: String(data[r][8] || ''),
+        pais: String(data[r][9] || ''),
+        area: String(data[r][10] || ''),
+        jefe: String(data[r][11] || ''),
+        estado: estadoContacto,
+        estadoLabel: display.label,
+        estadoColor: display.color,
+        fechaEstado: _formatFechaAmigable(data[r][14]),
+        comentarioJefe: String(data[r][22] || ''),
+        origenDecision: String(data[r][23] || ''),
+        fechaRegistro: _formatFechaAmigable(data[r][21])
+      });
+    }
+
+    registros.sort(function(a, b) {
+      return (b.fechaRegistro || '').localeCompare(a.fechaRegistro || '');
+    });
+
+    _perfLog('getSeguimientoPlanning', _t0);
+    return { success: true, registros: registros, kpis: _buildSegKpis(registros) };
+  } catch(e) {
+    return { success: false, error: e.message };
+  }
+}
+
+// V103: ASISTIO/NO_ASISTIO removidos — pertenecen al flujo de Instructores, no a Planning
+function _buildSegKpis(registros) {
+  var total = registros.length;
+  var seleccionados = 0, pendientes = 0, confirmados = 0, rechazados = 0, cancelados = 0;
+  var cursos = {}, paises = {};
+  for (var i = 0; i < total; i++) {
+    var est = registros[i].estado;
+    if (est === 'SELECCIONADO') seleccionados++;
+    else if (est === 'PRE_CONFIRMADO' || est === 'PRECONFIRMADO_JEFE' || est === 'CITADO' || est === 'NO_CONTACTADO') pendientes++;
+    else if (est === 'CONFIRMADO') confirmados++;
+    else if (est === 'RECHAZADO') rechazados++;
+    else if (est === 'CANCELADO') cancelados++;
+    cursos[registros[i].sigla] = true;
+    paises[registros[i].pais] = true;
+  }
+  return {
+    total: total, seleccionados: seleccionados, pendientes: pendientes,
+    confirmados: confirmados, rechazados: rechazados, cancelados: cancelados,
+    cursos: Object.keys(cursos).length,
+    paises: Object.keys(paises).length
+  };
+}
+
+// ========================================
+// BASE COLABORADORES (Control Norte) — V4
+// Vista global de TODOS los empleados NAM + estado planning
+// ========================================
+function getBaseColaboradores() {
+  var _t0 = _perfStart();
+  try {
+    var usr = getUsuarioActual();
+    if (!usr) return { success: false, error: 'Sin sesion' };
+    if (!_canAccessSegPlan(usr)) return { success: false, error: 'Sin permiso' };
+
+    // V5-PERF: Cache resultado (TTL 5 min)
+    var cache = CacheService.getScriptCache();
+    var cacheKey = 'PLAN_BASE_NAM_V5';
+    try {
+      var cached = cache.get(cacheKey);
+      if (cached) { _perfLog('getBaseColaboradores (CACHE)', _t0); return JSON.parse(cached); }
+    } catch(ce) {}
+
+    // 1. Leer todos los empleados NAM via forecast
+    var resultado = buscarEmpleadosPlan('NAM', { texto: '', sigla: '', soloVencidos: false, conTodosLosCursos: true });
+    if (!resultado || !resultado.success) return { success: false, error: 'Error al leer base NAM: ' + (resultado ? resultado.error : '') };
+    var empleados = resultado.empleados || [];
+    Logger.log('[BASE-V5] empleados NAM: ' + empleados.length);
+
+    // 2. Leer PLAN_REGISTRO con lookup de columnas por header (robusto ante cambios de orden)
+    var regData = _readSheetCached(PLAN_REG_SHEET);
+    var colIdx = {};
+    if (regData.length > 0) {
+      var headers = regData[0];
+      for (var h = 0; h < headers.length; h++) {
+        colIdx[String(headers[h]).trim().toUpperCase()] = h;
+      }
+    }
+    var iBP     = colIdx['BP']               !== undefined ? colIdx['BP'] : 6;
+    var iEstado = colIdx['ESTADO_CONTACTO']   !== undefined ? colIdx['ESTADO_CONTACTO'] : 13;
+    var iSigla  = colIdx['SIGLA']             !== undefined ? colIdx['SIGLA'] : 2;
+    var iEvento = colIdx['EVENTO_ID']         !== undefined ? colIdx['EVENTO_ID'] : 1;
+    var iFecha  = colIdx['FECHA_CLASE']       !== undefined ? colIdx['FECHA_CLASE'] : 3;
+    var iFechaReg = colIdx['FECHA_REGISTRO']  !== undefined ? colIdx['FECHA_REGISTRO'] : 21;
+    Logger.log('[BASE-V7] colIdx: BP=' + iBP + ' ESTADO=' + iEstado + ' SIGLA=' + iSigla + ' FECHA_REG=' + iFechaReg + ' | totalRows=' + (regData.length - 1));
+
+    // V7: Calcular limite de "recientes" (ultimas 24h)
+    var ahora = new Date();
+    var limite24h = new Date(ahora.getTime() - 24 * 60 * 60 * 1000);
+
+    // V5: Guardar TODOS los registros de planning por BP (un empleado puede tener multiples cursos)
+    var planMap = {};    // BP → objeto principal (mayor prioridad)
+    var planCursosMap = {}; // BP → [ { estado, sigla, eventoId, fechaClase, reciente } ]
+    var siglasEnPlan = {};  // Para filtro de cursos
+    var recientesSet = {}; // BPs con registros recientes
+    for (var r = 1; r < regData.length; r++) {
+      var row = regData[r];
+      var bp = String(row[iBP] || '').trim();
+      if (!bp) continue;
+      var est = String(row[iEstado] || '').trim();
+      if (!est) continue;
+      var sigla = String(row[iSigla] || '').trim();
+      var eventoId = String(row[iEvento] || '').trim();
+      var fechaClase = row[iFecha] || '';
+
+      // V7: Verificar si es reciente (ultimas 24h)
+      var esReciente = false;
+      var fechaReg = row[iFechaReg];
+      if (fechaReg) {
+        try {
+          var fr = fechaReg instanceof Date ? fechaReg : new Date(fechaReg);
+          if (!isNaN(fr.getTime()) && fr >= limite24h) {
+            esReciente = true;
+            recientesSet[bp] = true;
+          }
+        } catch(fe) {}
+      }
+
+      var entry = { estado: est, sigla: sigla, eventoId: eventoId, fechaClase: _formatFechaAmigable(fechaClase), reciente: esReciente };
+
+      // Agregar a lista de cursos del empleado
+      if (!planCursosMap[bp]) planCursosMap[bp] = [];
+      planCursosMap[bp].push(entry);
+
+      // Guardar el de mayor prioridad como principal
+      if (!planMap[bp] || _estadoPrioridad(est) > _estadoPrioridad(planMap[bp].estado)) {
+        planMap[bp] = entry;
+      }
+      if (sigla) siglasEnPlan[sigla] = true;
+    }
+    Logger.log('[BASE-V5] planMap BPs: ' + Object.keys(planMap).length + ' | siglas en plan: ' + Object.keys(siglasEnPlan).length);
+
+    // 3. Enriquecer y construir resultado
+    var base = [];
+    var matchCount = 0;
+    for (var i = 0; i < empleados.length; i++) {
+      var e = empleados[i];
+      var plan = planMap[e.bp] || null;
+      var cursos = planCursosMap[e.bp] || [];
+      if (plan) matchCount++;
+      var empReciente = !!recientesSet[e.bp];
+      base.push({
+        bp: e.bp,
+        nombre: e.nombre,
+        correo: e.correo || '',
+        area: e.area || '',
+        pais: e.pais || '',
+        jefe: e.jefe || '',
+        posicion: e.posicion || '',
+        cursoBase: e.cursoMasCritico || '',
+        statusCurso: e.statusCurso || '',
+        diasVencido: e.diasVencido,
+        vencimiento: e.vencimiento || '',
+        cursos: e.cursos || [],
+        planEstado: plan ? plan.estado : '',
+        planSigla: plan ? plan.sigla : '',
+        planEvento: plan ? plan.eventoId : '',
+        planFecha: plan ? plan.fechaClase : '',
+        planCursos: cursos,
+        reciente: empReciente
+      });
+    }
+    Logger.log('[BASE-V5] matches (empleados con plan): ' + matchCount + ' de ' + base.length);
+
+    // V7: Recolectar TODAS las siglas de cursos (forecast + plan) para filtro
+    var todasSiglas = {};
+    for (var ts = 0; ts < base.length; ts++) {
+      if (base[ts].cursos) {
+        for (var tc = 0; tc < base[ts].cursos.length; tc++) {
+          if (base[ts].cursos[tc].sigla) todasSiglas[base[ts].cursos[tc].sigla] = true;
+        }
+      }
+    }
+    for (var sp in siglasEnPlan) todasSiglas[sp] = true;
+
+    // KPIs ampliados
+    var totalBase = base.length;
+    var enPlan = 0, sinPlan = 0, confirmados = 0, rechazados = 0, seleccionados = 0, recientes = 0;
+    for (var k = 0; k < base.length; k++) {
+      var pe = base[k].planEstado;
+      if (pe) {
+        enPlan++;
+        if (pe === 'CONFIRMADO') confirmados++;
+        else if (pe === 'RECHAZADO') rechazados++;
+        else if (pe === 'SELECCIONADO') seleccionados++;
+      } else {
+        sinPlan++;
+      }
+      if (base[k].reciente) recientes++;
+    }
+
+    var res = {
+      success: true,
+      colaboradores: base,
+      siglasEnPlan: Object.keys(todasSiglas).sort(),
+      kpis: { total: totalBase, enPlan: enPlan, sinPlan: sinPlan, confirmados: confirmados, rechazados: rechazados, seleccionados: seleccionados, recientes: recientes },
+      debug: {
+        empleadosNAM: empleados.length,
+        registrosPlan: regData.length - 1,
+        bpsEnPlan: Object.keys(planMap).length,
+        matchCount: matchCount
+      }
+    };
+
+    try { cache.put(cacheKey, JSON.stringify(res), 600); } catch(ce) { Logger.log('[BASE-V5] Cache put failed (payload too large?)'); }
+    _perfLog('getBaseColaboradores', _t0);
+    return res;
+  } catch(e) {
+    Logger.log('[BASE-V5] ERROR: ' + e.message + ' | stack: ' + e.stack);
+    return { success: false, error: e.message };
+  }
+}
+
+function _estadoPrioridad(estado) {
+  var map = { 'ASISTIO': 8, 'CONFIRMADO': 7, 'PRE_CONFIRMADO': 6, 'SELECCIONADO': 5, 'PRECONFIRMADO_JEFE': 4, 'CITADO': 3, 'NO_CONTACTADO': 2, 'RECHAZADO': 1, 'CANCELADO': 0, 'NO_ASISTIO': 0 };
+  return map[estado] || 0;
+}
+
+/**
+ * Mapear codigos de accion a etiquetas legibles para timeline
+ */
+function _mapAccionHistorial(accion) {
+  var map = {
+    'REGISTRAR_SELECCION': { label: 'Seleccionado', color: '#f59e0b', icon: 'ph-user-plus' },
+    'CAMBIO_ESTADO':       { label: 'Cambio de estado', color: '#3b82f6', icon: 'ph-arrows-clockwise' },
+    'CAMBIO_ESTADO_BULK':  { label: 'Cambio masivo', color: '#6366f1', icon: 'ph-stack' },
+    'NOTIFICAR_JEFE':      { label: 'Notificacion a jefe', color: '#8b5cf6', icon: 'ph-envelope' },
+    'ELIMINAR':            { label: 'Eliminado', color: '#ef4444', icon: 'ph-trash' },
+    'CREAR_LIBRO':         { label: 'Libro generado', color: '#059669', icon: 'ph-book-open' },
+    'CORREO_PRUEBA':       { label: 'Correo de prueba', color: '#94a3b8', icon: 'ph-test-tube' },
+    'ENVIO_CORREO_CITA':   { label: 'Correo de citacion', color: '#0ea5e9', icon: 'ph-paper-plane-tilt' },
+    'ENVIO_CORREO_CONFIRM':{ label: 'Correo de confirmacion', color: '#22c55e', icon: 'ph-paper-plane-tilt' },
+    'CREAR_SOLICITUD':     { label: 'Solicitud creada', color: '#d97706', icon: 'ph-chat-circle-text' },
+    'RESOLVER_SOLICITUD':  { label: 'Solicitud resuelta', color: '#059669', icon: 'ph-check-circle' },
+    'APROBACION_JEFE':     { label: 'Aprobacion del jefe', color: '#7c3aed', icon: 'ph-seal-check' }
+  };
+  // Manejar acciones con sufijo dinamico (ENVIO_CORREO_*)
+  if (!map[accion] && accion.indexOf('ENVIO_CORREO_') === 0) {
+    return { label: 'Envio de correo', color: '#0ea5e9', icon: 'ph-paper-plane-tilt' };
+  }
+  return map[accion] || { label: accion, color: '#64748b', icon: 'ph-clock-clockwise' };
+}
+
+// ============================
+// TOKEN & APROBACION JEFE (V2)
+// ============================
+var PLAN_TOKEN_SALT = 'MENTE_PLAN_V2_SALT_2026';
+var PLAN_TOKEN_EXPIRY_MS = 72 * 3600 * 1000;
+
+function _generarTokenAprobacion(eventoId, emailJefe) {
+  var raw = String(eventoId) + '|' + String(emailJefe).toLowerCase() + '|' + PLAN_TOKEN_SALT;
+  var digest = Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, raw);
+  var token = '';
+  for (var i = 0; i < digest.length; i++) {
+    var b = digest[i] < 0 ? digest[i] + 256 : digest[i];
+    token += ('0' + b.toString(16)).slice(-2);
+  }
+  try {
+    var props = PropertiesService.getScriptProperties();
+    var tokensRaw = props.getProperty('PLAN_TOKENS') || '{}';
+    var tokens = JSON.parse(tokensRaw);
+    var now = new Date().getTime();
+    for (var k in tokens) { if (tokens[k].expires < now) delete tokens[k]; }
+    tokens[token] = { eventoId: String(eventoId), emailJefe: String(emailJefe).toLowerCase(), expires: now + PLAN_TOKEN_EXPIRY_MS };
+    props.setProperty('PLAN_TOKENS', JSON.stringify(tokens));
+  } catch(e) {}
+  return token;
+}
+
+function _validarTokenAprobacion(eventoId, token) {
+  try {
+    var props = PropertiesService.getScriptProperties();
+    var tokensRaw = props.getProperty('PLAN_TOKENS') || '{}';
+    var tokens = JSON.parse(tokensRaw);
+    var info = tokens[token];
+    if (!info) return { valid: false, error: 'Token no encontrado o expirado' };
+    if (info.expires < new Date().getTime()) {
+      delete tokens[token];
+      props.setProperty('PLAN_TOKENS', JSON.stringify(tokens));
+      return { valid: false, error: 'Token expirado. Solicite un nuevo enlace al equipo de Capacitacion.' };
+    }
+    if (String(info.eventoId) !== String(eventoId)) return { valid: false, error: 'Token no corresponde al evento' };
+    return { valid: true, emailJefe: info.emailJefe, eventoId: info.eventoId };
+  } catch(e) {
+    return { valid: false, error: 'Error de validacion: ' + e.message };
+  }
+}
+
+function _getWebAppUrl() {
+  try { return ScriptApp.getService().getUrl(); } catch(e) { return ''; }
+}
+
+function getRegistrosParaAprobacion(eventoId, token) {
+  var val = _validarTokenAprobacion(eventoId, token);
+  if (!val.valid) return { success: false, error: val.error };
+  var data = _readSheetCached(PLAN_REG_SHEET);
+  if (!data.length) return { success: false, error: 'Sin datos disponibles' };
+  var registros = [];
+  var eventoInfo = null;
+  var pendientes = 0, procesados = 0;
+  var tokenJefe = (val.emailJefe || '').trim().toLowerCase();
+  for (var r = 1; r < data.length; r++) {
+    if (String(data[r][1]) !== String(eventoId)) continue;
+    // V2-FIX: Match por emailJefe (col 12) o fallback por nombre jefe (col 11)
+    var regEmailJefe = String(data[r][12] || '').trim().toLowerCase();
+    var regNombreJefe = String(data[r][11] || '').trim().toLowerCase();
+    if (regEmailJefe) {
+      if (regEmailJefe !== tokenJefe) continue;
+    } else if (regNombreJefe) {
+      if (regNombreJefe !== tokenJefe) continue;
+    } else {
+      continue;
+    }
+    var estado = String(data[r][13]);
+    if (!eventoInfo) {
+      eventoInfo = { sigla: String(data[r][2]), fecha: _formatFechaAmigable(data[r][3]), instructor: String(data[r][4]), sala: String(data[r][5]) };
+    }
+    var editable = (estado === 'SELECCIONADO' || estado === 'PRE_CONFIRMADO' || estado === 'PRECONFIRMADO_JEFE' || estado === 'CITADO' || estado === 'RECHAZADO');
+    if (estado === 'SELECCIONADO') pendientes++;
+    else procesados++;
+    registros.push({
+      regId: String(data[r][0]), bp: String(data[r][6]), nombre: String(data[r][7]),
+      email: String(data[r][8]), area: String(data[r][10]),
+      estado: estado, nota: String(data[r][15] || ''),
+      comentarioJefe: String(data[r][22] || ''),
+      editable: editable
+    });
+  }
+  if (!registros.length) return { success: false, error: 'No se encontraron participantes para este curso y jefe.' };
+  return {
+    success: true, evento: eventoInfo, jefe: val.emailJefe,
+    registros: registros, totalRegistros: registros.length,
+    pendientes: pendientes, procesados: procesados,
+    yaProcesado: pendientes === 0 && procesados > 0
+  };
+}
+
+function procesarAprobacionJefe(eventoId, token, decisiones) {
+  var val = _validarTokenAprobacion(eventoId, token);
+  if (!val.valid) return { success: false, error: val.error };
+  if (!decisiones || !decisiones.length) return { success: false, error: 'Sin decisiones para procesar' };
+  var ss = _getMenteSS();
+  var sh = ss.getSheetByName(PLAN_REG_SHEET);
+  if (!sh) return { success: false, error: 'Datos no disponibles' };
+  var data = sh.getDataRange().getValues();
+  var aprobados = 0, rechazados = 0, errores = 0, sinCambio = 0;
+  var estadosEditables = { 'SELECCIONADO': true, 'PRECONFIRMADO_JEFE': true, 'CITADO': true, 'RECHAZADO': true };
+  for (var d = 0; d < decisiones.length; d++) {
+    var dec = decisiones[d];
+    for (var r = 1; r < data.length; r++) {
+      if (String(data[r][0]) !== dec.regId) continue;
+      if (String(data[r][1]) !== String(eventoId)) continue;
+      var _regEmail = String(data[r][12] || '').trim().toLowerCase();
+      var _regNombre = String(data[r][11] || '').trim().toLowerCase();
+      var _tokenJ = (val.emailJefe || '').trim().toLowerCase();
+      if (_regEmail) { if (_regEmail !== _tokenJ) continue; }
+      else if (_regNombre) { if (_regNombre !== _tokenJ) continue; }
+      else { continue; }
+      var estadoActual = String(data[r][13]);
+      if (!estadosEditables[estadoActual]) { errores++; break; }
+      // V102: APROBAR → PRE_CONFIRMADO (NAM_EU) o CONFIRMADO (otros)
+      var _base102 = String(data[r][24] || '').toUpperCase().trim();
+      var nuevoEstado;
+      if (dec.decision === 'APROBAR') {
+        nuevoEstado = (_base102 === 'NAM_EU' || _base102 === 'NAM') ? 'PRE_CONFIRMADO' : 'CONFIRMADO';
+      } else {
+        nuevoEstado = 'RECHAZADO';
+      }
+      if (estadoActual === nuevoEstado && !dec.comentario) { sinCambio++; break; }
+      sh.getRange(r + 1, 14).setValue(nuevoEstado);
+      sh.getRange(r + 1, 15).setValue(new Date().toISOString());
+      // V3: Guardar comentario del jefe en columna dedicada (col 23) + nota (col 16)
+      var notaTexto = dec.comentario || ((dec.decision === 'APROBAR' ? 'Confirmado' : 'Rechazado') + ' por jefe');
+      sh.getRange(r + 1, 16).setValue(notaTexto);
+      if (dec.comentario) sh.getRange(r + 1, 23).setValue(dec.comentario);
+      sh.getRange(r + 1, 24).setValue('JEFE');
+      if (nuevoEstado === 'CONFIRMADO') aprobados++;
+      else rechazados++;
+      // V3: Notificar al colaborador de la decision del jefe
+      try {
+        var _colabEmail = String(data[r][8] || '');
+        var _colabNombre = String(data[r][7] || '');
+        var _sigla = String(data[r][2] || '');
+        var _fecha = _formatFechaAmigable(data[r][3]);
+        var _instructor = String(data[r][4] || '');
+        var _sala = String(data[r][5] || '');
+        _notificarColaboradorDecision(_colabEmail, _colabNombre, _sigla, _fecha, _instructor, _sala, nuevoEstado, dec.comentario || '');
+      } catch(notifErr) {
+        Logger.log('[V3-NOTIF] Error notificacion colaborador: ' + notifErr.message);
+      }
+      break;
+    }
+  }
+  _invalidatePlanCache();
+  _logPlan(val.emailJefe, 'APROBACION_JEFE', eventoId, 'Confirmados=' + aprobados + ' Rechazados=' + rechazados + ' SinCambio=' + sinCambio);
+  return { success: true, aprobados: aprobados, rechazados: rechazados, errores: errores, sinCambio: sinCambio };
+}
+
+// V102-JEFE: Contar pendientes de aprobacion para un jefe (helper para notificaciones)
+// V102-FIX: Lee DIRECTO del sheet para data fresca
+function _contarPendientesJefe(emailJefe, nombreJefe) {
+  try {
+    var sh = _getMenteSS().getSheetByName(PLAN_REG_SHEET);
+    if (!sh || sh.getLastRow() < 2) return 0;
+    var data = sh.getDataRange().getValues();
+    var count = 0;
+    var ej = (emailJefe || '').trim().toLowerCase();
+    var nj = (nombreJefe || '').trim().toLowerCase();
+    for (var r = 1; r < data.length; r++) {
+      var estado = String(data[r][13] || '').trim().toUpperCase();
+      if (estado !== 'SELECCIONADO') continue;
+      var regEJ = String(data[r][12] || '').trim().toLowerCase();
+      var regNJ = String(data[r][11] || '').trim().toLowerCase();
+      if ((regEJ && ej && regEJ === ej) || (regNJ && nj && regNJ === nj)) count++;
+    }
+    return count;
+  } catch(e) { return 0; }
+}
+
+// V102-JEFE: Obtener pendientes de aprobacion para el jefe (in-app)
+// V102-FIX: Lee DIRECTAMENTE del sheet (sin _execCache) para garantizar data fresca y reactiva
+function getPendientesAprobacionJefe() {
+  var usr = getUsuarioActual();
+  if (!usr) return { success: false, error: 'No se pudo obtener usuario' };
+  var emailJefe = (usr.email || '').trim().toLowerCase();
+  var nombreJefe = (usr.nombre || '').trim().toLowerCase();
+  if (!emailJefe && !nombreJefe) return { success: false, error: 'No se pudo identificar al jefe' };
+
+  // Leer DIRECTO del sheet (no _readSheetCached) para data 100% fresca
+  var sh = _getMenteSS().getSheetByName(PLAN_REG_SHEET);
+  if (!sh || sh.getLastRow() < 2) return { success: true, cursos: [], totalPendientes: 0 };
+
+  var data = sh.getDataRange().getValues();
+  var estadosPendientes = { 'SELECCIONADO': true };
+  var porCurso = {};
+  var totalPendientes = 0;
+
+  for (var r = 1; r < data.length; r++) {
+    var estado = String(data[r][13] || '').trim().toUpperCase();
+    if (!estadosPendientes[estado]) continue;
+
+    var regEJ = String(data[r][12] || '').trim().toLowerCase();
+    var regNJ = String(data[r][11] || '').trim().toLowerCase();
+    var esDelJefe = false;
+    if (regEJ && emailJefe && regEJ === emailJefe) esDelJefe = true;
+    else if (regNJ && nombreJefe && regNJ === nombreJefe) esDelJefe = true;
+    if (!esDelJefe) continue;
+
+    var eventoId = String(data[r][1] || '');
+    var detalleEvento = _getEventoDetallePendientes(eventoId);
+
+    if (!porCurso[eventoId]) {
+      porCurso[eventoId] = {
+        eventoId: eventoId,
+        sigla: String(data[r][2] || ''),
+        fecha: detalleEvento && detalleEvento.fechaTexto ? detalleEvento.fechaTexto : _formatFechaAmigable(data[r][3]),
+        fechaDisplay: detalleEvento ? detalleEvento.fechaDisplay : '',
+        horaInicio: detalleEvento ? detalleEvento.horaInicio : '',
+        horaFin: detalleEvento ? detalleEvento.horaFin : '',
+        fechaOrden: detalleEvento ? detalleEvento.fechaOrden : '',
+        instructor: String(data[r][4] || ''),
+        sala: String(data[r][5] || ''),
+        participantes: []
+      };
+    }
+
+    porCurso[eventoId].participantes.push({
+      regId: String(data[r][0] || ''),
+      bp: String(data[r][6] || ''),
+      nombre: String(data[r][7] || ''),
+      email: String(data[r][8] || ''),
+      pais: String(data[r][9] || ''),
+      area: String(data[r][10] || ''),
+      estado: estado,
+      fechaRegistro: _formatFechaAmigable(data[r][21]),
+      origenDecision: String(data[r][23] || '')
+    });
+
+    totalPendientes++;
+  }
+
+  var cursos = [];
+  for (var evId in porCurso) cursos.push(porCurso[evId]);
+
+  cursos.sort(function(a, b) {
+    return (a.fechaOrden || '').localeCompare(b.fechaOrden || '') ||
+           (a.horaInicio || '').localeCompare(b.horaInicio || '') ||
+           (a.sigla || '').localeCompare(b.sigla || '');
+  });
+
+  return { success: true, cursos: cursos, totalPendientes: totalPendientes };
+}
+
+// V102-JEFE: Procesar decisiones del jefe desde la app (autenticado, sin token)
+function procesarDecisionJefeInApp(decisiones) {
+  var usr = getUsuarioActual();
+  if (!usr) return { success: false, error: 'No se pudo obtener usuario' };
+  if (!decisiones || !decisiones.length) return { success: false, error: 'Sin decisiones para procesar' };
+  var emailJefe = (usr.email || '').trim().toLowerCase();
+  var nombreJefe = (usr.nombre || '').trim().toLowerCase();
+  var ss = _getMenteSS();
+  var sh = ss.getSheetByName(PLAN_REG_SHEET);
+  if (!sh) return { success: false, error: 'Datos no disponibles' };
+  var data = sh.getDataRange().getValues();
+  var aprobados = 0, rechazados = 0, errores = 0, sinCambio = 0;
+  var estadosEditables = { 'SELECCIONADO': true, 'PRE_CONFIRMADO': true, 'PRECONFIRMADO_JEFE': true, 'CITADO': true, 'RECHAZADO': true };
+  for (var d = 0; d < decisiones.length; d++) {
+    var dec = decisiones[d];
+    for (var r = 1; r < data.length; r++) {
+      if (String(data[r][0]) !== dec.regId) continue;
+      var regEJ = String(data[r][12] || '').trim().toLowerCase();
+      var regNJ = String(data[r][11] || '').trim().toLowerCase();
+      var esDelJefe = false;
+      if (regEJ && emailJefe && regEJ === emailJefe) esDelJefe = true;
+      else if (regNJ && nombreJefe && regNJ === nombreJefe) esDelJefe = true;
+      if (!esDelJefe) { errores++; break; }
+      var estadoActual = String(data[r][13]);
+      if (!estadosEditables[estadoActual]) { errores++; break; }
+      var base = String(data[r][24] || '').toUpperCase().trim();
+      var nuevoEstado;
+      if (dec.decision === 'APROBAR') {
+        nuevoEstado = (base === 'NAM_EU' || base === 'NAM') ? 'PRE_CONFIRMADO' : 'CONFIRMADO';
+      } else {
+        nuevoEstado = 'RECHAZADO';
+      }
+      if (estadoActual === nuevoEstado && !dec.comentario) { sinCambio++; break; }
+      sh.getRange(r + 1, 14).setValue(nuevoEstado);
+      sh.getRange(r + 1, 15).setValue(new Date().toISOString());
+      var notaTexto = dec.comentario || ((dec.decision === 'APROBAR' ? 'Aprobado' : 'Rechazado') + ' por jefe desde App');
+      sh.getRange(r + 1, 16).setValue(notaTexto);
+      if (dec.comentario) sh.getRange(r + 1, 23).setValue(dec.comentario);
+      sh.getRange(r + 1, 24).setValue('JEFE');
+      if (nuevoEstado === 'PRE_CONFIRMADO' || nuevoEstado === 'CONFIRMADO') aprobados++;
+      else rechazados++;
+      try {
+        var _colabEmail = String(data[r][8] || '');
+        var _colabNombre = String(data[r][7] || '');
+        var _sigla = String(data[r][2] || '');
+        var _fecha = _formatFechaAmigable(data[r][3]);
+        var _instructor = String(data[r][4] || '');
+        var _sala = String(data[r][5] || '');
+        _notificarColaboradorDecision(_colabEmail, _colabNombre, _sigla, _fecha, _instructor, _sala, nuevoEstado, dec.comentario || '');
+      } catch(notifErr) {
+        Logger.log('[V102-JEFE] Error notificacion colaborador: ' + notifErr.message);
+      }
+      break;
+    }
+  }
+  _invalidatePlanCache();
+  _invalidateExecCache(PLAN_REG_SHEET);
+  _logPlan(usr.email, 'APROBACION_JEFE_APP', '', 'Aprobados=' + aprobados + ' Rechazados=' + rechazados + ' SinCambio=' + sinCambio);
+  // V103-SYNC: Sincronizar eventos afectados despues de decisiones del jefe
+  var eventosJefe = {};
+  for (var dj = 0; dj < decisiones.length; dj++) {
+    for (var rj = 1; rj < data.length; rj++) {
+      if (String(data[rj][0]) === decisiones[dj].regId) {
+        eventosJefe[String(data[rj][1])] = true;
+        break;
+      }
+    }
+  }
+  for (var evJ in eventosJefe) {
+    try { _sincronizarEventoCalendario(evJ, 0); } catch(syncErr) { Logger.log('[V103-SYNC] Sync post-jefe: ' + syncErr.message); }
+  }
+  return { success: true, aprobados: aprobados, rechazados: rechazados, errores: errores, sinCambio: sinCambio };
+}
+
+// V102: HTML Email Template para Notificacion a Jefes (INFORMATIVO — sin enlace de aprobacion externo)
+function _buildEmailJefeHTML(jefeNombre, sigla, fecha, instructor, sala, participantes, appUrl) {
+  var h = '<div style="max-width:600px;margin:0 auto;font-family:Arial,Helvetica,sans-serif;background:#ffffff;">';
+  // Header
+  h += '<div style="background:linear-gradient(135deg,#1B0088 0%,#E30052 100%);padding:28px 32px;border-radius:12px 12px 0 0;">';
+  h += '<h1 style="color:#ffffff;margin:0;font-size:22px;font-weight:800;letter-spacing:-0.3px;">Capacitacion Programada</h1>';
+  h += '<p style="color:rgba(255,255,255,0.75);margin:6px 0 0;font-size:13px;">Equipo de Capacitacion — LATAM Cargo</p>';
+  h += '</div>';
+  // Course info
+  h += '<div style="background:#f8fafc;padding:20px 32px;border-left:1px solid #e2e8f0;border-right:1px solid #e2e8f0;">';
+  h += '<table cellpadding="0" cellspacing="0" style="width:100%;font-size:13px;color:#475569;">';
+  h += '<tr><td style="padding:4px 0;font-weight:700;width:100px;color:#1e293b;">Curso:</td><td style="padding:4px 0;font-weight:700;color:#1B0088;">' + sigla + '</td></tr>';
+  h += '<tr><td style="padding:4px 0;font-weight:700;color:#1e293b;">Fecha:</td><td style="padding:4px 0;">' + fecha + '</td></tr>';
+  h += '<tr><td style="padding:4px 0;font-weight:700;color:#1e293b;">Instructor:</td><td style="padding:4px 0;">' + instructor + '</td></tr>';
+  h += '<tr><td style="padding:4px 0;font-weight:700;color:#1e293b;">Sala:</td><td style="padding:4px 0;">' + sala + '</td></tr>';
+  h += '</table></div>';
+  // Greeting
+  h += '<div style="padding:24px 32px;border-left:1px solid #e2e8f0;border-right:1px solid #e2e8f0;">';
+  h += '<p style="margin:0 0 12px;font-size:14px;color:#334155;">Estimado(a) <strong>' + jefeNombre + '</strong>,</p>';
+  h += '<p style="margin:0 0 20px;font-size:13px;color:#475569;line-height:1.6;">Se han seleccionado los siguientes participantes de su equipo para una capacitacion. Por favor ingrese a la aplicacion para revisar, aprobar o rechazar las solicitudes.</p>';
+  // Participant table
+  h += '<table cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse;margin-bottom:24px;">';
+  h += '<thead><tr style="background:#f1f5f9;">';
+  h += '<th style="padding:10px 12px;text-align:left;font-size:11px;color:#64748b;font-weight:700;border-bottom:2px solid #e2e8f0;">N</th>';
+  h += '<th style="padding:10px 12px;text-align:left;font-size:11px;color:#64748b;font-weight:700;border-bottom:2px solid #e2e8f0;">BP</th>';
+  h += '<th style="padding:10px 12px;text-align:left;font-size:11px;color:#64748b;font-weight:700;border-bottom:2px solid #e2e8f0;">Nombre</th>';
+  h += '<th style="padding:10px 12px;text-align:left;font-size:11px;color:#64748b;font-weight:700;border-bottom:2px solid #e2e8f0;">Area</th>';
+  h += '</tr></thead><tbody>';
+  for (var i = 0; i < participantes.length; i++) {
+    var p = participantes[i];
+    var bg = i % 2 === 0 ? '#ffffff' : '#f8fafc';
+    h += '<tr style="background:' + bg + ';">';
+    h += '<td style="padding:8px 12px;font-size:12px;color:#475569;border-bottom:1px solid #f1f5f9;">' + (i + 1) + '</td>';
+    h += '<td style="padding:8px 12px;font-size:12px;color:#1e293b;font-weight:700;border-bottom:1px solid #f1f5f9;">' + p.bp + '</td>';
+    h += '<td style="padding:8px 12px;font-size:12px;color:#1e293b;border-bottom:1px solid #f1f5f9;">' + p.nombre + '</td>';
+    h += '<td style="padding:8px 12px;font-size:12px;color:#64748b;border-bottom:1px solid #f1f5f9;">' + p.area + '</td>';
+    h += '</tr>';
+  }
+  h += '</tbody></table>';
+  // CTA Button — V102: Solo lleva a la App, sin enlace de aprobacion externo
+  if (appUrl) {
+    h += '<div style="text-align:center;padding:8px 0 20px;">';
+    h += '<a href="' + appUrl + '" style="display:inline-block;background:linear-gradient(135deg,#1B0088 0%,#E30052 100%);color:#ffffff;padding:14px 44px;border-radius:8px;text-decoration:none;font-weight:700;font-size:15px;letter-spacing:0.3px;">Ir a la App</a>';
+    h += '</div>';
+    h += '<p style="text-align:center;font-size:11px;color:#94a3b8;margin:0;">Ingrese a Mi Equipo &gt; Pendientes para aprobar o rechazar participantes.</p>';
+  }
+  h += '</div>';
+  // Footer
+  h += '<div style="background:#f8fafc;padding:16px 32px;border-radius:0 0 12px 12px;border:1px solid #e2e8f0;">';
+  h += '<p style="color:#94a3b8;font-size:10px;margin:0;line-height:1.5;">Si tiene alguna consulta, contacte al equipo de Planing local.</p>';
+  h += '<p style="color:#cbd5e1;font-size:9px;margin:4px 0 0;">MENTE — LATAM Cargo | Correo automatico</p>';
+  h += '</div></div>';
+  return h;
+}
+
+/**
+ * V3: Notificar al colaborador cuando el jefe toma una decision
+ * Se llama desde procesarAprobacionJefe cuando decision = CONFIRMADO o RECHAZADO
+ */
+function _notificarColaboradorDecision(emailColab, nombreColab, sigla, fecha, instructor, sala, decision, comentarioJefe) {
+  if (!emailColab || emailColab.indexOf('@') < 0) return;
+  // V102-TEST: Resolver envio segun modo de prueba
+  var _envio = _resolverEnvioCorreoPlan(emailColab);
+  if (!_envio.enviar) {
+    Logger.log('[V102-TEST] SIMULADO: notificarColaborador a ' + emailColab + ' decision=' + decision);
+    return;
+  }
+  try {
+    var esPositivo = (decision === 'CONFIRMADO' || decision === 'PRE_CONFIRMADO');
+    var subject = esPositivo
+      ? 'Capacitacion aprobada: ' + sigla + ' — ' + fecha
+      : 'Capacitacion no autorizada: ' + sigla;
+    var html = _buildEmailColaboradorHTML(nombreColab, sigla, fecha, instructor, sala, decision, comentarioJefe);
+    var plain = 'Estimado(a) ' + nombreColab + ',\n\n'
+      + (esPositivo
+        ? 'Su participacion en la capacitacion ' + sigla + ' (fecha: ' + fecha + ') ha sido APROBADA por su jefe.\n\nPor favor asista puntualmente.\n\nInstructor: ' + instructor + '\nSala: ' + sala
+        : 'Su participacion en la capacitacion ' + sigla + ' NO fue autorizada por su jefe.' + (comentarioJefe ? '\n\nComentario: ' + comentarioJefe : ''))
+      + '\n\nAtentamente,\nEquipo de Capacitacion';
+    MailApp.sendEmail({ to: _envio.destino, subject: (_envio.esTest ? '[TEST] ' : '') + subject, body: plain, htmlBody: html });
+    Logger.log('[V3-NOTIF] Correo ' + (_envio.esTest ? 'TEST ' : '') + 'enviado a: ' + _envio.destino + (_envio.esTest ? ' (real: ' + emailColab + ')' : '') + ' decision=' + decision);
+  } catch(e) {
+    Logger.log('[V3-NOTIF] Error enviando a ' + _envio.destino + ': ' + e.message);
+  }
+}
+
+function _buildEmailColaboradorHTML(nombre, sigla, fecha, instructor, sala, decision, comentario) {
+  var esPositivo = (decision === 'CONFIRMADO' || decision === 'PRE_CONFIRMADO');
+  var headerBg = esPositivo ? 'linear-gradient(135deg,#059669 0%,#10b981 100%)' : 'linear-gradient(135deg,#dc2626 0%,#ef4444 100%)';
+  var iconText = esPositivo ? 'APROBADA' : 'NO AUTORIZADA';
+
+  var h = '<div style="max-width:600px;margin:0 auto;font-family:Arial,Helvetica,sans-serif;background:#ffffff;">';
+  // Header
+  h += '<div style="background:' + headerBg + ';padding:28px 32px;border-radius:12px 12px 0 0;">';
+  h += '<h1 style="color:#ffffff;margin:0;font-size:20px;font-weight:800;">Capacitacion ' + iconText + '</h1>';
+  h += '<p style="color:rgba(255,255,255,0.8);margin:6px 0 0;font-size:13px;">Equipo de Capacitacion — LATAM Cargo</p>';
+  h += '</div>';
+  // Course info
+  h += '<div style="background:#f8fafc;padding:20px 32px;border-left:1px solid #e2e8f0;border-right:1px solid #e2e8f0;">';
+  h += '<table cellpadding="0" cellspacing="0" style="width:100%;font-size:13px;color:#475569;">';
+  h += '<tr><td style="padding:4px 0;font-weight:700;width:100px;color:#1e293b;">Curso:</td><td style="padding:4px 0;font-weight:700;color:#1B0088;">' + sigla + '</td></tr>';
+  h += '<tr><td style="padding:4px 0;font-weight:700;color:#1e293b;">Fecha:</td><td style="padding:4px 0;">' + fecha + '</td></tr>';
+  h += '<tr><td style="padding:4px 0;font-weight:700;color:#1e293b;">Instructor:</td><td style="padding:4px 0;">' + instructor + '</td></tr>';
+  h += '<tr><td style="padding:4px 0;font-weight:700;color:#1e293b;">Sala:</td><td style="padding:4px 0;">' + sala + '</td></tr>';
+  h += '</table></div>';
+  // Body
+  h += '<div style="padding:24px 32px;border-left:1px solid #e2e8f0;border-right:1px solid #e2e8f0;">';
+  h += '<p style="margin:0 0 16px;font-size:14px;color:#334155;">Estimado(a) <strong>' + nombre + '</strong>,</p>';
+  if (esPositivo) {
+    h += '<div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:16px 20px;margin-bottom:16px;">';
+    h += '<p style="margin:0;font-size:14px;font-weight:700;color:#166534;">Su participacion ha sido aprobada</p>';
+    h += '<p style="margin:6px 0 0;font-size:12px;color:#15803d;line-height:1.5;">Su jefe ha autorizado su asistencia a la capacitacion <strong>' + sigla + '</strong> programada para el <strong>' + fecha + '</strong>. Por favor asista puntualmente.</p>';
+    h += '</div>';
+  } else {
+    h += '<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:16px 20px;margin-bottom:16px;">';
+    h += '<p style="margin:0;font-size:14px;font-weight:700;color:#991b1b;">Su participacion no fue autorizada</p>';
+    h += '<p style="margin:6px 0 0;font-size:12px;color:#dc2626;line-height:1.5;">Su jefe no autorizo su asistencia a la capacitacion <strong>' + sigla + '</strong>.</p>';
+    h += '</div>';
+  }
+  if (comentario) {
+    h += '<div style="background:#f8fafc;border-left:3px solid #94a3b8;padding:12px 16px;margin-bottom:16px;">';
+    h += '<p style="margin:0;font-size:11px;font-weight:700;color:#64748b;">Comentario del jefe:</p>';
+    h += '<p style="margin:4px 0 0;font-size:13px;color:#334155;font-style:italic;">"' + comentario + '"</p>';
+    h += '</div>';
+  }
+  if (esPositivo) {
+    h += '<p style="font-size:12px;color:#475569;line-height:1.5;margin:0;">Si tiene alguna consulta sobre el curso, contacte al equipo de Capacitacion.</p>';
+  } else {
+    h += '<p style="font-size:12px;color:#475569;line-height:1.5;margin:0;">Si tiene preguntas sobre esta decision, comuniquese con su jefe directo o con el equipo de Capacitacion.</p>';
+  }
+  h += '</div>';
+  // Footer
+  h += '<div style="background:#f8fafc;padding:16px 32px;border-radius:0 0 12px 12px;border:1px solid #e2e8f0;">';
+  h += '<p style="color:#94a3b8;font-size:10px;margin:0;line-height:1.5;">Este es un correo automatico del sistema MENTE. No responda a este correo.</p>';
+  h += '<p style="color:#cbd5e1;font-size:9px;margin:4px 0 0;">MENTE — LATAM Cargo | Correo automatico</p>';
+  h += '</div></div>';
+  return h;
+}
+
+
+// ===========================================================================
+// V3.11: SEGUIMIENTO POST-CURSO
+// Lee PLAN_REGISTRO (master maestro) y construye un veredicto operativo
+// que NO depende de lo que diga MENTE/SAP. Si la persona aprobo en
+// Calendario, NO debe reprogramarse aunque MENTE diga "vencido".
+// ===========================================================================
+
+/**
+ * @param {Object} filtros - opcional: {base, jefe, area, desde, hasta}
+ * @return {{ok: boolean, registros: Array, error?: string}}
+ */
+function getSeguimientoPostCurso(filtros) {
+  try {
+    filtros = filtros || {};
+    var ss = getSpreadsheet('MAESTRO');
+    var sh = ss.getSheetByName(PLAN_REG_SHEET);
+    if (!sh) return { ok: false, error: 'Hoja PLAN_REGISTRO no encontrada' };
+
+    var data = sh.getDataRange().getValues();
+    if (data.length < 2) return { ok: true, registros: [] };
+    var headers = data[0];
+
+    // Mapa de columnas
+    var idx = {};
+    for (var c = 0; c < headers.length; c++) {
+      var h = String(headers[c] || '').toUpperCase().trim();
+      if (h === 'REG_ID') idx.regId = c;
+      else if (h === 'EVENTO_ID') idx.eventoId = c;
+      else if (h === 'BP') idx.bp = c;
+      else if (h === 'NOMBRE') idx.nombre = c;
+      else if (h === 'CORREO' || h === 'EMAIL') idx.email = c;
+      else if (h === 'AREA') idx.area = c;
+      else if (h === 'PAIS' || h === 'PAÍS') idx.pais = c;
+      else if (h === 'BASE') idx.base = c;
+      else if (h === 'JEFE_DIRECTO' || h === 'JEFE') idx.jefeDirecto = c;
+      else if (h === 'JEFE_AREA') idx.jefeArea = c;
+      else if (h === 'CURSO') idx.curso = c;
+      else if (h === 'CURSO_NOMBRE') idx.cursoNombre = c;
+      else if (h === 'FECHA') idx.fecha = c;
+      else if (h === 'ESTADO_ASISTENCIA') idx.asistencia = c;
+      else if (h === 'NOVEDAD') idx.novedad = c;
+      else if (h === 'RESULTADO') idx.resultado = c;
+      else if (h === 'NOTA_CURSO') idx.notaCurso = c;
+      else if (h === 'FIRMA') idx.firma = c;
+      else if (h === 'FIRMA_TS') idx.firmaTs = c;
+      else if (h === 'FECHA_FORMALIZACION') idx.fechaFormaliz = c;
+      else if (h === 'ESTADO_CONTACTO') idx.estadoContacto = c;
+    }
+    if (idx.bp === undefined || idx.nombre === undefined) {
+      return { ok: false, error: 'PLAN_REGISTRO sin columnas BP/NOMBRE' };
+    }
+
+    var registros = [];
+    var seen = {}; // dedupe por BP + curso → nos quedamos con el ultimo (mas reciente)
+
+    for (var r = 1; r < data.length; r++) {
+      var row = data[r];
+      var bp = String(row[idx.bp] || '').trim();
+      if (!bp) continue;
+
+      // Excluir descartados/cancelados
+      var ec = idx.estadoContacto !== undefined ? String(row[idx.estadoContacto] || '').toUpperCase() : '';
+      if (ec === 'RECHAZADO' || ec === 'CANCELADO') continue;
+
+      var curso = idx.curso !== undefined ? String(row[idx.curso] || '').trim() : '';
+      var cursoNombre = idx.cursoNombre !== undefined ? String(row[idx.cursoNombre] || '').trim() : '';
+      var displayCurso = cursoNombre || curso || '—';
+
+      var fecha = idx.fecha !== undefined ? _formatFechaSafe_(row[idx.fecha]) : '';
+      var asistencia = idx.asistencia !== undefined ? String(row[idx.asistencia] || '').toUpperCase().trim() : '';
+      var resultado = idx.resultado !== undefined ? String(row[idx.resultado] || '').toUpperCase().trim() : '';
+      var notaCurso = idx.notaCurso !== undefined ? row[idx.notaCurso] : '';
+      var firma = idx.firma !== undefined ? String(row[idx.firma] || '') : '';
+      var firmado = firma.indexOf('data:image/') === 0;
+
+      // ESTADO FINAL operativo (independiente de MENTE)
+      // - Si APROBADO -> APROBADO (no reprogramar)
+      // - Si REPROBADO o NO_ASISTIO -> REPROGRAMAR
+      // - Si vacio o asistio sin nota -> PENDIENTE
+      var estadoFinal;
+      if (resultado === 'APROBADO') estadoFinal = 'APROBADO';
+      else if (resultado === 'REPROBADO' || asistencia === 'NO_ASISTIO') estadoFinal = 'REPROGRAMAR';
+      else estadoFinal = 'PENDIENTE';
+
+      var rec = {
+        regId: idx.regId !== undefined ? String(row[idx.regId] || '') : '',
+        eventoId: idx.eventoId !== undefined ? String(row[idx.eventoId] || '') : '',
+        bp: bp,
+        nombre: idx.nombre !== undefined ? String(row[idx.nombre] || '') : '',
+        email: idx.email !== undefined ? String(row[idx.email] || '') : '',
+        area: idx.area !== undefined ? String(row[idx.area] || '') : '',
+        pais: idx.pais !== undefined ? String(row[idx.pais] || '') : '',
+        base: idx.base !== undefined ? String(row[idx.base] || '') : '',
+        jefeDirecto: idx.jefeDirecto !== undefined ? String(row[idx.jefeDirecto] || '') : '',
+        jefeArea: idx.jefeArea !== undefined ? String(row[idx.jefeArea] || '') : '',
+        curso: displayCurso,
+        cursoSigla: curso,
+        fecha: fecha,
+        asistencia: asistencia,
+        resultado: resultado,
+        notaCurso: (notaCurso === '' || notaCurso === undefined || notaCurso === null) ? '' : notaCurso,
+        firmado: firmado,
+        firmaTs: idx.firmaTs !== undefined ? String(row[idx.firmaTs] || '') : '',
+        estadoFinal: estadoFinal
+      };
+
+      // Dedup BP+curso quedandonos con la mas reciente (por fecha desc)
+      var key = bp + '||' + curso;
+      if (!seen[key] || (rec.fecha && rec.fecha > seen[key].fecha)) seen[key] = rec;
+    }
+
+    Object.keys(seen).forEach(function(k){ registros.push(seen[k]); });
+
+    // Aplicar filtros opcionales del backend
+    if (filtros.base) registros = registros.filter(function(r){ return String(r.base || '').toUpperCase().indexOf(String(filtros.base).toUpperCase()) >= 0; });
+    if (filtros.jefe) registros = registros.filter(function(r){ return r.jefeDirecto === filtros.jefe; });
+    if (filtros.area) registros = registros.filter(function(r){ return r.area === filtros.area; });
+    if (filtros.desde) registros = registros.filter(function(r){ return !r.fecha || r.fecha >= filtros.desde; });
+    if (filtros.hasta) registros = registros.filter(function(r){ return !r.fecha || r.fecha <= filtros.hasta; });
+
+    // Orden: REPROGRAMAR primero, luego PENDIENTE, luego APROBADO; dentro por fecha desc
+    var ordPrio = { 'REPROGRAMAR': 0, 'PENDIENTE': 1, 'APROBADO': 2 };
+    registros.sort(function(a, b) {
+      var pa = ordPrio[a.estadoFinal] !== undefined ? ordPrio[a.estadoFinal] : 99;
+      var pb = ordPrio[b.estadoFinal] !== undefined ? ordPrio[b.estadoFinal] : 99;
+      if (pa !== pb) return pa - pb;
+      return String(b.fecha || '').localeCompare(String(a.fecha || ''));
+    });
+
+    return { ok: true, registros: registros };
+  } catch (e) {
+    Logger.log('[V3.11-postcurso] Error: ' + e.message);
+    return { ok: false, error: e.message };
+  }
+}
+
+function _formatFechaSafe_(val) {
+  if (!val) return '';
+  if (val instanceof Date) return Utilities.formatDate(val, Session.getScriptTimeZone() || 'America/Bogota', 'yyyy-MM-dd');
+  var s = String(val);
+  // Detectar dd/mm/yyyy y reformatear
+  var m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  if (m) return m[3] + '-' + ('0' + m[2]).slice(-2) + '-' + ('0' + m[1]).slice(-2);
+  return s;
+}
+
+function guardarCursoPlan(data) {
+  // UPSERT en EVENTOS
+  return { success: true };
+}
+
+function cancelarCursoPlan(eventoId, motivo) {
+  // actualizar ESTADO = CANCELADO + liberar recursos
+  return { success: true };
+}
+
+function getCursosBiblioteca() {
+  try {
+    var ss = SpreadsheetApp.openById('10JKGcAyZizBC0NXcY0TfuUrlZd5aEZdBDv2eKowngs4');
+    var sh = ss.getSheetByName('BIBLIOTECA');
+    if (!sh) throw new Error('Hoja BIBLIOTECA no encontrada');
+
+    var data = sh.getDataRange().getValues();
+    var out = [];
+
+    for (var i = 1; i < data.length; i++) {
+      var row = data[i];
+      var titulo = row[0]; // Col A
+      var sigla  = row[2]; // Col C
+
+      if (sigla) {
+        out.push({
+          sigla: String(sigla).trim(),
+          titulo: String(titulo || '').trim()
+        });
+      }
+    }
+
+    return out;
+
+  } catch (err) {
+    Logger.log('[getCursosBiblioteca] ' + err);
+    return [];
+  }
+}
+
+function getInstructores() {
+  try {
+    var ss = SpreadsheetApp.openById('10JKGcAyZizBC0NXcY0TfuUrlZd5aEZdBDv2eKowngs4');
+    var sh = ss.getSheetByName('USUARIOS');
+    if (!sh) throw new Error('Hoja USUARIOS no encontrada');
+
+    var data = sh.getDataRange().getValues();
+    var out = [];
+
+    for (var i = 1; i < data.length; i++) {
+      var rol = String(data[i][2] || '').trim().toUpperCase(); // Col C
+      var nombre = data[i][1]; // Col B
+
+      if (rol === 'INSTRUCTOR' && nombre) {
+        out.push(String(nombre).trim());
+      }
+    }
+
+    return out;
+
+  } catch (err) {
+    Logger.log('[getInstructores] ' + err);
+    return [];
+  }
+}
+
+function getSalas() {
+  try {
+    var ss = SpreadsheetApp.openById('10JKGcAyZizBC0NXcY0TfuUrlZd5aEZdBDv2eKowngs4');
+    var sh = ss.getSheetByName('SALAS');
+    if (!sh) throw new Error('Hoja SALAS no encontrada');
+
+    var data = sh.getDataRange().getValues();
+    var out = [];
+
+    for (var i = 1; i < data.length; i++) {
+      var sala = data[i][0]; // Col A
+      if (sala) out.push(String(sala).trim());
+    }
+
+    return out;
+
+  } catch (err) {
+    Logger.log('[getSalas] ' + err);
+    return [];
+  }
+}

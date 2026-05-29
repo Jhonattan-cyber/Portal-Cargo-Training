@@ -1,0 +1,144 @@
+<!-- ======= SEGUIMIENTO SECTION ======= -->
+<div id="section-seguimiento" class="module-section" style="display:none;">
+  <!-- Filtros tipo Looker -->
+  <div style="background:#fff;border-radius:12px;padding:16px;margin-bottom:16px;box-shadow:0 1px 3px rgba(0,0,0,0.08);border:1px solid #e2e8f0;">
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;">
+      <i class="ph ph-funnel" style="color:#6366f1;font-size:18px;"></i>
+      <span style="font-weight:700;color:#1e293b;font-size:14px;">Filtros</span>
+      <button onclick="limpiarFiltrosSeguimiento()" style="margin-left:auto;font-size:11px;color:#6366f1;background:none;border:1px solid #e2e8f0;border-radius:6px;padding:4px 10px;cursor:pointer;font-weight:600;" data-testid="seg-limpiar-filtros">Limpiar filtros</button>
+    </div>
+    <!-- Fila 1: Base + Status + Curso -->
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px;margin-bottom:8px;">
+      <select id="seg-filter-base" data-testid="seg-filter-base" onchange="filtrarSeguimientoCompleto()" style="padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;color:#374151;background:white;">
+        <option value="">Base: Todas</option>
+        <option value="CHILE">Chile</option>
+        <option value="RAMPA">Rampa</option>
+        <option value="LATAM">LATAM PHH</option>
+        <option value="NAM">NAM</option>
+      </select>
+      <select id="seg-filter-status" data-testid="seg-filter-status" onchange="filtrarSeguimientoCompleto()" style="padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;color:#374151;background:white;">
+        <option value="">Status curso: Todos</option>
+        <option value="VENCIDO">Vencido</option>
+        <option value="POR VENCER">Por Vencer</option>
+        <option value="PROGRAMAR">Programar</option>
+        <option value="HABILITADO">Habilitado</option>
+      </select>
+      <select id="seg-filter-curso" data-testid="seg-filter-curso" onchange="filtrarSeguimientoCompleto()" style="padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;color:#374151;background:white;">
+        <option value="">Curso: Todos</option>
+      </select>
+      <select id="seg-filter-pais" data-testid="seg-filter-pais" onchange="filtrarSeguimientoCompleto()" style="padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;color:#374151;background:white;">
+        <option value="">Pais: Todos</option>
+      </select>
+    </div>
+    <!-- Fila 2: Jefe directo + Jefe area + Ejecutivo + Area -->
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px;margin-bottom:8px;">
+      <select id="seg-filter-jd" data-testid="seg-filter-jd" onchange="filtrarSeguimientoCompleto()" style="padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;color:#374151;background:white;">
+        <option value="">Jefe directo: Todos</option>
+      </select>
+      <select id="seg-filter-ja" data-testid="seg-filter-ja" onchange="filtrarSeguimientoCompleto()" style="padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;color:#374151;background:white;">
+        <option value="">Jefe area: Todos</option>
+      </select>
+      <select id="seg-filter-gerente" data-testid="seg-filter-gerente" onchange="filtrarSeguimientoCompleto()" style="padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;color:#374151;background:white;">
+        <option value="">Ejecutivo: Todos</option>
+      </select>
+      <select id="seg-filter-area" data-testid="seg-filter-area" onchange="filtrarSeguimientoCompleto()" style="padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;color:#374151;background:white;">
+        <option value="">Area: Todas</option>
+      </select>
+    </div>
+    <!-- Fila 3: Buscador -->
+    <div>
+      <input type="text" id="seg-search" data-testid="seg-search" class="input-search" placeholder="Buscar por BP, nombre o correo..." oninput="filtrarSeguimientoCompleto()" style="width:100%;padding:8px 14px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;box-sizing:border-box;">
+    </div>
+  </div>
+
+  <!-- KPIs -->
+  <div id="seguimiento-stats" style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px;"></div>
+
+  <!-- Tabla -->
+  <div class="card-container">
+    <div class="card-header" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
+      <h3 style="font-weight:700;color:#1e293b;"><i class="ph ph-clipboard-text" style="margin-right:4px;"></i> Seguimiento de Cursos</h3>
+      <div style="display:flex;align-items:center;gap:10px;">
+        <span id="seguimiento-count" style="font-size:12px;color:#94a3b8;"></span>
+        <button onclick="abrirCorreoRecordatorio()" class="btn-correo-seg" data-testid="seg-btn-correo" style="padding:6px 14px;background:linear-gradient(135deg,#7c3aed,#db2777);color:white;border:none;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;display:flex;align-items:center;gap:6px;">
+          <i class="ph ph-envelope-simple"></i> Enviar Recordatorio
+        </button>
+      </div>
+    </div>
+    <div style="overflow-x:auto;">
+      <table class="tabla-regional">
+        <thead><tr>
+          <th>Colaborador</th><th class="text-center">Base</th><th class="text-center">Pais</th><th class="text-center">Curso</th>
+          <th class="text-center">Status</th><th class="text-center">Vencimiento</th><th class="text-center">Dias</th>
+          <th class="text-center">Jefe Directo</th><th class="text-center">Jefe Area</th>
+        </tr></thead>
+        <tbody id="seguimiento-tbody"></tbody>
+      </table>
+    </div>
+    <div id="seguimiento-footer" class="card-footer"></div>
+  </div>
+  </div><!-- /seg-content-mente -->
+
+  <!-- ============ TAB POST-CURSO (NUEVA V3.11) ============ -->
+  <div id="seg-content-postcurso" style="display:none;">
+    <div style="background:#fff;border-radius:12px;padding:16px;margin-bottom:16px;box-shadow:0 1px 3px rgba(0,0,0,0.08);border:1px solid #e2e8f0;">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;">
+        <i class="ph ph-funnel" style="color:#7c3aed;font-size:18px;"></i>
+        <span style="font-weight:700;color:#1e293b;font-size:14px;">Filtros Post-Curso</span>
+        <span style="font-size:11px;color:#64748b;margin-left:8px;">Datos cargados desde PLAN_REGISTRO (Calendario)</span>
+        <button onclick="pcLimpiarFiltros()" data-testid="pc-limpiar" style="margin-left:auto;font-size:11px;color:#7c3aed;background:none;border:1px solid #e2e8f0;border-radius:6px;padding:4px 10px;cursor:pointer;font-weight:600;">Limpiar filtros</button>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px;margin-bottom:8px;">
+        <select id="pc-filter-base" data-testid="pc-filter-base" onchange="pcFiltrar()" style="padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;background:white;">
+          <option value="">Base: Todas</option><option value="CHILE">Chile</option><option value="RAMPA">Rampa</option><option value="LATAM">LATAM PHH</option><option value="NAM">NAM</option>
+        </select>
+        <select id="pc-filter-resultado" data-testid="pc-filter-resultado" onchange="pcFiltrar()" style="padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;background:white;">
+          <option value="">Estado final: Todos</option>
+          <option value="APROBADO">✅ Aprobado</option>
+          <option value="REPROGRAMAR">🔁 Reprogramar</option>
+          <option value="PENDIENTE">⏳ Pendiente</option>
+        </select>
+        <select id="pc-filter-curso" data-testid="pc-filter-curso" onchange="pcFiltrar()" style="padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;background:white;">
+          <option value="">Curso: Todos</option>
+        </select>
+        <select id="pc-filter-pais" data-testid="pc-filter-pais" onchange="pcFiltrar()" style="padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;background:white;">
+          <option value="">País: Todos</option>
+        </select>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px;margin-bottom:8px;">
+        <select id="pc-filter-jd" data-testid="pc-filter-jd" onchange="pcFiltrar()" style="padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;background:white;">
+          <option value="">Jefe directo: Todos</option>
+        </select>
+        <select id="pc-filter-area" data-testid="pc-filter-area" onchange="pcFiltrar()" style="padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;background:white;">
+          <option value="">Área: Todas</option>
+        </select>
+        <input type="date" id="pc-filter-desde" data-testid="pc-filter-desde" onchange="pcFiltrar()" placeholder="Desde" style="padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;background:white;" />
+        <input type="date" id="pc-filter-hasta" data-testid="pc-filter-hasta" onchange="pcFiltrar()" placeholder="Hasta" style="padding:8px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;background:white;" />
+      </div>
+      <input type="text" id="pc-search" data-testid="pc-search" placeholder="Buscar por BP, nombre o correo..." oninput="pcFiltrar()" style="width:100%;padding:8px 14px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;box-sizing:border-box;" />
+    </div>
+
+    <!-- KPIs Post-Curso -->
+    <div id="pc-stats" style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px;"></div>
+
+    <!-- Tabla -->
+    <div class="card-container">
+      <div class="card-header" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
+        <h3 style="font-weight:700;color:#1e293b;"><i class="ph ph-clipboard-text" style="margin-right:4px;"></i> Resultados Post-Curso</h3>
+        <span id="pc-count" style="font-size:12px;color:#94a3b8;"></span>
+      </div>
+      <div style="overflow-x:auto;">
+        <table class="tabla-regional">
+          <thead><tr>
+            <th>Colaborador</th><th class="text-center">BP</th><th class="text-center">Curso</th>
+            <th class="text-center">Fecha</th><th class="text-center">Asist.</th><th class="text-center">Nota</th>
+            <th class="text-center">Resultado</th><th class="text-center">Firma</th><th class="text-center">Estado Final</th>
+            <th class="text-center">Acción</th>
+          </tr></thead>
+          <tbody id="pc-tbody"></tbody>
+        </table>
+      </div>
+      <div id="pc-footer" class="card-footer"></div>
+    </div>
+  </div><!-- /seg-content-postcurso -->
+</div>

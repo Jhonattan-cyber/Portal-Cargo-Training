@@ -1,0 +1,686 @@
+<!-- ======= FORECAST POR CURSO — Vista Matriz V2 ======= -->
+<div id="section-forecast-cursos" class="module-section" style="display:none;">
+  <div id="fcc-content">
+    <div style="text-align:center;padding:60px 20px;">
+      <div class="fcc-spinner"></div>
+      <p style="margin-top:16px;color:#64748b;font-size:14px;">Cargando Forecast por Curso...</p>
+    </div>
+  </div>
+</div>
+
+<style>
+  .fcc-spinner {
+    width:40px;height:40px;border:3px solid #e2e8f0;border-top:3px solid #3b82f6;
+    border-radius:50%;animation:fccSpin 0.8s linear infinite;margin:0 auto;
+  }
+  @keyframes fccSpin { to { transform:rotate(360deg); } }
+
+  /* KPI Cards */
+  .fcc-kpis { display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:12px; }
+  @media (max-width:768px) { .fcc-kpis { grid-template-columns:repeat(2,1fr); } }
+  .fcc-kpi-card {
+    background:#fff;border-radius:12px;padding:14px 18px;
+    box-shadow:0 1px 3px rgba(0,0,0,0.06);border:1px solid #e2e8f0;
+    transition:transform 0.15s,box-shadow 0.15s;
+  }
+  .fcc-kpi-card:hover { transform:translateY(-2px);box-shadow:0 4px 12px rgba(0,0,0,0.08); }
+  .fcc-kpi-label { font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:#64748b;margin-bottom:2px; }
+  .fcc-kpi-value { font-size:26px;font-weight:800;line-height:1.1; }
+
+  /* Matrix table */
+  .fcc-table-wrap {
+    background:#fff;border-radius:12px;overflow:hidden;
+    box-shadow:0 1px 3px rgba(0,0,0,0.06);border:1px solid #e2e8f0;
+  }
+  .fcc-table-scroll { overflow-x:auto;-webkit-overflow-scrolling:touch; }
+  .fcc-table { width:100%;border-collapse:collapse;font-size:12px;min-width:800px; }
+  .fcc-table thead th {
+    background:#1e293b;color:#fff;font-weight:700;padding:10px 8px;
+    text-align:center;font-size:10px;text-transform:uppercase;letter-spacing:0.3px;
+    white-space:nowrap;position:sticky;top:0;z-index:2;
+  }
+  .fcc-table thead th:first-child { text-align:left;padding-left:14px;min-width:180px;position:sticky;left:0;z-index:3;background:#1e293b; }
+  .fcc-table tbody tr { border-bottom:1px solid #f1f5f9;transition:background 0.1s;cursor:pointer; }
+  .fcc-table tbody tr:hover { background:#f0f9ff; }
+  .fcc-table tbody td { padding:8px;color:#334155;text-align:center; }
+  .fcc-table tbody td:first-child { text-align:left;padding-left:14px;position:sticky;left:0;background:inherit;z-index:1; }
+  .fcc-table tbody tr:hover td:first-child { background:#f0f9ff; }
+  .fcc-table tfoot td { background:#1e293b;color:#fff;font-weight:700;padding:10px 8px;text-align:center;font-size:11px;position:sticky;bottom:0;z-index:2; }
+  .fcc-table tfoot td:first-child { text-align:left;padding-left:14px;position:sticky;left:0;z-index:3;background:#1e293b; }
+
+  /* Month cell colors */
+  .fcc-cell-red { background:#FEE2E2;color:#B91C1C;font-weight:900; }
+  .fcc-cell-yellow { background:#FEF3C7;color:#B45309;font-weight:900; }
+  .fcc-cell-green { background:#D1FAE5;color:#047857;font-weight:900; }
+  .fcc-cell-empty { color:#cbd5e1;font-size:10px; }
+
+  /* Badges */
+  .fcc-badge { display:inline-block;padding:2px 7px;border-radius:12px;font-size:10px;font-weight:700; }
+  .fcc-badge-red { background:#fee2e2;color:#991b1b; }
+  .fcc-badge-yellow { background:#fef3c7;color:#92400e; }
+  .fcc-badge-green { background:#dcfce7;color:#166534; }
+  .fcc-badge-blue { background:#dbeafe;color:#1e40af; }
+  .fcc-badge-purple { background:#ede9fe;color:#5b21b6; }
+  .fcc-badge-slate { background:#f1f5f9;color:#475569; }
+
+  /* Base tabs */
+  .fcc-base-tabs { display:flex;gap:8px;margin-bottom:12px;overflow-x:auto;-webkit-overflow-scrolling:touch;padding-bottom:4px; }
+  .fcc-base-tab {
+    flex:1;min-width:80px;padding:10px 8px;border-radius:12px;text-align:center;
+    font-weight:900;font-size:13px;cursor:pointer;transition:all 0.15s;border:1px solid #e5e7eb;
+    background:#fff;color:#4b5563;
+  }
+  .fcc-base-tab.active { background:#4f46e5;color:#fff;border-color:#4f46e5;box-shadow:0 4px 14px rgba(79,70,229,0.3); }
+  .fcc-base-tab .sub { font-size:10px;font-weight:500;opacity:0.7;margin-top:2px; }
+
+  /* Filter panel */
+  .fcc-filters-panel {
+    background:#fff;border-radius:12px;padding:12px 16px;margin-bottom:12px;
+    box-shadow:0 1px 3px rgba(0,0,0,0.04);border:1px solid #e2e8f0;
+    display:flex;flex-wrap:wrap;gap:8px;align-items:center;
+  }
+  .fcc-filter-input {
+    padding:7px 12px 7px 32px;border:1px solid #d1d5db;border-radius:8px;
+    font-size:12px;outline:none;transition:border-color 0.15s;min-width:200px;flex:1;
+    background:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2'%3E%3Ccircle cx='11' cy='11' r='8'/%3E%3Cpath d='M21 21l-4.35-4.35'/%3E%3C/svg%3E") no-repeat 10px center;
+  }
+  .fcc-filter-input:focus { border-color:#3b82f6;box-shadow:0 0 0 3px rgba(59,130,246,0.1); }
+  .fcc-filter-select {
+    padding:7px 10px;border:1px solid #d1d5db;border-radius:8px;font-size:12px;
+    font-weight:600;outline:none;cursor:pointer;background:#fff;
+  }
+  .fcc-filter-btn {
+    padding:7px 12px;border-radius:8px;font-size:11px;font-weight:700;
+    cursor:pointer;border:1px solid #d1d5db;background:#f8fafc;color:#475569;
+    transition:background 0.15s;
+  }
+  .fcc-filter-btn:hover { background:#e2e8f0; }
+
+  /* Modal */
+  .fcc-modal-overlay {
+    position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);
+    z-index:100000;display:flex;align-items:center;justify-content:center;
+  }
+  .fcc-modal {
+    background:#fff;border-radius:16px;width:96%;max-width:1050px;max-height:85vh;
+    box-shadow:0 20px 60px rgba(0,0,0,0.3);display:flex;flex-direction:column;overflow:hidden;
+  }
+  .fcc-modal-header {
+    background:linear-gradient(135deg,#1e3a5f,#2563eb);padding:16px 24px;
+    display:flex;justify-content:space-between;align-items:center;flex-shrink:0;
+  }
+  .fcc-modal-header h3 { color:#fff;font-size:15px;font-weight:800;margin:0; }
+  .fcc-modal-close {
+    background:rgba(255,255,255,0.2);color:#fff;border:none;border-radius:8px;
+    width:32px;height:32px;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;
+  }
+  .fcc-modal-body { padding:16px 24px;overflow-y:auto;flex:1; }
+  .fcc-empty { text-align:center;padding:40px 20px;color:#94a3b8; }
+  .fcc-empty i { font-size:48px;margin-bottom:12px;display:block; }
+</style>
+
+<script>
+// ============================================================
+// FORECAST POR CURSO — Frontend V2 (Matriz/Calendario)
+// ============================================================
+var _fccData = null;
+var _fccTipoBase = 'HCC';
+var _fccFuente = 'CONSOLIDADO';
+var _fccFilterCurso = '';
+var _fccFilterArea = '';
+var _fccFilterStatus = '';
+var _fccSortCol = 'vencidos';
+var _fccSortAsc = false;
+var MESES_C = ['', 'Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
+
+function initForecastCursos() {
+  // V2-FIX: Detección de bases robusta usando APP.usuario directamente
+  var bases = _fccGetBases();
+  _fccTipoBase = (bases.length > 0) ? bases[0] : 'HCC';
+  _fccFuente = _fccGetFuente(_fccTipoBase);
+  cargarFCCursos(_fccTipoBase);
+}
+
+function _fccGetBases() {
+  // Intenta usar getBasesPermitidas si está disponible y currentUser está inicializado
+  if (typeof getBasesPermitidas === 'function' && typeof currentUser !== 'undefined' && currentUser) {
+    return getBasesPermitidas();
+  }
+  // Fallback: usar APP.usuario directamente
+  var u = (typeof APP !== 'undefined' && APP.usuario) ? APP.usuario : null;
+  if (!u) return ['HCC'];
+  var rol = (u.rol || '').toUpperCase().replace(/\s+/g, '_');
+  if (rol === 'ADMIN') return ['HCC', 'LATAM_SUR', 'CL', 'RAMPA', 'NAM_EU'];
+  if (rol === 'CAPACITY') {
+    var capFilter = u.capacityFilter || {};
+    var bToF = { 'LATAM': 'LATAM_SUR', 'RAMPA': 'RAMPA', 'NAM': 'NAM_EU', 'CHILE': 'CL' };
+    var result = [];
+    (capFilter.allowedBases || []).forEach(function(b) {
+      var fk = bToF[b] || b;
+      if (result.indexOf(fk) < 0) result.push(fk);
+    });
+    return result.length > 0 ? result : ['LATAM_SUR'];
+  }
+  // Otros roles: mapear su base
+  var base = (u.base || u.baseOrigen || '').toUpperCase();
+  var bMap = { 'CHILE': 'CL', 'LATAM': 'LATAM_SUR', 'NAM': 'NAM_EU', 'RAMPA': 'RAMPA' };
+  return [bMap[base] || base || 'HCC'];
+}
+
+function _fccGetFuente(tipo) {
+  if (tipo === 'RAMPA') return 'RAMPA';
+  if (tipo === 'LATAM_SUR') return 'PHH';
+  return 'CONSOLIDADO';
+}
+
+function _fccNombreBase(tipo) {
+  var m = { 'HCC': 'HCC', 'LATAM_SUR': 'LATAM PHH', 'CL': 'Chile', 'RAMPA': 'Rampa', 'NAM_EU': 'NAM & EU', 'TODO': 'Todos' };
+  return m[tipo] || tipo;
+}
+
+function _fccSubBase(tipo) {
+  var m = { 'HCC': 'Priorizados', 'LATAM_SUR': 'Regional', 'CL': 'Solo CL', 'RAMPA': 'RED', 'NAM_EU': 'USA, Europa', 'TODO': 'Global' };
+  return m[tipo] || '';
+}
+
+function cargarFCCursos(tipoBase) {
+  _fccTipoBase = tipoBase;
+  _fccFuente = _fccGetFuente(tipoBase);
+  _fccData = null;
+  _fccFilterCurso = '';
+  _fccFilterArea = '';
+  _fccFilterStatus = '';
+
+  var container = document.getElementById('fcc-content');
+  if (!container) return;
+
+  // Render skeleton with base tabs immediately
+  var bases = _fccGetBases();
+  var html = _fccRenderHeader(bases);
+  html += '<div style="text-align:center;padding:60px 20px;"><div class="fcc-spinner"></div><p style="margin-top:16px;color:#64748b;font-size:14px;">Cargando ' + _fccNombreBase(tipoBase) + '...</p></div>';
+  container.innerHTML = html;
+
+  google.script.run
+    .withSuccessHandler(function(result) {
+      if (!result || !result.success) {
+        var errHtml = _fccRenderHeader(bases);
+        errHtml += '<div class="fcc-empty"><i class="ph ph-warning-circle"></i><p>' + (result && result.error || 'Error al cargar datos') + '</p>';
+        errHtml += '<button onclick="cargarFCCursos(\'' + tipoBase + '\')" style="margin-top:12px;padding:8px 16px;background:#4f46e5;color:#fff;border:none;border-radius:8px;font-weight:700;cursor:pointer;">Reintentar</button></div>';
+        container.innerHTML = errHtml;
+        return;
+      }
+      _fccData = result;
+      renderFCCursos();
+    })
+    .withFailureHandler(function(err) {
+      var errHtml = _fccRenderHeader(bases);
+      errHtml += '<div class="fcc-empty"><i class="ph ph-warning-circle"></i><p>Error: ' + (err.message || err) + '</p></div>';
+      container.innerHTML = errHtml;
+    })
+    .getForecastDataByCourse(tipoBase, _fccFuente);
+}
+
+function _fccRenderHeader(bases) {
+  var html = '';
+  // Top bar
+  html += '<div style="background:linear-gradient(135deg,#1e3a5f 0%,#1d4ed8 50%,#7c3aed 100%);border-radius:12px;padding:10px 20px;margin-bottom:10px;box-shadow:0 4px 14px rgba(99,102,241,0.35);">';
+  html += '<div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;">';
+  html += '<span style="font-size:15px;font-weight:900;color:#fff;letter-spacing:2px;text-transform:uppercase;">FORECAST CURSOS</span>';
+  html += '<div style="display:flex;gap:8px;flex-wrap:wrap;">';
+  html += '<button onclick="exportarFCCursos()" style="background:rgba(34,197,94,0.9);color:#fff;border:none;border-radius:8px;padding:5px 11px;font-size:11px;font-weight:700;cursor:pointer;" data-testid="fcc-export-btn"><i class="ph ph-file-xls"></i> Excel</button>';
+  html += '<button onclick="exportarFCCursos(\'pdf\')" style="background:rgba(239,68,68,0.9);color:#fff;border:none;border-radius:8px;padding:5px 11px;font-size:11px;font-weight:700;cursor:pointer;" data-testid="fcc-export-pdf-global"><i class="ph ph-file-pdf"></i> PDF</button>';
+  html += '<button onclick="cargarFCCursos(\'' + _fccTipoBase + '\')" style="background:rgba(255,255,255,0.2);color:#fff;border:1px solid rgba(255,255,255,0.3);border-radius:8px;padding:5px 11px;font-size:11px;font-weight:700;cursor:pointer;" data-testid="fcc-refresh-btn"><i class="ph ph-arrows-clockwise"></i> Actualizar</button>';
+  html += '</div></div></div>';
+
+  // Base info card
+  html += '<div style="display:grid;grid-template-columns:1fr 1fr;align-items:center;background:linear-gradient(to right,#1d4ed8,#4338ca,#7c3aed);border-radius:12px;padding:10px 20px;margin-bottom:10px;box-shadow:0 4px 14px rgba(99,102,241,0.35);">';
+  html += '<div style="border-right:1px solid rgba(255,255,255,0.2);padding-right:16px;">';
+  html += '<div style="font-size:17px;font-weight:900;color:#fff;">' + _fccNombreBase(_fccTipoBase) + '</div>';
+  var sub = _fccSubBase(_fccTipoBase);
+  if (sub) html += '<div style="font-size:11px;font-weight:500;color:rgba(255,255,255,0.7);margin-top:2px;">' + sub + '</div>';
+  html += '</div>';
+  html += '<div style="padding-left:16px;" id="fcc-resumen-colab">';
+  html += '<div style="font-size:28px;font-weight:900;color:#fde68a;line-height:1;" id="fcc-total-colab">&mdash;</div>';
+  html += '<div style="font-size:11px;font-weight:600;color:#fde68a;margin-top:2px;letter-spacing:0.3px;text-transform:uppercase;">cursos en esta base</div>';
+  html += '</div></div>';
+
+  // Base tabs (only if >1 base)
+  if (bases.length > 1) {
+    html += '<div class="fcc-base-tabs" data-testid="fcc-base-tabs">';
+    var tabConfigs = [
+      { key: 'HCC', label: 'HCC', sub: 'Priorizados' },
+      { key: 'LATAM_SUR', label: 'LATAM PHH', sub: 'Regional' },
+      { key: 'CL', label: 'Chile', sub: 'Solo CL' },
+      { key: 'RAMPA', label: 'Rampa', sub: 'RED' },
+      { key: 'NAM_EU', label: 'NAM&EU', sub: 'USA, Europa' }
+    ];
+    for (var ti = 0; ti < tabConfigs.length; ti++) {
+      var tc = tabConfigs[ti];
+      if (bases.indexOf(tc.key) >= 0) {
+        var isActive = (_fccTipoBase === tc.key);
+        html += '<button class="fcc-base-tab' + (isActive ? ' active' : '') + '" onclick="cargarFCCursos(\'' + tc.key + '\')" data-testid="fcc-tab-' + tc.key + '">';
+        html += '<div>' + tc.label + '</div><div class="sub">' + tc.sub + '</div></button>';
+      }
+    }
+    html += '</div>';
+  }
+  return html;
+}
+
+function renderFCCursos() {
+  if (!_fccData) return;
+  var container = document.getElementById('fcc-content');
+  var bases = _fccGetBases();
+  var kpis = _fccData.kpis;
+  var cursos = _fccData.cursos || [];
+  var monthKeys = _fccData.monthKeys || [];
+
+  var html = _fccRenderHeader(bases);
+
+  // Update colab count
+  setTimeout(function() {
+    var el = document.getElementById('fcc-total-colab');
+    if (el) el.textContent = kpis.totalCursos;
+  }, 50);
+
+  // KPIs
+  html += '<div class="fcc-kpis" data-testid="fcc-kpis">';
+  html += _fccKpi('Total Cursos', kpis.totalCursos, '#3b82f6', 'ph-books');
+  html += _fccKpi('Colaboradores', kpis.totalColaboradores, '#8b5cf6', 'ph-users');
+  html += _fccKpi('Cumplimiento Prom.', kpis.pctCumplPromedio + '%', kpis.pctCumplPromedio >= 80 ? '#22c55e' : kpis.pctCumplPromedio >= 60 ? '#f59e0b' : '#ef4444', 'ph-chart-pie');
+  html += _fccKpi('Confirmados Plan.', kpis.totalConfirmados, '#22c55e', 'ph-check-circle');
+  html += '</div>';
+
+  // Filters
+  html += '<div class="fcc-filters-panel" data-testid="fcc-filters">';
+  html += '<input type="text" class="fcc-filter-input" placeholder="Buscar curso..." oninput="_fccFilterDebounce(this.value)" value="' + _fccEsc(_fccFilterCurso) + '" data-testid="fcc-search-input" />';
+  // Area dropdown
+  html += '<select class="fcc-filter-select" onchange="_fccFilterArea=this.value;_fccRerender()" data-testid="fcc-area-filter" style="border-color:#86efac;background:#f0fdf4;">';
+  html += '<option value="">Area</option>';
+  var areas = _fccData.areas || [];
+  for (var ai = 0; ai < areas.length; ai++) {
+    html += '<option value="' + _fccEsc(areas[ai]) + '"' + (_fccFilterArea === areas[ai] ? ' selected' : '') + '>' + _fccEsc(areas[ai]) + '</option>';
+  }
+  html += '</select>';
+  // Status dropdown
+  html += '<select class="fcc-filter-select" onchange="_fccFilterStatus=this.value;_fccRerender()" data-testid="fcc-status-filter" style="border-color:#93c5fd;background:#eff6ff;">';
+  html += '<option value="">Estado</option>';
+  html += '<option value="VENCIDOS"' + (_fccFilterStatus === 'VENCIDOS' ? ' selected' : '') + '>Con Vencidos</option>';
+  html += '<option value="POR_VENCER"' + (_fccFilterStatus === 'POR_VENCER' ? ' selected' : '') + '>Con Por Vencer</option>';
+  html += '<option value="AL_DIA"' + (_fccFilterStatus === 'AL_DIA' ? ' selected' : '') + '>100% Al Dia</option>';
+  html += '</select>';
+  html += '<button class="fcc-filter-btn" onclick="_fccFilterCurso=\'\';_fccFilterArea=\'\';_fccFilterStatus=\'\';_fccRerender()" data-testid="fcc-clear-filters"><i class="ph ph-x"></i> Limpiar</button>';
+  if (_fccData.tiempoMs) html += '<span style="font-size:10px;color:#94a3b8;margin-left:auto;">' + (_fccData.tiempoMs / 1000).toFixed(1) + 's</span>';
+  html += '</div>';
+
+  // Filter data
+  var filtered = _fccApplyFilters(cursos);
+
+  // Matrix table
+  html += '<div class="fcc-table-wrap"><div class="fcc-table-scroll" style="max-height:calc(100vh - 380px);overflow-y:auto;">';
+  html += '<table class="fcc-table" data-testid="fcc-table">';
+  html += _fccMatrixHead(monthKeys);
+  html += '<tbody>';
+  html += _fccMatrixRows(filtered, monthKeys);
+  html += '</tbody>';
+  html += _fccMatrixFoot(filtered, monthKeys);
+  html += '</table></div></div>';
+
+  container.innerHTML = html;
+}
+
+function _fccKpi(label, value, color, icon) {
+  return '<div class="fcc-kpi-card"><div class="fcc-kpi-label"><i class="ph ' + icon + '" style="color:' + color + ';margin-right:3px;"></i>' + label + '</div><div class="fcc-kpi-value" style="color:' + color + ';">' + value + '</div></div>';
+}
+
+function _fccMatrixHead(monthKeys) {
+  var cols = [
+    { key: 'sigla', label: 'CURSO' },
+    { key: 'total', label: 'TOTAL' },
+    { key: 'vencidos', label: 'VENC.' },
+    { key: 'porVencer', label: 'P.VENC' }
+  ];
+  var html = '<thead><tr>';
+  for (var i = 0; i < cols.length; i++) {
+    var c = cols[i];
+    var sorted = (_fccSortCol === c.key);
+    var arrow = sorted ? (_fccSortAsc ? ' &#9650;' : ' &#9660;') : '';
+    var style = (i === 0) ? '' : 'width:50px;';
+    html += '<th style="cursor:pointer;' + style + '" onclick="_fccSort(\'' + c.key + '\')">' + c.label + (sorted ? '<span style="font-size:9px;margin-left:2px;">' + arrow + '</span>' : '') + '</th>';
+  }
+  // Month columns (first is _ANT, rest are rolling months)
+  var anioActual = (_fccData && _fccData.anioActual) ? _fccData.anioActual : new Date().getFullYear();
+  for (var mi = 0; mi < monthKeys.length; mi++) {
+    var mk = monthKeys[mi];
+    if (mk === '_ANT') {
+      html += '<th style="width:52px;line-height:1.2;background:#991b1b;color:#fff;font-size:10px;" title="Vencidos de a&ntilde;os/meses anteriores">&lt;' + anioActual + '</th>';
+    } else {
+      var parts = mk.split('-');
+      var mesNum = parseInt(parts[1], 10);
+      var anioNum = parseInt(parts[0], 10);
+      var esActual = (mesNum === (new Date().getMonth() + 1) && anioNum === new Date().getFullYear());
+      var thStyle = esActual ? 'width:48px;line-height:1.2;background:#312e81;' : 'width:48px;line-height:1.2;';
+      html += '<th style="' + thStyle + '">' + MESES_C[mesNum] + '<br><span style="font-size:9px;opacity:0.7;">' + parts[0] + '</span></th>';
+    }
+  }
+  html += '</tr></thead>';
+  return html;
+}
+
+function _fccMatrixRows(cursos, monthKeys) {
+  if (!cursos || !cursos.length) {
+    var colspan = 8 + monthKeys.length;
+    return '<tr><td colspan="' + colspan + '" style="text-align:center;padding:30px;color:#94a3b8;">Sin cursos para mostrar</td></tr>';
+  }
+  var html = '';
+  for (var i = 0; i < cursos.length; i++) {
+    var c = cursos[i];
+    var rowBg = c.vencidos > 0 ? 'background:#fef2f2;' : c.porVencer > 0 ? 'background:#fffbeb;' : 'background:#f0fdf4;';
+    html += '<tr style="' + rowBg + '" onclick="_fccDrilldown(\'' + _fccEsc(c.sigla) + '\')" data-testid="fcc-row-' + i + '">';
+    // Curso name — Nombre de BIBLIOTECA prominente, sigla como etiqueta
+    var displayName = (c.nombre && c.nombre !== c.sigla) ? c.nombre : c.sigla;
+    html += '<td style="background:inherit;"><div style="font-weight:700;color:#1e293b;font-size:12px;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + _fccEsc(displayName) + '">' + _fccEsc(displayName) + '</div>';
+    if (c.nombre && c.nombre !== c.sigla) html += '<div style="font-size:9px;color:#94a3b8;font-weight:600;">' + _fccEsc(c.sigla) + '</div>';
+    html += '</td>';
+    // Total
+    html += '<td style="font-weight:800;color:#1e293b;">' + c.total + '</td>';
+    // Vencidos
+    html += '<td>' + (c.vencidos > 0 ? '<span class="fcc-badge fcc-badge-red">' + c.vencidos + '</span>' : '<span style="color:#cbd5e1;">0</span>') + '</td>';
+    // Por vencer
+    html += '<td>' + (c.porVencer > 0 ? '<span class="fcc-badge fcc-badge-yellow">' + c.porVencer + '</span>' : '<span style="color:#cbd5e1;">0</span>') + '</td>';
+    // Month cells
+    for (var mi = 0; mi < monthKeys.length; mi++) {
+      var mk = monthKeys[mi];
+      var md = c.meses ? c.meses[mk] : null;
+      if (md && md.t > 0) {
+        var cellClass = 'fcc-cell-green';
+        if (md.v > 0) cellClass = 'fcc-cell-red';
+        else if (md.pv > 0) cellClass = 'fcc-cell-yellow';
+        var tooltip = '';
+        if (mk === '_ANT') {
+          var antAnio = (_fccData && _fccData.anioActual) ? _fccData.anioActual : new Date().getFullYear();
+          tooltip = 'Anteriores (<' + antAnio + '): ' + md.t + ' pers.';
+        } else {
+          tooltip = MESES_C[parseInt(mk.split('-')[1], 10)] + ' ' + mk.split('-')[0] + ': ' + md.t + ' pers.';
+        }
+        if (md.v > 0) tooltip += ' (' + md.v + ' venc.)';
+        if (md.pv > 0) tooltip += ' (' + md.pv + ' p.venc.)';
+        if (md.h > 0) tooltip += ' (' + md.h + ' hab.)';
+        html += '<td class="' + cellClass + '" title="' + tooltip + '">' + md.t + '</td>';
+      } else {
+        html += '<td class="fcc-cell-empty">-</td>';
+      }
+    }
+    html += '</tr>';
+  }
+  return html;
+}
+
+function _fccMatrixFoot(cursos, monthKeys) {
+  var totalPersonas = 0, totalVenc = 0, totalPV = 0;
+  var footMeses = {};
+  for (var i = 0; i < cursos.length; i++) {
+    var c = cursos[i];
+    totalPersonas += c.total;
+    totalVenc += c.vencidos;
+    totalPV += c.porVencer;
+    for (var mi = 0; mi < monthKeys.length; mi++) {
+      var mk = monthKeys[mi];
+      var md = c.meses ? c.meses[mk] : null;
+      if (md) {
+        if (!footMeses[mk]) footMeses[mk] = { v: 0, pv: 0, h: 0, t: 0 };
+        footMeses[mk].t += md.t;
+        footMeses[mk].v += md.v;
+        footMeses[mk].pv += md.pv;
+        footMeses[mk].h += md.h;
+      }
+    }
+  }
+  var html = '<tfoot><tr>';
+  html += '<td>TOTALES (' + cursos.length + ' cursos)</td>';
+  html += '<td>' + totalPersonas + '</td>';
+  html += '<td style="color:#fca5a5;">' + totalVenc + '</td>';
+  html += '<td style="color:#fde68a;">' + totalPV + '</td>';
+  for (var mj = 0; mj < monthKeys.length; mj++) {
+    var mkF = monthKeys[mj];
+    var fmd = footMeses[mkF];
+    html += '<td>' + (fmd ? fmd.t : '-') + '</td>';
+  }
+  html += '</tr></tfoot>';
+  return html;
+}
+
+// ── Filters ──────────────────────────────────────────────────
+function _fccApplyFilters(cursos) {
+  var result = cursos;
+  if (_fccFilterCurso) {
+    var q = _fccFilterCurso.toLowerCase();
+    result = result.filter(function(c) {
+      return (c.sigla || '').toLowerCase().indexOf(q) >= 0 || (c.nombre || '').toLowerCase().indexOf(q) >= 0;
+    });
+  }
+  if (_fccFilterArea) {
+    var areaUp = _fccFilterArea.toUpperCase();
+    result = result.filter(function(c) {
+      if (!c.parts) return false;
+      for (var pi = 0; pi < c.parts.length; pi++) {
+        if ((c.parts[pi].a || '').toUpperCase() === areaUp) return true;
+      }
+      return false;
+    });
+  }
+  if (_fccFilterStatus) {
+    if (_fccFilterStatus === 'VENCIDOS') result = result.filter(function(c) { return c.vencidos > 0; });
+    else if (_fccFilterStatus === 'POR_VENCER') result = result.filter(function(c) { return c.porVencer > 0; });
+    else if (_fccFilterStatus === 'AL_DIA') result = result.filter(function(c) { return c.pctAlDia === 100; });
+  }
+  return result;
+}
+
+var _fccSearchTimer = null;
+function _fccFilterDebounce(val) {
+  clearTimeout(_fccSearchTimer);
+  _fccSearchTimer = setTimeout(function() { _fccFilterCurso = val; _fccRerender(); }, 250);
+}
+
+function _fccRerender() { renderFCCursos(); }
+
+// ── Sort ────────────────────────────────────────────────────
+function _fccSort(col) {
+  if (_fccSortCol === col) _fccSortAsc = !_fccSortAsc;
+  else { _fccSortCol = col; _fccSortAsc = (col === 'sigla' || col === 'nombre'); }
+  if (_fccData && _fccData.cursos) {
+    _fccData.cursos.sort(function(a, b) {
+      var va = (col === 'sigla') ? (a.nombre || a.sigla) : a[col];
+      var vb = (col === 'sigla') ? (b.nombre || b.sigla) : b[col];
+      if (typeof va === 'string') { va = va.toLowerCase(); vb = (vb || '').toLowerCase(); }
+      if (va < vb) return _fccSortAsc ? -1 : 1;
+      if (va > vb) return _fccSortAsc ? 1 : -1;
+      return 0;
+    });
+    _fccRerender();
+  }
+}
+
+// ── Drill-down ──────────────────────────────────────────────
+function _fccDrilldown(sigla) {
+  if (!_fccData || !_fccData.cursos) return;
+  var curso = null;
+  for (var i = 0; i < _fccData.cursos.length; i++) {
+    if (_fccData.cursos[i].sigla === sigla) { curso = _fccData.cursos[i]; break; }
+  }
+  if (!curso) return;
+  var parts = curso.parts || [];
+  var html = '<div class="fcc-modal-overlay" onclick="if(event.target===this)this.remove()" data-testid="fcc-modal">';
+  html += '<div class="fcc-modal">';
+  // Header
+  html += '<div class="fcc-modal-header">';
+  var headerTitle = (curso.nombre && curso.nombre !== curso.sigla) ? curso.nombre : curso.sigla;
+  html += '<div><h3><i class="ph ph-graduation-cap" style="margin-right:6px;"></i>' + _fccEsc(headerTitle) + '</h3>';
+  if (curso.nombre && curso.nombre !== curso.sigla) html += '<div style="color:rgba(255,255,255,0.7);font-size:12px;margin-top:2px;">Sigla: ' + _fccEsc(curso.sigla) + '</div>';
+  html += '</div>';
+  // Export buttons in header
+  html += '<div style="display:flex;gap:6px;align-items:center;">';
+  html += '<button onclick="_fccExportCurso(\'' + _fccEsc(sigla) + '\',\'excel\')" style="background:rgba(255,255,255,0.15);border:none;color:white;padding:6px 12px;border-radius:8px;cursor:pointer;font-size:11px;font-weight:700;display:flex;align-items:center;gap:4px;transition:background 0.15s;" onmouseover="this.style.background=\'rgba(255,255,255,0.3)\'" onmouseout="this.style.background=\'rgba(255,255,255,0.15)\'" data-testid="fcc-export-excel"><i class="ph ph-file-xls"></i>Excel</button>';
+  html += '<button onclick="_fccExportCurso(\'' + _fccEsc(sigla) + '\',\'pdf\')" style="background:rgba(255,255,255,0.15);border:none;color:white;padding:6px 12px;border-radius:8px;cursor:pointer;font-size:11px;font-weight:700;display:flex;align-items:center;gap:4px;transition:background 0.15s;" onmouseover="this.style.background=\'rgba(255,255,255,0.3)\'" onmouseout="this.style.background=\'rgba(255,255,255,0.15)\'" data-testid="fcc-export-pdf"><i class="ph ph-file-pdf"></i>PDF</button>';
+  html += '<button class="fcc-modal-close" onclick="this.closest(\'.fcc-modal-overlay\').remove()" data-testid="fcc-modal-close">&times;</button>';
+  html += '</div>';
+  html += '</div>'; // Close fcc-modal-header
+  // Summary stats
+  html += '<div style="padding:12px 24px;background:#f8fafc;border-bottom:1px solid #e2e8f0;display:flex;gap:16px;flex-wrap:wrap;flex-shrink:0;">';
+  html += _fccMiniStat('Total', curso.total, '#475569');
+  html += _fccMiniStat('Al dia', curso.alDia, '#22c55e');
+  html += _fccMiniStat('P.Vencer', curso.porVencer, '#f59e0b');
+  html += _fccMiniStat('Vencidos', curso.vencidos, '#ef4444');
+  html += _fccMiniStat('Selecc.', curso.sel, '#64748b');
+  html += _fccMiniStat('Preconf.', curso.pre, '#8b5cf6');
+  html += _fccMiniStat('Citados', curso.cit, '#3b82f6');
+  html += _fccMiniStat('Confirm.', curso.conf, '#22c55e');
+  html += '</div>';
+  // Body
+  html += '<div class="fcc-modal-body">';
+  if (!parts.length) {
+    html += '<div class="fcc-empty"><i class="ph ph-user-list"></i><p>Sin colaboradores</p></div>';
+  } else {
+    html += '<div style="margin-bottom:10px;"><input type="text" placeholder="Buscar colaborador..." oninput="_fccFilterParts(this.value,\'' + _fccEsc(sigla) + '\')" style="width:100%;padding:7px 12px;border:1px solid #d1d5db;border-radius:8px;font-size:12px;outline:none;" data-testid="fcc-modal-search" /></div>';
+    html += '<div id="fcc-parts-body">' + _fccPartsTable(parts) + '</div>';
+  }
+  html += '</div></div></div>';
+  var div = document.createElement('div');
+  div.innerHTML = html;
+  document.body.appendChild(div.firstChild);
+}
+
+function _fccMiniStat(label, value, color) {
+  return '<div style="text-align:center;"><div style="font-size:18px;font-weight:800;color:' + color + ';">' + (value || 0) + '</div><div style="font-size:10px;color:#64748b;">' + label + '</div></div>';
+}
+
+function _fccPartsTable(parts, filter) {
+  var filtered = parts;
+  if (filter) {
+    var q = filter.toLowerCase();
+    filtered = parts.filter(function(p) { return (p.n || '').toLowerCase().indexOf(q) >= 0 || (p.bp || '').toLowerCase().indexOf(q) >= 0; });
+  }
+  var html = '<table style="width:100%;border-collapse:collapse;font-size:12px;">';
+  html += '<thead><tr style="background:#f8fafc;">';
+  html += '<th style="padding:8px;text-align:left;font-weight:700;color:#475569;border-bottom:2px solid #e2e8f0;">Nombre</th>';
+  html += '<th style="padding:8px;text-align:left;font-weight:700;color:#475569;border-bottom:2px solid #e2e8f0;">BP</th>';
+  html += '<th style="padding:8px;text-align:left;font-weight:700;color:#475569;border-bottom:2px solid #e2e8f0;">Pais</th>';
+  html += '<th style="padding:8px;text-align:left;font-weight:700;color:#475569;border-bottom:2px solid #e2e8f0;">Area</th>';
+  html += '<th style="padding:8px;text-align:center;font-weight:700;color:#475569;border-bottom:2px solid #e2e8f0;">Cumplimiento</th>';
+  html += '<th style="padding:8px;text-align:center;font-weight:700;color:#475569;border-bottom:2px solid #e2e8f0;">Dias</th>';
+  html += '<th style="padding:8px;text-align:center;font-weight:700;color:#475569;border-bottom:2px solid #e2e8f0;">Planificacion</th>';
+  html += '</tr></thead><tbody>';
+  for (var i = 0; i < filtered.length; i++) {
+    var p = filtered[i];
+    var sc = _fccStatusColor(p.s);
+    var pc = _fccPlanColor(p.ep);
+    html += '<tr style="border-bottom:1px solid #f1f5f9;">';
+    html += '<td style="padding:8px;font-weight:600;color:#1e293b;">' + _fccEsc(p.n) + '</td>';
+    html += '<td style="padding:8px;color:#64748b;font-size:11px;">' + _fccEsc(p.bp) + '</td>';
+    html += '<td style="padding:8px;color:#64748b;">' + _fccEsc(p.p) + '</td>';
+    html += '<td style="padding:8px;color:#64748b;font-size:11px;">' + _fccEsc(p.a) + '</td>';
+    html += '<td style="padding:8px;text-align:center;"><span style="display:inline-block;padding:2px 8px;border-radius:12px;font-size:10px;font-weight:700;background:' + sc.bg + ';color:' + sc.fg + ';">' + _fccEsc(p.s || 'Sin dato') + '</span></td>';
+    html += '<td style="padding:8px;text-align:center;font-weight:600;color:' + (p.d != null && p.d <= 30 ? '#ef4444' : '#475569') + ';">' + (p.d != null ? p.d : '-') + '</td>';
+    html += '<td style="padding:8px;text-align:center;">';
+    if (p.ep) {
+      html += '<span style="display:inline-block;padding:2px 8px;border-radius:12px;font-size:10px;font-weight:700;background:' + pc.bg + ';color:' + pc.fg + ';">' + _fccPlanLabel(p.ep) + '</span>';
+    } else {
+      html += '<span style="color:#cbd5e1;font-size:11px;">Sin registro</span>';
+    }
+    html += '</td></tr>';
+  }
+  if (!filtered.length) html += '<tr><td colspan="7" style="text-align:center;padding:20px;color:#94a3b8;">Sin resultados</td></tr>';
+  html += '</tbody></table>';
+  return html;
+}
+
+function _fccFilterParts(val, sigla) {
+  if (!_fccData) return;
+  var curso = null;
+  for (var i = 0; i < _fccData.cursos.length; i++) {
+    if (_fccData.cursos[i].sigla === sigla) { curso = _fccData.cursos[i]; break; }
+  }
+  if (!curso) return;
+  var el = document.getElementById('fcc-parts-body');
+  if (el) el.innerHTML = _fccPartsTable(curso.parts || [], val);
+}
+
+function _fccStatusColor(status) {
+  var st = (status || '').toUpperCase().replace(/\s+/g, '_');
+  if (st === 'HABILITADO' || st === 'COMPLETADO' || st === 'AL_DIA' || st === 'VIGENTE') return { bg: '#dcfce7', fg: '#166534' };
+  if (st === 'VENCIDO' || st === 'VENCIDO_REAL' || st === 'SIN_FECHA_VENCIDO') return { bg: '#fee2e2', fg: '#991b1b' };
+  if (st === 'POR_VENCER' || st === 'POR VENCER' || st === 'PROXIMO' || st === 'CRITICO') return { bg: '#fef3c7', fg: '#92400e' };
+  if (st === 'PROGRAMAR' || st === 'PROGRAMADO' || st === 'SIN_PLAN') return { bg: '#e0e7ff', fg: '#3730a3' };
+  return { bg: '#f1f5f9', fg: '#475569' };
+}
+
+function _fccPlanColor(estado) {
+  var st = (estado || '').toUpperCase();
+  if (st === 'SELECCIONADO') return { bg: '#fef3c7', fg: '#92400e' };
+  if (st === 'PRECONFIRMADO_JEFE') return { bg: '#ede9fe', fg: '#5b21b6' };
+  if (st === 'CITADO') return { bg: '#dbeafe', fg: '#1e40af' };
+  if (st === 'CONFIRMADO') return { bg: '#dcfce7', fg: '#166534' };
+  if (st === 'RECHAZADO') return { bg: '#fee2e2', fg: '#991b1b' };
+  return { bg: '#f1f5f9', fg: '#475569' };
+}
+
+function _fccPlanLabel(estado) {
+  var m = { 'SELECCIONADO': 'Seleccionado', 'PRECONFIRMADO_JEFE': 'Preconfirmado', 'CITADO': 'Citado', 'CONFIRMADO': 'Confirmado', 'RECHAZADO': 'Rechazado', 'NO_CONTACTADO': 'No contactado' };
+  return m[(estado || '').toUpperCase()] || estado || '';
+}
+
+// ── Export ───────────────────────────────────────────────────
+function exportarFCCursos(formato) {
+  if (!_fccData || !_fccData.cursos) { appAlert('No hay datos para exportar'); return; }
+  var esPdf = (formato === 'pdf');
+  var btn = document.querySelector('[data-testid="fcc-export-btn"]');
+  var btnPdf = document.querySelector('[data-testid="fcc-export-pdf-global"]');
+  var activeBtn = esPdf ? btnPdf : btn;
+  if (activeBtn) { activeBtn.disabled = true; activeBtn.innerHTML = '<i class="ph ph-spinner"></i> ' + (esPdf ? 'Generando PDF...' : 'Exportando...'); }
+  var handler = function(result) {
+    if (activeBtn) { activeBtn.disabled = false; activeBtn.innerHTML = esPdf ? '<i class="ph ph-file-pdf"></i> PDF' : '<i class="ph ph-file-xls"></i> Excel'; }
+    if (result && result.success) window.open(result.url, '_blank');
+    else appAlert('Error: ' + (result && result.error || 'Error desconocido', 'err'));
+  };
+  var errHandler = function(err) {
+    if (activeBtn) { activeBtn.disabled = false; activeBtn.innerHTML = esPdf ? '<i class="ph ph-file-pdf"></i> PDF' : '<i class="ph ph-file-xls"></i> Excel'; }
+    appAlert('Error: ' + (err.message || err, 'err'));
+  };
+  if (esPdf) {
+    google.script.run.withSuccessHandler(handler).withFailureHandler(errHandler).exportForecastCursosPDF(_fccData.cursos, _fccData.monthKeys);
+  } else {
+    google.script.run.withSuccessHandler(handler).withFailureHandler(errHandler).exportForecastCursosExcel(_fccData.cursos, _fccData.monthKeys);
+  }
+}
+
+// Export individual de un curso
+function _fccExportCurso(sigla, formato) {
+  if (!_fccData || !_fccData.cursos) return;
+  var curso = null;
+  for (var i = 0; i < _fccData.cursos.length; i++) {
+    if (_fccData.cursos[i].sigla === sigla) { curso = _fccData.cursos[i]; break; }
+  }
+  if (!curso) { appAlert('Curso no encontrado'); return; }
+  // Find buttons in modal header
+  var btns = document.querySelectorAll('[data-testid="fcc-export-excel"],[data-testid="fcc-export-pdf"]');
+  btns.forEach(function(b) { b.disabled = true; b.style.opacity = '0.5'; });
+  google.script.run
+    .withSuccessHandler(function(result) {
+      btns.forEach(function(b) { b.disabled = false; b.style.opacity = '1'; });
+      if (result && result.success) {
+        window.open(result.url, '_blank');
+        if (result.excelUrl && formato === 'pdf') window.open(result.excelUrl, '_blank');
+      } else {
+        appAlert('Error: ' + (result && result.error || 'Error desconocido', 'err'));
+      }
+    })
+    .withFailureHandler(function(err) {
+      btns.forEach(function(b) { b.disabled = false; b.style.opacity = '1'; });
+      appAlert('Error: ' + (err.message || err, 'err'));
+    })
+    .exportCursoIndividual(curso, formato);
+}
+
+function _fccEsc(s) { return s ? String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;') : ''; }
+</script>

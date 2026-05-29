@@ -1,0 +1,791 @@
+// ===================== FUNCION UNICA DE JERARQUIA V30-CHAIN =====================
+/**
+ * buildArbolJerarquico V30 — JERARQUIA 7 NIVELES CHAIN-AWARE + SELF-AS-SUBORDINATE
+ *
+ * CAMBIOS V30 vs V29:
+ *   - Limpieza de basura (#N/A, ERROR) en leerHojaBase via limpiarValorJerarquia()
+ *   - Self-as-subordinate: si jefe detectado tiene 0 subordinados, se incluye a si mismo
+ *   - Logs [V30-HIER]
+ *
+ * @param {string} nombreJefe
+ * @param {Array}  todosEmpleados
+ * @param {Object} [optsMatch] — { email, bp, rolFiltro }
+ * @returns {Object} { bps, personas, jefesConocidos, audit, total, roles, rolAutoDetectado, incluyeSiMismo }
+ */
+function buildArbolJerarquico(nombreJefe, todosEmpleados, optsMatch) {
+  // ═══ V30 GUARDS: evitar crash por undefined/null ═══
+  var RESULTADO_VACIO = {
+    bps: {}, personas: [], jefesConocidos: {}, audit: '', total: 0,
+    roles: { asGerente: 0, asJefeArea: 0, asJefeDirecto: 0 },
+    rolAutoDetectado: 'COLABORADOR',
+    rolesPorNivel: {},
+    incluyeSiMismo: false
+  };
+  if (!nombreJefe || typeof nombreJefe !== 'string' || !nombreJefe.trim()) {
+    _log('[V0-HIER] ERROR: nombreJefe vacio o undefined -> retornando COLABORADOR');
+    return RESULTADO_VACIO;
+  }
+  if (!todosEmpleados || !Array.isArray(todosEmpleados) || todosEmpleados.length === 0) {
+    _log('[V0-HIER] ERROR: todosEmpleados vacio o no es array (length=' + (todosEmpleados ? todosEmpleados.length : 'N/A') + ') -> retornando COLABORADOR');
+    return RESULTADO_VACIO;
+  }
+  nombreJefe = String(nombreJefe).trim();
+  optsMatch = optsMatch || {};
+  var emailMatch = String(optsMatch.email || '').toLowerCase().trim();
+  var bpMatch    = String(optsMatch.bp    || '').trim();
+  // V36-BP: nombre→BP reverse lookup for BP-based matching (primary method)
+  var nombreToBPMap = optsMatch.nombreToBP || null;
+
+  // 7 niveles MAYOR → MENOR
+  var NIVELES = [
+    { key: 'director',         label: 'DIRECTOR' },
+    { key: 'gerenteSr',        label: 'GERENTE_SR' },
+    { key: 'gerente',          label: 'GERENTE' },
+    { key: 'subgerente',       label: 'SUBGERENTE' },
+    { key: 'jefeDepartamento', label: 'JEFE_DEPARTAMENTO' },
+    { key: 'jefeArea',         label: 'JEFE_AREA' },
+    { key: 'jefeDirecto',      label: 'SUPERVISOR' }
+  ];
+  var ROLES_SHORT = ['DIR','GSR','G','SG','JDPTO','JA','SUP'];
+
+  // ═══════════════════════════════════════════════════════════════════
+  // [V30-HIER] LOG A: Lectura de jerarquía por usuario
+  // ═══════════════════════════════════════════════════════════════════
+  _log('[V0-HIER] ════════════════════════════════════════════');
+  _log('[V0-HIER] user="' + nombreJefe + '" email=' + emailMatch + ' bp=' + bpMatch);
+  _log('[V0-HIER] totalEmpleadosRecibidos=' + todosEmpleados.length);
+
+  // ═════════════════════════════════════════════════════════════════
+  // NORMALIZACIÓN ROBUSTA V27 (mantenida en V28)
+  // uppercase + trim + sin tildes + sin puntuación + colapsar espacios
+  // ═════════════════════════════════════════════════════════════════
+  function normH(texto) {
+    return String(texto || '')
+      .toUpperCase()
+      .replace(/[ÁÀÂÄÃ]/g,'A').replace(/[ÉÈÊË]/g,'E').replace(/[ÍÌÎÏ]/g,'I')
+      .replace(/[ÓÒÔÖÕ]/g,'O').replace(/[ÚÙÛÜ]/g,'U').replace(/Ñ/g,'N')
+      .replace(/Ü/g,'U').replace(/Ç/g,'C')
+      .replace(/[^A-Z0-9 ]/g,'')
+      .replace(/\s+/g,' ')
+      .trim();
+  }
+
+  function tokenize(normalizado) {
+    return normalizado.split(' ').filter(function(p){ return p.length > 1; });
+  }
+
+  function claveCanonica(normalizado) {
+    return tokenize(normalizado).sort().join(' ');
+  }
+
+  function buildFormasCanon(nombre) {
+    var nh = normH(nombre);
+    if (!nh) return {};
+    var formas = {};
+    formas[nh] = true;
+    var ck = claveCanonica(nh);
+    if (ck) formas[ck] = true;
+    var tk = tokenize(nh);
+    if (tk.length > 2) {
+      formas[tk.slice(0,2).sort().join(' ')] = true;
+    }
+    return formas;
+  }
+
+  var formasUser = buildFormasCanon(nombreJefe);
+
+  function enriquecerConNombre(nombre) {
+    if (!nombre) return;
+    var extras = buildFormasCanon(nombre);
+    for (var k in extras) formasUser[k] = true;
+  }
+
+  if (emailMatch) {
+    for (var ei = 0; ei < todosEmpleados.length; ei++) {
+      if ((todosEmpleados[ei].correo || '').toLowerCase().trim() === emailMatch) {
+        enriquecerConNombre(todosEmpleados[ei].nombre); break;
+      }
+    }
+  }
+  if (bpMatch) {
+    for (var bi = 0; bi < todosEmpleados.length; bi++) {
+      if ((todosEmpleados[bi].bp || '').trim() === bpMatch) {
+        enriquecerConNombre(todosEmpleados[bi].nombre); break;
+      }
+    }
+  }
+
+  // ─── MATCHING V27 (mantenido en V28) ────────────────────────────
+  var userTokens = tokenize(normH(nombreJefe));
+
+  // V36-BP: Fuzzy name→BP resolver (handles name variants like "JIMENEZ AMELIA PAOLA" vs "JIMENEZ PAOLA")
+  // V92: Mas estricto — requiere overlap bidireccional para evitar falsos positivos
+  // V97-FIX: Agrega paso 1.5 (canonical/sorted match) para cubrir inversiones de nombre
+  function _resolverBPFuzzy(nameNorm) {
+    if (!nombreToBPMap) return null;
+    // 1. Exact match
+    if (nombreToBPMap[nameNorm]) return nombreToBPMap[nameNorm];
+    var tokens = nameNorm.split(' ').filter(function(p) { return p.length > 1; });
+    if (tokens.length < 2) return null;
+    // 1.5 V97: Canonical match — tokens sorted alphabetically
+    // Handles "TAPIA RODOLFO" vs "RODOLFO TAPIA" and similar name order inversions
+    var canonicalInput = tokens.slice().sort().join(' ');
+    for (var ck in nombreToBPMap) {
+      var ckTokens = ck.split(' ').filter(function(p) { return p.length > 1; });
+      if (ckTokens.length === tokens.length) {
+        var canonicalKey = ckTokens.slice().sort().join(' ');
+        if (canonicalKey === canonicalInput) return nombreToBPMap[ck];
+      }
+    }
+    // 2. Two-token subset match (solo si el input tiene 3+ tokens)
+    if (tokens.length > 2) {
+      for (var ti = 0; ti < tokens.length; ti++) {
+        for (var tj = ti + 1; tj < tokens.length; tj++) {
+          var subName = tokens[ti] + ' ' + tokens[tj];
+          if (nombreToBPMap[subName]) return nombreToBPMap[subName];
+        }
+      }
+    }
+    // 3. V92: All-tokens match pero BIDIRECCIONAL — evita que "EDUARDO ANDRES" resuelva a "ZUNIGA EDUARDO ANDRES"
+    // Requiere que el nombre conocido no tenga mas de 1 token extra vs el input
+    var candidates = [];
+    for (var nk in nombreToBPMap) {
+      var allFound = true;
+      for (var tk = 0; tk < tokens.length; tk++) {
+        if (nk.indexOf(tokens[tk]) < 0) { allFound = false; break; }
+      }
+      if (allFound) {
+        var nkTokens = nk.split(' ').filter(function(p) { return p.length > 1; });
+        // V92: Permitir maximo 1 token extra en el nombre conocido
+        if (nkTokens.length - tokens.length <= 1) {
+          candidates.push({ bp: nombreToBPMap[nk], diff: nkTokens.length - tokens.length });
+        }
+      }
+    }
+    // Preferir match exacto (diff=0), luego diff=1
+    if (candidates.length === 1) return candidates[0].bp;
+    if (candidates.length > 1) {
+      // Si hay exacto, usarlo
+      for (var ci = 0; ci < candidates.length; ci++) {
+        if (candidates[ci].diff === 0) return candidates[ci].bp;
+      }
+      // V97: Si multiples diff=1, intentar desambiguar por match canonico parcial
+      var canon97 = tokens.slice().sort().join(' ');
+      var canon97Matches = [];
+      for (var ci2 = 0; ci2 < candidates.length; ci2++) {
+        // Buscar el candidato cuyo BP tiene un canonical match con nuestro input
+        var candKey = null;
+        for (var nk2 in nombreToBPMap) {
+          if (nombreToBPMap[nk2] === candidates[ci2].bp) { candKey = nk2; break; }
+        }
+        if (candKey) {
+          var candTokens = candKey.split(' ').filter(function(p) { return p.length > 1; });
+          // Remover tokens extra y comparar canonical
+          var candBase = [];
+          for (var ct = 0; ct < candTokens.length; ct++) {
+            if (tokens.indexOf(candTokens[ct]) >= 0) candBase.push(candTokens[ct]);
+          }
+          if (candBase.slice().sort().join(' ') === canon97) {
+            canon97Matches.push(candidates[ci2]);
+          }
+        }
+      }
+      if (canon97Matches.length === 1) return canon97Matches[0].bp;
+      // Ambiguo (multiple diff=1 matches) → no resolver para evitar falsos positivos
+      return null;
+    }
+    return null;
+  }
+
+  function esUsuario(val) {
+    if (!val) return false;
+    // V36-BP: PRIMARY — BP matching with fuzzy name resolution
+    if (bpMatch && nombreToBPMap) {
+      var valNormBP = normKey(val);
+      var valBP = _resolverBPFuzzy(valNormBP);
+      if (valBP) {
+        // Name resolved to a known BP — compare directly
+        return valBP === bpMatch;
+      }
+      // V97-FIX: Cuando _resolverBPFuzzy falla (nombre ambiguo o variante no reconocida),
+      // hacer FALLBACK a name-matching ESTRICTO (canonical key) para no perder subordinados.
+      // V92 retornaba false aqui, causando 0 resultados para JEFEs multi-base porque
+      // los contextos de la base afectada no se recopilaban, creando un efecto cascada.
+      // El fallback usa claveCanonica (tokens ordenados) para evitar falsos positivos.
+      var nhFB = normH(val);
+      if (nhFB) {
+        // 1. Exact normalized match
+        if (formasUser[nhFB]) return true;
+        // 2. Canonical key match (tokens sorted — handles name order differences)
+        var ckFB = claveCanonica(nhFB);
+        if (ckFB && formasUser[ckFB]) return true;
+        // 3. Bidirectional token overlap (strict: require ALL shorter tokens in longer,
+        //    AND max 1 extra token difference to avoid "EDUARDO ANDRES" → "ZUNIGA EDUARDO ANDRES")
+        var tkFB = tokenize(nhFB);
+        if (tkFB.length >= 2 && userTokens.length >= 2) {
+          var shorterFB = tkFB.length <= userTokens.length ? tkFB : userTokens;
+          var longerFB  = tkFB.length >  userTokens.length ? tkFB : userTokens;
+          if (longerFB.length - shorterFB.length <= 1) {
+            var allMatchFB = true;
+            for (var siFB = 0; siFB < shorterFB.length; siFB++) {
+              if (longerFB.indexOf(shorterFB[siFB]) < 0) { allMatchFB = false; break; }
+            }
+            if (allMatchFB) {
+              if (ckFB) formasUser[ckFB] = true;
+              return true;
+            }
+          }
+        }
+      }
+      return false;
+    }
+    // FALLBACK: name-based matching (SOLO cuando no hay nombreToBPMap disponible)
+    var nh = normH(val);
+    if (!nh) return false;
+    if (formasUser[nh]) return true;
+    var ck = claveCanonica(nh);
+    if (ck && formasUser[ck]) return true;
+    var tk = tokenize(nh);
+    if (tk.length >= 2) {
+      var sub2 = tk.slice(0,2).sort().join(' ');
+      if (formasUser[sub2]) return true;
+    }
+    // Fuzzy matching estricto — requiere overlap bidireccional
+    if (tk.length < 2 || userTokens.length < 2) return false;
+    var shorter = tk.length <= userTokens.length ? tk : userTokens;
+    var longer  = tk.length >  userTokens.length ? tk : userTokens;
+    if (shorter.length < 2) return false;
+    if (longer.length - shorter.length > 1) return false;
+    for (var si = 0; si < shorter.length; si++) {
+      if (longer.indexOf(shorter[si]) < 0) return false;
+    }
+    if (ck) formasUser[ck] = true;
+    return true;
+  }
+
+  // ─── CONTEXTO V29: dos funciones ─────────────────────────────────
+  // getContexto: INCLUYE nivel matcheado + ancestros superiores
+  //   → para almacenar contextos de detección y logging
+  // getContextoAncestros: SOLO ancestros por encima del nivel
+  //   → para comparar subordinados en matchContexto
+
+  function getContexto(emp, nivelIdx) {
+    var ctx = {};
+    for (var ai = 0; ai <= nivelIdx && ai < NIVELES.length; ai++) {
+      var raw = String(emp[NIVELES[ai].key] || '').trim();
+      if (raw) ctx[NIVELES[ai].key] = normH(raw);
+    }
+    return ctx;
+  }
+
+  function getContextoAncestros(emp, nivelIdx) {
+    var ctx = {};
+    for (var ai = 0; ai < nivelIdx; ai++) {
+      var raw = String(emp[NIVELES[ai].key] || '').trim();
+      if (raw) ctx[NIVELES[ai].key] = normH(raw);
+    }
+    return ctx;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  // [V30-HIER] matchContexto — CHAIN-AWARE BIDIRECCIONAL
+  //
+  // Itera TODOS los niveles ancestrales (0..nivelElegido-1).
+  // Para cada nivel:
+  //   - Obtiene valor del contexto válido (manager) y de la fila (subordinado)
+  //   - Ambos vacíos → OMITIR (nivel no aplica para ninguno)
+  //   - Uno vacío, otro con valor → OMITIR (nivel no aplica para un lado)
+  //   - Ambos con valor e IGUALES → OK
+  //   - Ambos con valor y DISTINTOS → VERIFICAR FUZZY → si fuzzy match → OK
+  //   - Ambos con valor y DISTINTOS → sin fuzzy match → CONFLICTO → DESCARTAR
+  //
+  // V98-FIX: Usa mismoNombre() para comparar ancestros en vez de strict equality.
+  // El mismo director/gerente puede estar escrito distinto entre bases/filas
+  // (ej: "PEREZ JUAN" vs "PEREZ MARTINEZ JUAN" vs "JUAN PEREZ").
+  // La strict equality descartaba subordinados válidos sistemáticamente.
+  //
+  // Retorna {ok: boolean, razon: string} para log de auditoría
+  // ═══════════════════════════════════════════════════════════════════
+
+  // V98: Comparador fuzzy de nombres para ancestros (2 valores ya normalizados con normH)
+  function mismoNombre(normA, normB) {
+    if (!normA || !normB) return false;
+    // 1. Exact match
+    if (normA === normB) return true;
+    // 2. Canonical match (tokens sorted)
+    var tkA = normA.split(' ').filter(function(p) { return p.length > 1; });
+    var tkB = normB.split(' ').filter(function(p) { return p.length > 1; });
+    if (tkA.length >= 2 && tkB.length >= 2) {
+      if (tkA.slice().sort().join(' ') === tkB.slice().sort().join(' ')) return true;
+    }
+    // 3. Bidirectional token overlap: ALL tokens of shorter must be in longer, max 1 extra
+    if (tkA.length >= 2 && tkB.length >= 2) {
+      var shorter = tkA.length <= tkB.length ? tkA : tkB;
+      var longer  = tkA.length >  tkB.length ? tkA : tkB;
+      if (longer.length - shorter.length <= 1) {
+        var allOK = true;
+        for (var mi = 0; mi < shorter.length; mi++) {
+          if (longer.indexOf(shorter[mi]) < 0) { allOK = false; break; }
+        }
+        if (allOK) return true;
+      }
+    }
+    return false;
+  }
+
+  function matchContexto(ctxFila, ctxsValidos, nivelIdx) {
+    if (!ctxsValidos || ctxsValidos.length === 0) return { ok: true, razon: 'sin_contextos' };
+
+    var ultimoConflicto = '';
+
+    for (var ci = 0; ci < ctxsValidos.length; ci++) {
+      var ctxV = ctxsValidos[ci];
+      var compatible = true;
+      var conflicto = '';
+      var detalle = [];
+
+      for (var ai = 0; ai < nivelIdx; ai++) {
+        var key = NIVELES[ai].key;
+        var valCtx  = ctxV[key]    || '';
+        var valFila = ctxFila[key] || '';
+
+        if (!valCtx && !valFila) { detalle.push(ROLES_SHORT[ai] + ':skip'); continue; }
+        if (!valCtx) { detalle.push(ROLES_SHORT[ai] + ':mgr_vacio'); continue; }
+        if (!valFila) { detalle.push(ROLES_SHORT[ai] + ':sub_vacio_ok'); continue; }
+
+        // V98-FIX: usar mismoNombre() en vez de strict equality
+        if (!mismoNombre(valCtx, valFila)) {
+          compatible = false;
+          conflicto = ROLES_SHORT[ai] + ': ctx="' + valCtx.substring(0,20) + '" vs fila="' + valFila.substring(0,20) + '"';
+          detalle.push(ROLES_SHORT[ai] + ':CONFLICTO');
+          break;
+        }
+        detalle.push(ROLES_SHORT[ai] + ':match');
+      }
+
+      if (compatible) return { ok: true, razon: 'ctx[' + ci + '] ' + detalle.join(',') };
+      ultimoConflicto = conflicto + ' [' + detalle.join(',') + ']';
+    }
+
+    return { ok: false, razon: ultimoConflicto };
+  }
+
+  // ─── PASO 1: SCAN — detectar presencia por nivel ────────────────
+  var presenciaPorNivel = [];
+  for (var ni = 0; ni < NIVELES.length; ni++) {
+    presenciaPorNivel.push({ count: 0, contextos: [], ejemplos: [] });
+  }
+
+  for (var si2 = 0; si2 < todosEmpleados.length; si2++) {
+    var emp = todosEmpleados[si2];
+    for (var li = 0; li < NIVELES.length; li++) {
+      var valorCelda = emp[NIVELES[li].key];
+      if (esUsuario(valorCelda)) {
+        presenciaPorNivel[li].count++;
+        enriquecerConNombre(valorCelda);
+        // V29: getContexto incluye nivel matcheado + ancestros
+        var ctxNuevo = getContexto(emp, li);
+        var ctxKey = JSON.stringify(ctxNuevo);
+        var yaGuardado = false;
+        for (var xi = 0; xi < presenciaPorNivel[li].contextos.length; xi++) {
+          if (JSON.stringify(presenciaPorNivel[li].contextos[xi]) === ctxKey) { yaGuardado = true; break; }
+        }
+        if (!yaGuardado) presenciaPorNivel[li].contextos.push(ctxNuevo);
+        if (presenciaPorNivel[li].ejemplos.length < 3) presenciaPorNivel[li].ejemplos.push(valorCelda);
+      }
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  // [V30-HIER] LOG A: rolesDetected por nivel
+  // ═══════════════════════════════════════════════════════════════════
+  var debugRoles = '';
+  var debugContexts = '';
+  for (var di = 0; di < NIVELES.length; di++) {
+    debugRoles += ' ' + ROLES_SHORT[di] + '=' + presenciaPorNivel[di].count;
+    if (presenciaPorNivel[di].contextos.length > 0) {
+      debugContexts += ' ' + ROLES_SHORT[di] + ':' + presenciaPorNivel[di].contextos.length + 'ctx';
+    }
+  }
+  _log('[V0-HIER] rolesDetected:' + debugRoles);
+  _log('[V97-HIER] contextsPorNivel:' + (debugContexts || ' ninguno'));
+
+  // ─── PASO 2: SELECCIÓN DE ROL ────────────────────────────────────
+  var rolFiltro    = (optsMatch.rolFiltro || 'TODOS').toUpperCase();
+  var nivelElegido = -1;
+
+  if (rolFiltro === 'JA') {
+    nivelElegido = 5;
+  } else if (rolFiltro === 'JD') {
+    nivelElegido = 6;
+  } else if (rolFiltro === 'GERENTE') {
+    for (var gi = 0; gi <= 4; gi++) {
+      if (presenciaPorNivel[gi].count > 0) { nivelElegido = gi; break; }
+    }
+    if (nivelElegido < 0) {
+      for (var gi2 = 5; gi2 < NIVELES.length; gi2++) {
+        if (presenciaPorNivel[gi2].count > 0) { nivelElegido = gi2; break; }
+      }
+    }
+  } else if (optsMatch.preferLowestRole) {
+    // V65-MI-EQUIPO: nivel MÁS BAJO con presencia (no subir en jerarquía)
+    // Esto evita que un supervisor "suba" a gerente/jefeArea por coincidencia de nombre
+    for (var ai2low = NIVELES.length - 1; ai2low >= 0; ai2low--) {
+      if (presenciaPorNivel[ai2low].count > 0) { nivelElegido = ai2low; break; }
+    }
+  } else {
+    // TODOS / AUTO: nivel más alto con presencia
+    for (var ai2 = 0; ai2 < NIVELES.length; ai2++) {
+      if (presenciaPorNivel[ai2].count > 0) { nivelElegido = ai2; break; }
+    }
+  }
+
+  var nivelLabel  = nivelElegido >= 0 ? NIVELES[nivelElegido].label : 'COLABORADOR';
+  var nivelKey    = nivelElegido >= 0 ? NIVELES[nivelElegido].key   : null;
+  var ctxsValidos = nivelElegido >= 0 ? presenciaPorNivel[nivelElegido].contextos : [];
+
+  // ═══════════════════════════════════════════════════════════════════
+  // [V30-HIER] LOG A: chosenRole y razón
+  // ═══════════════════════════════════════════════════════════════════
+  var chosenReason = nivelElegido >= 0
+    ? (ROLES_SHORT[nivelElegido] + ' (idx=' + nivelElegido + ', count=' + presenciaPorNivel[nivelElegido].count + ')')
+    : 'ninguno detectado → COLABORADOR';
+  _log('[V0-HIER] chosenRole=' + nivelLabel + ' contexts=' + ctxsValidos.length + ' reason=' + chosenReason + ' rolFiltro=' + rolFiltro);
+
+  // ═══════════════════════════════════════════════════════════════════
+  // [V30-HIER] LOG B: sampleContexts (2-3 ejemplos) — nivel matcheado INCLUIDO
+  // ═══════════════════════════════════════════════════════════════════
+  var maxCtxLog = Math.min(3, ctxsValidos.length);
+  for (var sci = 0; sci < maxCtxLog; sci++) {
+    var ctxSample = ctxsValidos[sci];
+    var ctxStr = '';
+    // Mostrar desde DIR hasta el nivel matcheado (inclusive)
+    var limiteLog = nivelElegido >= 0 ? nivelElegido + 1 : NIVELES.length;
+    for (var sni = 0; sni < limiteLog && sni < NIVELES.length; sni++) {
+      var sv = ctxSample[NIVELES[sni].key] || '(vacio)';
+      ctxStr += ROLES_SHORT[sni] + '="' + sv + '"';
+      if (sni < limiteLog - 1) ctxStr += ' | ';
+    }
+    _log('[V0-HIER] sampleContext[' + sci + ']: ' + ctxStr);
+  }
+
+  // ─── PASO 3: FILTRO V90 — MULTI-NIVEL ─────────────────────────────
+  // V90: Buscar nombre del usuario en TODAS las columnas jerárquicas donde
+  // tiene presencia (no solo en nivelKey). "Si mi nombre aparece en cualquiera
+  // de CS a CY → ese registro debe mostrarse." Solo hacia abajo.
+  var bps = {}, personas = [];
+  var matchSources = {};
+  var descartadosPorAncestro = 0;
+  var descartadosEjemplos = [];
+
+  // V90: Recopilar todos los niveles con presencia
+  var nivelesConPresencia = [];
+  for (var np = 0; np < NIVELES.length; np++) {
+    if (presenciaPorNivel[np].count > 0) nivelesConPresencia.push(np);
+  }
+  _log('[V90-HIER] nivelesConPresencia=' + nivelesConPresencia.map(function(n) { return ROLES_SHORT[n]; }).join(','));
+
+  // V90: nivelMasAlto = nivel más alto con presencia (para expansión recursiva)
+  var nivelMasAlto = nivelesConPresencia.length > 0 ? nivelesConPresencia[0] : nivelElegido;
+
+  for (var fi = 0; fi < todosEmpleados.length; fi++) {
+    var emp3 = todosEmpleados[fi];
+    if (!emp3.bp) continue;
+
+    // V43: Excluir al propio usuario
+    if (bpMatch && String(emp3.bp) === bpMatch) continue;
+    if (emailMatch && (emp3.correo || '').toLowerCase().trim() === emailMatch) continue;
+
+    // V90: Verificar TODOS los niveles con presencia
+    for (var npi = 0; npi < nivelesConPresencia.length; npi++) {
+      var nivelCheck = nivelesConPresencia[npi];
+      var colKeyCheck = NIVELES[nivelCheck].key;
+
+      if (!esUsuario(emp3[colKeyCheck])) continue;
+
+      // Usuario encontrado en esta columna → candidato
+      var skipCtx = nivelCheck >= 5; // JEFE_AREA=5, SUPERVISOR=6 → directo
+      var ctxsNivel = presenciaPorNivel[nivelCheck].contextos;
+
+      if (skipCtx) {
+        var ctxFilaD = getContextoAncestros(emp3, nivelCheck);
+        var resultadoD = matchContexto(ctxFilaD, ctxsNivel, nivelCheck);
+        if (resultadoD.ok) {
+          if (!bps[emp3.bp]) {
+            bps[emp3.bp] = true;
+            personas.push(emp3);
+            matchSources[NIVELES[nivelCheck].label + '_DIRECTO'] = (matchSources[NIVELES[nivelCheck].label + '_DIRECTO'] || 0) + 1;
+          }
+          break; // V99: break SOLO cuando se agrega
+        } else {
+          descartadosPorAncestro++;
+          if (descartadosEjemplos.length < 20) {
+            descartadosEjemplos.push({
+              bp: emp3.bp, nombre: (emp3.nombre || '').substring(0,40), razon: 'DIRECTO_CONFLICT@' + ROLES_SHORT[nivelCheck] + ': ' + resultadoD.razon,
+              dir: emp3.director||'', gsr: emp3.gerenteSr||'', g: emp3.gerente||'', sg: emp3.subgerente||'',
+              jdpto: emp3.jefeDepartamento||'', ja: emp3.jefeArea||'', sup: emp3.jefeDirecto||''
+            });
+          }
+          // V99-FIX: NO break aquí — continuar al siguiente nivel.
+          // El empleado puede ser válido en un nivel inferior con contexto diferente.
+          continue;
+        }
+      } else {
+        var ctxFila = getContextoAncestros(emp3, nivelCheck);
+        var resultado = matchContexto(ctxFila, ctxsNivel, nivelCheck);
+        if (resultado.ok) {
+          if (!bps[emp3.bp]) {
+            bps[emp3.bp] = true;
+            personas.push(emp3);
+            matchSources[NIVELES[nivelCheck].label] = (matchSources[NIVELES[nivelCheck].label] || 0) + 1;
+          }
+          break; // V99: break SOLO cuando se agrega
+        } else {
+          descartadosPorAncestro++;
+          if (descartadosEjemplos.length < 20) {
+            descartadosEjemplos.push({
+              bp: emp3.bp, nombre: (emp3.nombre || '').substring(0,40), razon: ROLES_SHORT[nivelCheck] + ': ' + resultado.razon,
+              dir: emp3.director||'', gsr: emp3.gerenteSr||'', g: emp3.gerente||'', sg: emp3.subgerente||'',
+              jdpto: emp3.jefeDepartamento||'', ja: emp3.jefeArea||'', sup: emp3.jefeDirecto||''
+            });
+          }
+          // V99-FIX: NO break aquí — continuar al siguiente nivel.
+          continue;
+        }
+      }
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  // V30d-D + V90: EXPANSION RECURSIVA POR REFERENCIA DIRECTA
+  // Usa nivelMasAlto (no nivelElegido) para expandir desde el nivel más amplio.
+  // ═══════════════════════════════════════════════════════════════════
+  if (nivelMasAlto >= 0 && nivelMasAlto < NIVELES.length - 1) {
+    var expIter = 0;
+    var maxExpIter = 5;
+    var prevCount = personas.length;
+    var totalExpanded = 0;
+
+    while (expIter < maxExpIter) {
+      expIter++;
+      // Construir índice de nombres del equipo actual (normalizados)
+      var nombresEquipo = {};
+      for (var ne = 0; ne < personas.length; ne++) {
+        var nhN = normH(personas[ne].nombre);
+        if (nhN) {
+          nombresEquipo[nhN] = true;
+          var ckN = claveCanonica(nhN);
+          if (ckN) nombresEquipo[ckN] = true;
+        }
+      }
+      // Incluir formas del usuario también
+      for (var fk2 in formasUser) nombresEquipo[fk2] = true;
+
+      var newFound = 0;
+      for (var fi2 = 0; fi2 < todosEmpleados.length; fi2++) {
+        var emp4 = todosEmpleados[fi2];
+        if (!emp4.bp || bps[emp4.bp]) continue;
+        // V43: Excluir al propio usuario de la expansión recursiva
+        if (bpMatch && String(emp4.bp) === bpMatch) continue;
+        if (emailMatch && (emp4.correo || '').toLowerCase().trim() === emailMatch) continue;
+
+
+        // V90: Buscar columnas DEBAJO del nivel más alto del user
+        for (var chk = nivelMasAlto + 1; chk < NIVELES.length; chk++) {
+          var rawChk = emp4[NIVELES[chk].key];
+          if (!rawChk) continue;
+          var nhChk = normH(rawChk);
+          if (!nhChk) continue;
+          var ckChk = claveCanonica(nhChk);
+
+          if (nombresEquipo[nhChk] || (ckChk && nombresEquipo[ckChk])) {
+            // V90: Validar ancestros contra nivel más alto
+            var expCtxFila = getContextoAncestros(emp4, nivelMasAlto);
+            var expResultado = matchContexto(expCtxFila, presenciaPorNivel[nivelMasAlto].contextos, nivelMasAlto);
+            if (!expResultado.ok) {
+              // CONFLICTO: esta persona pertenece a otra rama
+              if (descartadosEjemplos.length < 20) {
+                descartadosEjemplos.push({
+                  bp: emp4.bp, nombre: (emp4.nombre || '').substring(0,40), razon: 'EXPANSION_CONFLICT: ' + expResultado.razon,
+                  dir: emp4.director||'', gsr: emp4.gerenteSr||'', g: emp4.gerente||'', sg: emp4.subgerente||'',
+                  jdpto: emp4.jefeDepartamento||'', ja: emp4.jefeArea||'', sup: emp4.jefeDirecto||''
+                });
+              }
+              descartadosPorAncestro++;
+              break; // No agregar esta persona
+            }
+            bps[emp4.bp] = true;
+            personas.push(emp4);
+            matchSources['REC_' + ROLES_SHORT[chk]] = (matchSources['REC_' + ROLES_SHORT[chk]] || 0) + 1;
+            newFound++;
+            break;
+          }
+        }
+      }
+
+      totalExpanded += newFound;
+      if (newFound === 0) break;
+      _log('[V0-HIER] EXPANSION iter=' + expIter + ': +' + newFound + ' nuevos, total=' + personas.length);
+    }
+    if (totalExpanded > 0) {
+      _log('[V0-HIER] EXPANSION TOTAL: +' + totalExpanded + ' en ' + expIter + ' iteraciones (de ' + prevCount + ' a ' + personas.length + ')');
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  // [V30-HIER] LOG C: Filtro de subordinados
+  // ═══════════════════════════════════════════════════════════════════
+  _log('[V0-HIER] subordinatesFound=' + personas.length);
+  _log('[V0-HIER] discardedByAncestorMismatch=' + descartadosPorAncestro);
+  if (descartadosEjemplos.length > 0) {
+    for (var dei = 0; dei < descartadosEjemplos.length; dei++) {
+      var de = descartadosEjemplos[dei];
+      _log('[V0-HIER] discardExample[' + dei + ']: BP=' + de.bp + ' ' + de.nombre + ' | razon=' + de.razon);
+    }
+  }
+
+  var srcLog = '';
+  for (var ms in matchSources) srcLog += ms + ':' + matchSources[ms] + ' ';
+  _log('[V0-HIER] matchByColumn: ' + (srcLog || 'ninguno'));
+
+  // ═══════════════════════════════════════════════════════════════════
+  // V30: SELF-AS-SUBORDINATE — Si es jefe detectado pero tiene 0 subordinados,
+  // incluirse a si mismo como COLABORADOR para justificar su existencia.
+  // ═══════════════════════════════════════════════════════════════════
+  var incluyeSiMismo = false;
+  if (nivelElegido >= 0 && personas.length === 0) {
+    for (var selfI = 0; selfI < todosEmpleados.length; selfI++) {
+      var selfEmp = todosEmpleados[selfI];
+      if (!selfEmp.bp) continue;
+      if (esUsuario(selfEmp.nombre)) {
+        if (!bps[selfEmp.bp]) {
+          bps[selfEmp.bp] = true;
+          personas.push(selfEmp);
+          incluyeSiMismo = true;
+          _log('[V0-HIER] SELF-AS-SUB: jefe detectado en ' + nivelLabel + ' sin subordinados. Incluido a si mismo: BP=' + selfEmp.bp + ' "' + selfEmp.nombre + '"');
+        }
+        break;
+      }
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  // V100-CLEAN: AUDIT usando _auditLog (visible siempre, no depende de LOG_LEVEL)
+  // ═══════════════════════════════════════════════════════════════════
+  // Buscar fila del usuario para extraer su cadena jerárquica
+  var filaUser = null;
+  if (emailMatch) {
+    for (var fui = 0; fui < todosEmpleados.length; fui++) {
+      if ((todosEmpleados[fui].correo || '').toLowerCase().trim() === emailMatch) { filaUser = todosEmpleados[fui]; break; }
+    }
+  }
+  if (!filaUser) {
+    var nhUser = normH(nombreJefe);
+    for (var fui2 = 0; fui2 < todosEmpleados.length; fui2++) {
+      if (normH(todosEmpleados[fui2].nombre) === nhUser) { filaUser = todosEmpleados[fui2]; break; }
+    }
+  }
+
+  _auditLog('[V100-ARBOL] user="' + nombreJefe + '" bp=' + bpMatch + ' email=' + emailMatch +
+    ' | rolDetectado=' + nivelLabel + ' | subordinados=' + personas.length +
+    ' | descartadosPorAncestro=' + descartadosPorAncestro +
+    ' | contextos=' + ctxsValidos.length + (incluyeSiMismo ? ' | SELF-INCLUDED' : '') +
+    ' | BUILD=' + BUILD_GS);
+  // V100: presencia por nivel (compacta)
+  var _v100presStr = '';
+  for (var _v100i = 0; _v100i < NIVELES.length; _v100i++) {
+    _v100presStr += ROLES_SHORT[_v100i] + '=' + presenciaPorNivel[_v100i].count;
+    if (_v100i < NIVELES.length - 1) _v100presStr += ',';
+  }
+  _auditLog('[V100-ARBOL] presencia=[' + _v100presStr + '] | matchSources=' + (srcLog || 'ninguno'));
+  // V100: Cadena jerárquica del usuario
+  if (filaUser) {
+    _auditLog('[V100-ARBOL] miCadena: DIR=' + (filaUser.director||'-') + ' | GSR=' + (filaUser.gerenteSr||'-') + ' | G=' + (filaUser.gerente||'-') + ' | SG=' + (filaUser.subgerente||'-') + ' | JDPTO=' + (filaUser.jefeDepartamento||'-') + ' | JA=' + (filaUser.jefeArea||'-') + ' | SUP=' + (filaUser.jefeDirecto||'-'));
+  } else {
+    _auditLog('[V100-ARBOL] miCadena: FILA USUARIO NO ENCONTRADA en ' + todosEmpleados.length + ' empleados');
+  }
+  // V100: Top 5 subordinados encontrados
+  var _v100maxFound = Math.min(personas.length, 5);
+  for (var _v100fi = 0; _v100fi < _v100maxFound; _v100fi++) {
+    var _v100p = personas[_v100fi];
+    _auditLog('[V100-ARBOL] FOUND[' + _v100fi + ']: BP=' + _v100p.bp + ' "' + (_v100p.nombre||'').substring(0,35) + '" base=' + (_v100p.baseRegion||'?') + ' | SUP=' + (_v100p.jefeDirecto||'-') + ' JA=' + (_v100p.jefeArea||'-') + ' G=' + (_v100p.gerente||'-'));
+  }
+  if (personas.length > 5) _auditLog('[V100-ARBOL] ... y ' + (personas.length - 5) + ' subordinados más');
+  // V100: Top 5 descartados
+  var _v100maxDisc = Math.min(descartadosEjemplos.length, 5);
+  for (var _v100di = 0; _v100di < _v100maxDisc; _v100di++) {
+    var _v100d = descartadosEjemplos[_v100di];
+    _auditLog('[V100-ARBOL] DISCARDED[' + _v100di + ']: BP=' + _v100d.bp + ' "' + _v100d.nombre + '" | CONFLICTO=' + _v100d.razon);
+  }
+  if (descartadosPorAncestro > 5) _auditLog('[V100-ARBOL] ... y ' + (descartadosPorAncestro - 5) + ' descartados más');
+
+  var jefesConocidos = {};
+  for (var fk in formasUser) jefesConocidos[fk] = true;
+
+  // V30: rolesPorNivel con labels correctos (DIR/GSR/G/SG/JDPTO/JA/SUP)
+  var rolesPorNivel = {};
+  for (var rni = 0; rni < NIVELES.length; rni++) {
+    rolesPorNivel[ROLES_SHORT[rni]] = presenciaPorNivel[rni].count;
+  }
+
+  // Compatibilidad 'roles' con el frontend
+  var presG = 0, presJA = 0, presJD = 0;
+  for (var ci2 = 0; ci2 <= 4; ci2++) presG += presenciaPorNivel[ci2].count;
+  presJA = presenciaPorNivel[5].count;
+  presJD = presenciaPorNivel[6].count;
+
+  return {
+    bps: bps,
+    personas: personas,
+    jefesConocidos: jefesConocidos,
+    audit: '[AUDIT-HIER] rol=' + nivelLabel + ' total=' + personas.length + ' descartados=' + descartadosPorAncestro,
+    total: personas.length,
+    roles: { asGerente: presG, asJefeArea: presJA, asJefeDirecto: presJD },
+    rolesPorNivel: rolesPorNivel,
+    rolAutoDetectado: nivelLabel,
+    incluyeSiMismo: incluyeSiMismo,
+    descartadosPorAncestro: descartadosPorAncestro,
+    descartadosEjemplos: descartadosEjemplos
+  };
+}
+
+
+
+/**
+ * Determina si un curso es "aplicable" para KPIs.
+ * V21f: Solo excluir SIN DATO y NO_APLICA. COMPLETADO ya se remapea a HABILITADO.
+ */
+function esCursoAplicable(statusNorm) {
+  return statusNorm !== 'SIN DATO' && statusNorm !== 'NO_APLICA';
+}
+
+/**
+ * Calcula "Habilitacion General" a nivel PERSONA (logica Looker Studio).
+ * INHABILITADO: >=1 curso aplicable VENCIDO.
+ * HABILITADO: 0 vencidos aplicables (OK + POR VENCER + PROGRAMAR cuentan como no-inhabilitado).
+ * SIN_KPI: 0 cursos aplicables.
+ * @param {Array} cursos - Array de objetos curso con status normalizado
+ * @returns {Object} { habilitacionGeneral, tieneAlerta, cursosAplicables, vencidosAplicables, pvAplicables, okAplicables }
+ */
+function calcularHabilitacionPersona(cursos) {
+  var aplicables = 0, vencidos = 0, pv = 0, programar = 0, ok = 0;
+  for (var i = 0; i < cursos.length; i++) {
+    var st = cursos[i].status;
+    if (!esCursoAplicable(st)) continue;
+    aplicables++;
+    if (st === 'VENCIDO') vencidos++;
+    else if (st === 'POR VENCER') pv++;
+    else if (st === 'PROGRAMAR') programar++;
+    else ok++;
+  }
+  return {
+    habilitacionGeneral: aplicables === 0 ? 'SIN_KPI' : (vencidos > 0 ? 'INHABILITADO' : 'HABILITADO'),
+    tieneAlerta: pv > 0,
+    cursosAplicables: aplicables,
+    vencidosAplicables: vencidos,
+    pvAplicables: pv,
+    programarAplicables: programar,
+    okAplicables: ok
+  };
+}
+

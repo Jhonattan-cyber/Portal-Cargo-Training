@@ -1,0 +1,75 @@
+<!-- ======= SEGUIMIENTO PLANNING (Control Norte) — V4 ======= -->
+<div id="section-seguimiento-plan" class="module-section" style="display:none;">
+  <div style="margin-bottom:16px;">
+    <h2 style="font-size:20px;font-weight:800;color:#1e293b;margin:0;display:flex;align-items:center;gap:8px;">
+      <i class="ph ph-binoculars" style="color:#7c3aed;font-size:22px;"></i>
+      Seguimiento Global — Planificacion
+    </h2>
+    <p style="font-size:12px;color:#64748b;margin:4px 0 0;">Todos los registros de planificacion en un solo lugar</p>
+  </div>
+
+  <!-- KPIs -->
+  <div id="segplan-kpis" data-testid="segplan-kpis" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:10px;margin-bottom:16px;"></div>
+
+  <!-- Filtros -->
+  <div style="background:#fff;border-radius:12px;padding:14px 16px;margin-bottom:14px;box-shadow:0 1px 3px rgba(0,0,0,0.06);border:1px solid #e2e8f0;">
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">
+      <i class="ph ph-funnel" style="color:#7c3aed;font-size:16px;"></i>
+      <span style="font-weight:700;color:#1e293b;font-size:13px;">Filtros</span>
+      <button onclick="_segPlanLimpiar()" style="margin-left:auto;font-size:10px;color:#7c3aed;background:none;border:1px solid #e2e8f0;border-radius:6px;padding:3px 10px;cursor:pointer;font-weight:600;" data-testid="segplan-limpiar">Limpiar</button>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:8px;margin-bottom:8px;">
+      <select id="segplan-f-estado" data-testid="segplan-f-estado" onchange="_segPlanFiltrar()" style="padding:7px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:12px;color:#374151;background:white;">
+        <option value="">Estado: Todos</option>
+        <option value="SELECCIONADO">Seleccionado</option>
+        <option value="CONFIRMADO">Confirmado</option>
+        <option value="RECHAZADO">Rechazado</option>
+        <option value="ASISTIO">Asistio</option>
+        <option value="NO_ASISTIO">No Asistio</option>
+        <option value="CANCELADO">Cancelado</option>
+      </select>
+      <select id="segplan-f-curso" data-testid="segplan-f-curso" onchange="_segPlanFiltrar()" style="padding:7px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:12px;color:#374151;background:white;">
+        <option value="">Curso: Todos</option>
+      </select>
+      <select id="segplan-f-pais" data-testid="segplan-f-pais" onchange="_segPlanFiltrar()" style="padding:7px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:12px;color:#374151;background:white;">
+        <option value="">Pais: Todos</option>
+      </select>
+      <select id="segplan-f-jefe" data-testid="segplan-f-jefe" onchange="_segPlanFiltrar()" style="padding:7px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:12px;color:#374151;background:white;">
+        <option value="">Jefe: Todos</option>
+      </select>
+      <select id="segplan-f-area" data-testid="segplan-f-area" onchange="_segPlanFiltrar()" style="padding:7px 10px;border:1px solid #e2e8f0;border-radius:8px;font-size:12px;color:#374151;background:white;">
+        <option value="">Area: Todas</option>
+      </select>
+    </div>
+    <div>
+      <input type="text" id="segplan-f-texto" data-testid="segplan-f-texto" oninput="_segPlanFiltrar()" placeholder="Buscar por nombre, BP, correo..." style="width:100%;padding:7px 12px;border:1px solid #e2e8f0;border-radius:8px;font-size:12px;box-sizing:border-box;">
+    </div>
+  </div>
+
+  <!-- Tabla -->
+  <div style="background:#fff;border-radius:12px;box-shadow:0 1px 3px rgba(0,0,0,0.06);border:1px solid #e2e8f0;overflow:hidden;">
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:12px 16px;border-bottom:1px solid #f1f5f9;">
+      <span id="segplan-count" style="font-size:11px;font-weight:600;color:#64748b;" data-testid="segplan-count">Cargando...</span>
+      <button onclick="_segPlanReload()" style="font-size:10px;padding:4px 12px;border:1px solid #e2e8f0;border-radius:6px;cursor:pointer;background:#f8fafc;color:#64748b;font-weight:600;" data-testid="segplan-reload"><i class="ph ph-arrows-clockwise"></i> Actualizar</button>
+    </div>
+    <div style="overflow-x:auto;max-height:500px;overflow-y:auto;">
+      <table style="width:100%;border-collapse:collapse;font-size:12px;">
+        <thead style="position:sticky;top:0;background:#f8fafc;z-index:1;">
+          <tr style="border-bottom:2px solid #e2e8f0;">
+            <th style="padding:8px 10px;text-align:left;font-weight:700;color:#475569;font-size:10px;text-transform:uppercase;letter-spacing:0.5px;">Colaborador</th>
+            <th style="padding:8px 6px;text-align:center;font-weight:700;color:#475569;font-size:10px;text-transform:uppercase;">Curso</th>
+            <th style="padding:8px 6px;text-align:center;font-weight:700;color:#475569;font-size:10px;text-transform:uppercase;">Evento</th>
+            <th style="padding:8px 6px;text-align:center;font-weight:700;color:#475569;font-size:10px;text-transform:uppercase;">Pais</th>
+            <th style="padding:8px 6px;text-align:center;font-weight:700;color:#475569;font-size:10px;text-transform:uppercase;">Area</th>
+            <th style="padding:8px 6px;text-align:center;font-weight:700;color:#475569;font-size:10px;text-transform:uppercase;">Jefe</th>
+            <th style="padding:8px 6px;text-align:center;font-weight:700;color:#475569;font-size:10px;text-transform:uppercase;">Estado</th>
+            <th style="padding:8px 6px;text-align:center;font-weight:700;color:#475569;font-size:10px;text-transform:uppercase;">Fecha Clase</th>
+            <th style="padding:8px 6px;text-align:center;font-weight:700;color:#475569;font-size:10px;text-transform:uppercase;">Decision</th>
+          </tr>
+        </thead>
+        <tbody id="segplan-tbody" data-testid="segplan-tbody"></tbody>
+      </table>
+    </div>
+    <div id="segplan-footer" style="padding:8px 16px;font-size:10px;color:#94a3b8;font-weight:600;border-top:1px solid #f1f5f9;" data-testid="segplan-footer"></div>
+  </div>
+</div>

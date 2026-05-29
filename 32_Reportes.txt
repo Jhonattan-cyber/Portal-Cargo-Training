@@ -1,0 +1,722 @@
+// ═══════════════════════════════════════════════════════════════
+// CODIGO_REPORTES.gs — Control Tower: Reportes, Bot, Export
+// Responsabilidades:
+//   - botAskQuestion: router principal de preguntas
+//   - _ctLoadEmps: carga de empleados para analisis
+//   - _ctReport_*: generacion de reportes estructurados
+//   - botExportToSheet: exportacion de reportes a Google Sheets
+//   - _ctLogQuery: log de consultas del bot
+// ═══════════════════════════════════════════════════════════════
+
+function botAskQuestion(pregunta, baseFilter) {
+  try {
+    var session = Session.getActiveUser().getEmail();
+    var t0 = new Date().getTime();
+
+    var usr = getUsuarioActual();
+    if (!usr || (usr.rol || '').toUpperCase() !== 'ADMIN') {
+      return { error: 'Acceso denegado. Solo administradores.' };
+    }
+
+    var base = baseFilter || 'TODO';
+    var intent = _ctDetectIntent(pregunta);
+    Logger.log('[CT] intent=' + intent + ' base=' + base + ' pregunta="' + pregunta.substring(0, 80) + '"');
+
+    // Greeting: no necesita cargar datos
+    if (intent === 'greeting') {
+      var elapsed0 = new Date().getTime() - t0;
+      var greetResult = _ctReport_greeting();
+      greetResult.evidencia = 'Tiempo: ' + (elapsed0 / 1000).toFixed(1) + 's';
+      greetResult.intent = 'greeting';
+      return greetResult;
+    }
+
+    // Multi-BP: detectar y mostrar ambos
+    var bpNums = (intent === 'bp_historico' || intent === 'multi_bp') ? _ctExtractAllBPs(pregunta) : [];
+
+    var emps = _ctLoadEmps(base);
+    var result;
+
+    switch (intent) {
+      case 'multi_bp':          result = _ctReport_multiBP(emps, base, bpNums); break;
+      case 'bp_historico':      result = _ctReport_bpHistorico(emps, base, bpNums[0] || null); break;
+      case 'glosario':          result = _ctReport_glosario(); break;
+      case 'top_vencidos':      result = _ctReport_topJefes(emps, base); break;
+      case 'sin_data':          result = _ctReport_sinData(emps, base); break;
+      case 'resumen':           result = _ctReport_resumen(emps, base); break;
+      case 'criticos':          result = _ctReport_criticos(emps, base); break;
+      case 'inconsistencias':   result = _ctReport_inconsistencias(emps, base); break;
+      case 'estructura_datos':  result = _ctAskVertexAI(pregunta, emps, base); break;
+      case 'segmento':          result = _ctAskVertexAI(pregunta, emps, base); break;
+      case 'ia':                result = _ctAskVertexAI(pregunta, emps, base); break;
+      case 'ambiguo':           result = _ctAskVertexAI(pregunta, emps, base); break;
+      default:                  result = _ctReport_resumen(emps, base); break;
+    }
+
+    var elapsed = new Date().getTime() - t0;
+    result.evidencia = 'Base: ' + base + ' | Tiempo: ' + (elapsed / 1000).toFixed(1) + 's | Datos en tiempo real';
+    result.intent = intent;
+
+    _ctLogQuery(session, pregunta, base, (result.titulo || intent), elapsed);
+    return result;
+
+  } catch (e) {
+    _auditLog('[CT-ERROR] ' + e.message);
+    return { error: 'Error interno: ' + e.message };
+  }
+}
+
+/**
+ * Detecta la intencion del usuario por keywords.
+ */
+// ═══ Funciones de IA movidas a Codigo_IA.gs ═══
+// _ctDetectIntent, _ctExtractAllBPs, _ctAskVertexAI, testVertexAI
+// getControlTowerKPIs, getControlTowerAutoSummary
+
+/**
+ * Carga empleados de las bases solicitadas.
+ */
+function _ctLoadEmps(baseFilter) {
+  var bases = (baseFilter === 'TODO') ? ['CHILE', 'RAMPA', 'LATAM', 'NAM'] : [baseFilter];
+  var all = [];
+  bases.forEach(function(bk) {
+    try {
+      var emps = leerHoja(bk, 'base');
+      if (emps && emps.length > 0) {
+        emps.forEach(function(e) { e._base = bk; all.push(e); });
+      }
+    } catch (err) {
+      Logger.log('[CT-LOAD] Error base ' + bk + ': ' + err.message);
+    }
+  });
+  return all;
+}
+
+// ── RESPUESTA: Greeting ──
+function _ctReport_greeting() {
+  return {
+    tipo: 'ayuda',
+    titulo: 'Hola! Soy el Control Tower de CARGO Training.',
+    mensaje: 'Puedo generar reportes en tiempo real sobre las bases de capacitacion. Selecciona un boton rapido o escribe tu consulta.',
+    sugerencias: [
+      { label: 'Resumen general', query: 'Resumen general' },
+      { label: 'Top jefes vencidos', query: 'Top jefes con mas vencidos' },
+      { label: 'Criticos por base', query: 'Criticos por base' },
+      { label: 'Glosario de siglas', query: 'Glosario de siglas' },
+      { label: 'Perfil BP', query: 'Escribe: bp 1234567' }
+    ]
+  };
+}
+
+// ── RESPUESTA: Ambiguo (menu) ──
+function _ctReport_ambiguo() {
+  return {
+    tipo: 'ayuda',
+    titulo: 'No entendi la consulta',
+    mensaje: 'Intenta con una de estas opciones:',
+    sugerencias: [
+      { label: 'Resumen general', query: 'Resumen general' },
+      { label: 'Top jefes vencidos', query: 'Top jefes con mas vencidos' },
+      { label: 'Usuarios sin data', query: 'Usuarios sin data' },
+      { label: 'Criticos por base', query: 'Criticos por base' },
+      { label: 'Inconsistencias', query: 'Inconsistencias de datos' },
+      { label: 'Glosario de siglas', query: 'Glosario de siglas' },
+      { label: 'Perfil BP', query: 'Escribe: bp 1234567' }
+    ]
+  };
+}
+
+// ── _ctAskVertexAI movida a Codigo_IA.gs ──
+
+// ── REPORTE: Multi-BP — ambos perfiles ──
+function _ctReport_multiBP(emps, base, bpNums) {
+  if (!bpNums || bpNums.length === 0) {
+    return _ctReport_ambiguo();
+  }
+
+  // Limitar a 5 BPs max
+  var bps = bpNums.slice(0, 5);
+  var allFilas = [];
+  var allKpis = [];
+  var found = 0;
+  var notFound = [];
+
+  // Cargar todos los emps si necesario
+  var allEmps = (base !== 'TODO') ? _ctLoadEmps('TODO') : emps;
+
+  bps.forEach(function(bpNum) {
+    var emp = null;
+    for (var i = 0; i < emps.length; i++) {
+      if (String(emps[i].bp || '').trim() === bpNum) { emp = emps[i]; break; }
+    }
+    if (!emp) {
+      for (var j = 0; j < allEmps.length; j++) {
+        if (String(allEmps[j].bp || '').trim() === bpNum) { emp = allEmps[j]; break; }
+      }
+    }
+
+    if (!emp) { notFound.push(bpNum); return; }
+    found++;
+
+    var nombre = (emp.nombre || 'Sin nombre').substring(0, 35);
+    var baseEmp = emp._base || emp.baseRegion || '-';
+    var cursos = emp.cursos || [];
+    var cntV = 0, cntOK = 0, cntPV = 0;
+    cursos.forEach(function(c) {
+      var st = (c.status || '').toUpperCase();
+      if (st === 'VENCIDO' || st === 'CRITICO') cntV++;
+      else if (st === 'HABILITADO' || st === 'VIGENTE' || st === 'OK' || st === 'COMPLETADO') cntOK++;
+      else if (st === 'POR VENCER' || st === 'POR_VENCER' || st === 'PROXIMO') cntPV++;
+    });
+
+    allKpis.push({ label: 'BP ' + bpNum, valor: nombre, color: '#1e293b' });
+
+    cursos.forEach(function(c) {
+      var sigla = c.sigla || '-';
+      var nombreC = c.nombre || sigla;
+      var display = (nombreC && nombreC !== sigla) ? sigla + ' — ' + nombreC : sigla;
+      allFilas.push([bpNum, nombre.substring(0, 20), display, (c.status || '-'), c.vencimiento || '-', baseEmp]);
+    });
+  });
+
+  var subtitulo = found + ' colaborador(es) encontrado(s)';
+  if (notFound.length > 0) subtitulo += ' | No encontrados: ' + notFound.join(', ');
+
+  return {
+    tipo: 'resumen',
+    titulo: 'Perfil comparativo — ' + bps.length + ' BPs',
+    subtitulo: subtitulo,
+    kpis: allKpis,
+    columnas: ['BP', 'Nombre', 'Curso', 'Estado', 'Vencimiento', 'Base'],
+    filas: allFilas,
+    chart: null
+  };
+}
+
+// ── REPORTE: Glosario de siglas (desde BIBLIOTECA FINAL) ──
+function _ctReport_glosario() {
+  var bibPorBase = getBibliotecaPorBase();
+  var siglaMap = {};
+
+  // Recorrer todas las bases de la biblioteca
+  var bases = ['CHILE', 'RAMPA', 'LATAM', 'NAM'];
+  bases.forEach(function(b) {
+    var cursos = bibPorBase[b] || [];
+    cursos.forEach(function(c) {
+      var sigla = (c.id || '').toUpperCase();
+      if (!sigla || sigla.length < 2) return;
+      if (!siglaMap[sigla]) {
+        siglaMap[sigla] = { sigla: sigla, nombre: c.nombre || '-', bases: [] };
+      }
+      if (siglaMap[sigla].bases.indexOf(b) < 0) {
+        siglaMap[sigla].bases.push(b);
+      }
+      // Preferir nombre mas largo (mas descriptivo)
+      if (c.nombre && c.nombre.length > (siglaMap[sigla].nombre || '').length) {
+        siglaMap[sigla].nombre = c.nombre;
+      }
+    });
+  });
+
+  var filas = Object.keys(siglaMap)
+    .sort()
+    .map(function(k) {
+      var s = siglaMap[k];
+      return [s.sigla, s.nombre, s.bases.join(', ')];
+    });
+
+  return {
+    tipo: 'tabla',
+    titulo: 'Glosario de siglas (' + filas.length + ' cursos)',
+    subtitulo: 'Fuente: BIBLIOTECA FINAL — Solo cursos reales registrados en las bases',
+    columnas: ['Sigla', 'Nombre completo', 'Bases donde aplica'],
+    filas: filas,
+    chart: null
+  };
+}
+
+// ── REPORTE: Perfil BP — Historial de cursos ──
+function _ctReport_bpHistorico(emps, base, bpNum) {
+  if (!bpNum) {
+    return { tipo: 'tabla', titulo: 'BP no detectado', subtitulo: 'No se pudo extraer un numero BP de la consulta. Usa formato: bp 1234567', columnas: [], filas: [] };
+  }
+
+  // Buscar empleado (si base=TODO ya se cargaron todas)
+  var emp = null;
+  for (var i = 0; i < emps.length; i++) {
+    if (String(emps[i].bp || '').trim() === bpNum) { emp = emps[i]; break; }
+  }
+
+  // Si no se encontro y base no es TODO, buscar en todas
+  if (!emp && base !== 'TODO') {
+    var allEmps = _ctLoadEmps('TODO');
+    for (var j = 0; j < allEmps.length; j++) {
+      if (String(allEmps[j].bp || '').trim() === bpNum) { emp = allEmps[j]; break; }
+    }
+  }
+
+  if (!emp) {
+    return { tipo: 'tabla', titulo: 'BP ' + bpNum + ' no encontrado', subtitulo: 'No se encontro ningun colaborador con BP ' + bpNum + '. Revisa que los digitos sean correctos.', columnas: [], filas: [] };
+  }
+
+  var cursos = emp.cursos || [];
+  var nombre = (emp.nombre || 'Sin nombre').substring(0, 40);
+  var baseEmp = emp._base || emp.baseRegion || '-';
+  var jefe = (emp.jefeDirecto || emp.jefeArea || emp.gerente || '-').substring(0, 35);
+  var cargo = (emp.cargo || emp.posicion || emp.funcion || '-').substring(0, 35);
+
+  // Contar estados
+  var cntVenc = 0, cntVig = 0, cntPV = 0, cntProg = 0, cntSin = 0;
+  var proximoVenc = null;
+
+  // Construir filas de cursos — usar sigla + nombre de BIBLIOTECA FINAL
+  var cursoRows = cursos.map(function(c) {
+    var st = (c.status || 'SIN DATO').toUpperCase();
+    var sigla = c.sigla || '-';
+    var nombreCurso = c.nombre || sigla;
+    // Nombre compuesto: "SIGLA — Nombre Completo" (solo si son distintos)
+    var displayName = sigla;
+    if (nombreCurso && nombreCurso !== sigla && nombreCurso !== '-') {
+      displayName = sigla + ' — ' + nombreCurso;
+    }
+
+    var fechaVenc = c.vencimiento || '';
+    var diasVal = c.dias;
+
+    if (st === 'VENCIDO' || st === 'CRITICO') cntVenc++;
+    else if (st === 'VIGENTE' || st === 'OK' || st === 'HABILITADO' || st === 'COMPLETADO') cntVig++;
+    else if (st === 'POR_VENCER' || st === 'POR VENCER' || st === 'PROXIMO') cntPV++;
+    else if (st === 'PROGRAMAR' || st === 'POR_PROGRAMAR') cntProg++;
+    else cntSin++;
+
+    // Proximo vencimiento (dias > 0 mas cercano)
+    var diasNum = (typeof diasVal === 'number') ? diasVal : parseInt(diasVal);
+    if (!isNaN(diasNum) && diasNum > 0 && (proximoVenc === null || diasNum < proximoVenc)) {
+      proximoVenc = diasNum;
+    }
+
+    return {
+      displayName: displayName,
+      status: st,
+      fecha: fechaVenc || '-',
+      dias: diasVal,
+      sortKey: (!isNaN(diasNum)) ? diasNum : 99999
+    };
+  });
+
+  // Ordenar: mas urgente primero (menor dias)
+  cursoRows.sort(function(a, b) { return a.sortKey - b.sortKey; });
+
+  var filas = cursoRows.map(function(r) {
+    var diasNum = (typeof r.dias === 'number') ? r.dias : parseInt(r.dias);
+    var diasStr = !isNaN(diasNum) ? (diasNum < 0 ? diasNum + ' (vencido)' : diasNum + 'd') : '-';
+    return [r.displayName, r.status, r.fecha, diasStr];
+  });
+
+  // KPIs
+  var proxVencStr = (proximoVenc !== null && proximoVenc > 0) ? proximoVenc + ' dias' : (cntVenc > 0 ? 'Ya vencido' : '-');
+
+  // Chart: barras por estado
+  var chartLabels = [];
+  var chartValues = [];
+  if (cntVenc > 0) { chartLabels.push('Vencidos'); chartValues.push(cntVenc); }
+  if (cntPV > 0) { chartLabels.push('Por Vencer'); chartValues.push(cntPV); }
+  if (cntVig > 0) { chartLabels.push('Vigentes'); chartValues.push(cntVig); }
+  if (cntProg > 0) { chartLabels.push('Programar'); chartValues.push(cntProg); }
+  if (cntSin > 0) { chartLabels.push('Sin dato'); chartValues.push(cntSin); }
+
+  return {
+    tipo: 'resumen',
+    titulo: 'Perfil BP ' + bpNum + ' — ' + nombre,
+    subtitulo: 'Base: ' + baseEmp + ' | Jefe: ' + jefe + ' | Cargo: ' + cargo,
+    kpis: [
+      { label: 'Total cursos', valor: cursos.length, color: '#3b82f6' },
+      { label: 'Vencidos', valor: cntVenc, color: cntVenc > 0 ? '#ef4444' : '#94a3b8' },
+      { label: 'Vigentes', valor: cntVig, color: '#22c55e' },
+      { label: 'Por Vencer', valor: cntPV, color: cntPV > 0 ? '#f59e0b' : '#94a3b8' },
+      { label: 'Programar', valor: cntProg, color: '#6366f1' },
+      { label: 'Prox. vencimiento', valor: proxVencStr, color: (proximoVenc !== null && proximoVenc <= 30) ? '#ef4444' : '#22c55e' }
+    ],
+    columnas: ['Curso', 'Estado', 'Vencimiento', 'Dias'],
+    filas: filas,
+    chart: chartLabels.length > 1 ? {
+      tipo: 'barH',
+      labels: chartLabels,
+      values: chartValues,
+      label: 'Cursos por estado',
+      color: '#6366f1'
+    } : null
+  };
+}
+
+// ── REPORTE: Top jefes con mas vencidos ──
+function _ctReport_topJefes(emps, base) {
+  var jefeMap = {};
+  emps.forEach(function(e) {
+    var venc = e.vencidosAplicables || e.vencidos || 0;
+    if (venc === 0) return;
+    var jefe = (e.jefeDirecto || '').trim() || (e.jefeArea || '').trim()
+            || (e.jefeDepartamento || '').trim() || (e.subgerente || '').trim()
+            || (e.gerente || '').trim() || (e.gerenteSr || '').trim()
+            || (e.director || '').trim() || 'Sin Jefe';
+    if (!jefeMap[jefe]) jefeMap[jefe] = { jefe: jefe, personas: 0, cursosVenc: 0, base: e._base || base };
+    jefeMap[jefe].personas++;
+    jefeMap[jefe].cursosVenc += venc;
+  });
+
+  var rows = Object.keys(jefeMap).map(function(k) { return jefeMap[k]; })
+    .sort(function(a, b) { return b.cursosVenc - a.cursosVenc; })
+    .slice(0, 15);
+
+  return {
+    tipo: 'tabla',
+    titulo: 'Top 15 jefes con mas cursos vencidos',
+    subtitulo: 'Base: ' + base + ' | Personas con al menos 1 curso vencido bajo cada jefe',
+    columnas: ['#', 'Jefe', 'Base', 'Personas c/vencidos', 'Cursos vencidos'],
+    filas: rows.map(function(r, i) {
+      return [i + 1, r.jefe, r.base, r.personas, r.cursosVenc];
+    }),
+    chart: {
+      tipo: 'barH',
+      labels: rows.slice(0, 10).map(function(r) { return r.jefe.length > 25 ? r.jefe.substring(0, 22) + '...' : r.jefe; }),
+      values: rows.slice(0, 10).map(function(r) { return r.cursosVenc; }),
+      label: 'Cursos vencidos',
+      color: '#ef4444'
+    }
+  };
+}
+
+// ── REPORTE: Usuarios sin data ──
+function _ctReport_sinData(emps, base) {
+  var sinData = [];
+  var porBase = {};
+  emps.forEach(function(e) {
+    var cursos = e.cursos || [];
+    var sinCursos = cursos.length === 0;
+    var todoSinPlan = !sinCursos && cursos.every(function(c) {
+      var st = (c.statusNorm || c.status || '').toUpperCase();
+      return st === 'SIN_PLAN' || st === 'SIN_DATOS' || st === 'NO_APLICA' || st === 'SIN DATO';
+    });
+    if (sinCursos || todoSinPlan) {
+      var b = e._base || base;
+      sinData.push({ bp: e.bp || '', nombre: (e.nombre || '').substring(0, 35), base: b, razon: sinCursos ? 'Sin cursos' : 'Solo SIN_PLAN/SIN_DATOS', jefe: (e.jefeDirecto || e.jefeArea || '-').substring(0, 25) });
+      porBase[b] = (porBase[b] || 0) + 1;
+    }
+  });
+
+  var resumenBases = Object.keys(porBase).map(function(b) { return [b, porBase[b]]; })
+    .sort(function(a, b) { return b[1] - a[1]; });
+
+  return {
+    tipo: 'tabla',
+    titulo: 'Usuarios sin datos asignados (' + sinData.length + ' personas)',
+    subtitulo: 'Empleados sin cursos o con todos los cursos en SIN_PLAN/SIN_DATOS',
+    columnas: ['BP', 'Nombre', 'Base', 'Razon', 'Jefe'],
+    filas: sinData.slice(0, 50).map(function(r) {
+      return [r.bp, r.nombre, r.base, r.razon, r.jefe];
+    }),
+    nota: sinData.length > 50 ? 'Mostrando 50 de ' + sinData.length + '. Exporta a Sheet para ver todos.' : '',
+    chart: resumenBases.length > 1 ? {
+      tipo: 'barH',
+      labels: resumenBases.map(function(r) { return r[0]; }),
+      values: resumenBases.map(function(r) { return r[1]; }),
+      label: 'Personas sin data',
+      color: '#f59e0b'
+    } : null
+  };
+}
+
+// ── REPORTE: Resumen general ejecutivo ──
+function _ctReport_resumen(emps, base) {
+  var totalPersonas = emps.length;
+  var conKPI = 0, totalNI = 0, totalVenc = 0, totalPV = 0, totalVigentes = 0, totalProgramar = 0, totalSinPlan = 0;
+  var porBase = {};
+
+  emps.forEach(function(e) {
+    if (e.cuentaKPI) {
+      conKPI++;
+    } else {
+      totalNI++; // V75: contar NI (no cuentaKPI)
+    }
+    var b = e._base || 'N/A';
+    if (!porBase[b]) porBase[b] = { personas: 0, kpi: 0, ni: 0, venc: 0, vigentes: 0, pv: 0 };
+    porBase[b].personas++;
+    if (e.cuentaKPI) {
+      porBase[b].kpi++;
+    } else {
+      porBase[b].ni++;
+    }
+
+    (e.cursos || []).forEach(function(c) {
+      var st = (c.statusNorm || c.status || '').toUpperCase();
+      if (st === 'VENCIDO' || st === 'CRITICO') { totalVenc++; porBase[b].venc++; }
+      else if (st === 'POR_VENCER' || st === 'POR VENCER' || st === 'PROXIMO') { totalPV++; porBase[b].pv++; }
+      else if (st === 'VIGENTE' || st === 'OK' || st === 'HABILITADO' || st === 'COMPLETADO') { totalVigentes++; porBase[b].vigentes++; }
+      else if (st === 'PROGRAMAR' || st === 'POR_PROGRAMAR') totalProgramar++;
+      else totalSinPlan++;
+    });
+  });
+
+  var activos = totalPersonas - totalNI; // V75: Activos = Total - NI
+  var denom = totalVigentes + totalVenc + totalPV + totalProgramar;
+  var cumplimiento = denom > 0 ? Math.round(totalVigentes / denom * 100) : 0;
+
+  var basesArr = Object.keys(porBase).sort();
+  var filas = basesArr.map(function(b) {
+    var d = porBase[b];
+    var activosB = d.personas - d.ni;
+    var bd = d.vigentes + d.venc + d.pv;
+    var bc = bd > 0 ? Math.round(d.vigentes / bd * 100) : 0;
+    return [b, activosB, d.ni, d.venc, d.pv, d.vigentes, bc + '%'];
+  });
+
+  filas.push(['TOTAL', activos, totalNI, totalVenc, totalPV, totalVigentes, cumplimiento + '%']);
+
+  return {
+    tipo: 'resumen',
+    titulo: 'Resumen General — ' + base,
+    kpis: [
+      { label: 'Colaboradores Activos', valor: activos, color: '#3b82f6' },
+      { label: 'Nuevos Ingresos', valor: totalNI, color: '#8b5cf6' },
+      { label: 'Cursos Vencidos', valor: totalVenc, color: '#ef4444' },
+      { label: 'Por Vencer', valor: totalPV, color: '#f59e0b' },
+      { label: 'Vigentes', valor: totalVigentes, color: '#22c55e' },
+      { label: 'Cumplimiento', valor: cumplimiento + '%', color: cumplimiento >= 70 ? '#22c55e' : cumplimiento >= 50 ? '#f59e0b' : '#ef4444' }
+    ],
+    columnas: ['Base', 'Activos', 'NI', 'Vencidos', 'Por Vencer', 'Vigentes', 'Cumplimiento'],
+    filas: filas,
+    chart: basesArr.length > 1 ? {
+      tipo: 'barH',
+      labels: basesArr,
+      values: basesArr.map(function(b) { return porBase[b].venc; }),
+      label: 'Cursos vencidos por base',
+      color: '#ef4444'
+    } : null
+  };
+}
+
+// ── REPORTE: Criticos por base ──
+function _ctReport_criticos(emps, base) {
+  var cursoMap = {};
+  var porBase = {};
+
+  emps.forEach(function(e) {
+    var b = e._base || 'N/A';
+    if (!porBase[b]) porBase[b] = { venc: 0, pv: 0, total: 0 };
+
+    (e.cursos || []).forEach(function(c) {
+      var st = (c.statusNorm || c.status || '').toUpperCase();
+      var esVenc = (st === 'VENCIDO' || st === 'CRITICO');
+      var esPV = (st === 'POR_VENCER' || st === 'POR VENCER' || st === 'PROXIMO');
+      if (!esVenc && !esPV) return;
+
+      porBase[b].total++;
+      if (esVenc) porBase[b].venc++;
+      if (esPV) porBase[b].pv++;
+
+      var cursoKey = (c.sigla || c.curso || c.nombre || 'Sin nombre');
+      var mapKey = b + '|' + cursoKey;
+      if (!cursoMap[mapKey]) cursoMap[mapKey] = { curso: cursoKey, base: b, venc: 0, pv: 0 };
+      if (esVenc) cursoMap[mapKey].venc++;
+      if (esPV) cursoMap[mapKey].pv++;
+    });
+  });
+
+  var cursoRows = Object.keys(cursoMap).map(function(k) { return cursoMap[k]; })
+    .sort(function(a, b) { return (b.venc + b.pv) - (a.venc + a.pv); })
+    .slice(0, 20);
+
+  var basesArr = Object.keys(porBase).sort();
+  var baseRows = basesArr.map(function(b) {
+    var d = porBase[b];
+    return [b, d.venc, d.pv, d.venc + d.pv];
+  });
+
+  return {
+    tipo: 'tabla',
+    titulo: 'Cursos criticos por base',
+    subtitulo: 'Vencidos + Por vencer. Top 20 combinaciones curso-base con mayor criticidad.',
+    columnas: ['Curso', 'Base', 'Vencidos', 'Por Vencer', 'Total Critico'],
+    filas: cursoRows.map(function(r) {
+      return [r.curso, r.base, r.venc, r.pv, r.venc + r.pv];
+    }),
+    tablaExtra: {
+      titulo: 'Resumen por base',
+      columnas: ['Base', 'Vencidos', 'Por Vencer', 'Total'],
+      filas: baseRows
+    },
+    chart: basesArr.length > 1 ? {
+      tipo: 'barH',
+      labels: basesArr,
+      values: basesArr.map(function(b) { return porBase[b].venc; }),
+      label: 'Vencidos por base',
+      color: '#dc2626'
+    } : null
+  };
+}
+
+// ── REPORTE: Inconsistencias de datos ──
+function _ctReport_inconsistencias(emps, base) {
+  var sinJefe = [], bpDuplicados = [], sinCursos = [], kpiSinCurso = [];
+  var bpCount = {};
+
+  emps.forEach(function(e) {
+    var bp = (e.bp || '').toString().trim();
+    if (bp) bpCount[bp] = (bpCount[bp] || 0) + 1;
+
+    if (!e.jefeDirecto && !e.jefeArea && !e.gerente) {
+      sinJefe.push({ bp: bp, nombre: (e.nombre || '').substring(0, 30), base: e._base || '' });
+    }
+    var cursos = e.cursos || [];
+    if (cursos.length === 0) {
+      sinCursos.push({ bp: bp, nombre: (e.nombre || '').substring(0, 30), base: e._base || '' });
+    }
+    if (e.cuentaKPI && cursos.length === 0) {
+      kpiSinCurso.push({ bp: bp, nombre: (e.nombre || '').substring(0, 30), base: e._base || '' });
+    }
+  });
+
+  Object.keys(bpCount).forEach(function(bp) {
+    if (bpCount[bp] > 1) bpDuplicados.push({ bp: bp, count: bpCount[bp] });
+  });
+
+  var issues = [];
+  if (sinJefe.length > 0) issues.push({ tipo: 'Sin jefe asignado', cantidad: sinJefe.length, ejemplos: sinJefe.slice(0, 5) });
+  if (bpDuplicados.length > 0) issues.push({ tipo: 'BPs duplicados', cantidad: bpDuplicados.length, ejemplos: bpDuplicados.slice(0, 5) });
+  if (sinCursos.length > 0) issues.push({ tipo: 'Sin cursos asignados', cantidad: sinCursos.length, ejemplos: sinCursos.slice(0, 5) });
+  if (kpiSinCurso.length > 0) issues.push({ tipo: 'cuentaKPI=true pero sin cursos', cantidad: kpiSinCurso.length, ejemplos: kpiSinCurso.slice(0, 5) });
+
+  var filas = issues.map(function(iss) {
+    var ejStr = iss.ejemplos.map(function(ej) {
+      return ej.bp ? (ej.nombre || '') + ' (BP:' + ej.bp + ')' : (ej.bp + ' x' + ej.count);
+    }).join(', ');
+    return [iss.tipo, iss.cantidad, ejStr];
+  });
+
+  var totalIssues = sinJefe.length + bpDuplicados.length + sinCursos.length + kpiSinCurso.length;
+
+  return {
+    tipo: 'tabla',
+    titulo: 'Inconsistencias de datos (' + totalIssues + ' problemas)',
+    subtitulo: 'Anomalias detectadas en base ' + base,
+    columnas: ['Tipo de problema', 'Cantidad', 'Ejemplos'],
+    filas: filas,
+    chart: issues.length > 0 ? {
+      tipo: 'barH',
+      labels: issues.map(function(i) { return i.tipo; }),
+      values: issues.map(function(i) { return i.cantidad; }),
+      label: 'Cantidad de problemas',
+      color: '#8b5cf6'
+    } : null
+  };
+}
+
+/**
+ * Exporta datos de un reporte a una nueva hoja en el spreadsheet MAESTRO.
+ */
+function botExportToSheet(reportData) {
+  try {
+    var usr = getUsuarioActual();
+    if (!usr || (usr.rol || '').toUpperCase() !== 'ADMIN') {
+      return { error: 'Acceso denegado.' };
+    }
+
+    var ss = getSpreadsheet('MAESTRO');
+    if (!ss) return { error: 'No se encontro el spreadsheet MAESTRO.' };
+
+    var titulo = (reportData.titulo || 'Reporte').substring(0, 28);
+    var timestamp = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'ddMMM_HHmm');
+    var sheetName = 'CT_' + timestamp;
+
+    var sheet = ss.insertSheet(sheetName);
+
+    // Header del reporte
+    sheet.getRange(1, 1).setValue(reportData.titulo || 'Reporte Control Tower');
+    sheet.getRange(1, 1).setFontWeight('bold').setFontSize(12);
+    if (reportData.subtitulo) {
+      sheet.getRange(2, 1).setValue(reportData.subtitulo);
+      sheet.getRange(2, 1).setFontColor('#666666');
+    }
+
+    var startRow = reportData.subtitulo ? 4 : 3;
+
+    // Columnas
+    var cols = reportData.columnas || [];
+    if (cols.length > 0) {
+      sheet.getRange(startRow, 1, 1, cols.length).setValues([cols]);
+      sheet.getRange(startRow, 1, 1, cols.length).setFontWeight('bold').setBackground('#e2e8f0');
+    }
+
+    // Filas
+    var filas = reportData.filas || [];
+    if (filas.length > 0) {
+      sheet.getRange(startRow + 1, 1, filas.length, filas[0].length).setValues(filas);
+    }
+
+    // Tabla extra (si existe)
+    if (reportData.tablaExtra) {
+      var extraStart = startRow + filas.length + 3;
+      sheet.getRange(extraStart, 1).setValue(reportData.tablaExtra.titulo || 'Detalle');
+      sheet.getRange(extraStart, 1).setFontWeight('bold');
+      var extraCols = reportData.tablaExtra.columnas || [];
+      if (extraCols.length > 0) {
+        sheet.getRange(extraStart + 1, 1, 1, extraCols.length).setValues([extraCols]);
+        sheet.getRange(extraStart + 1, 1, 1, extraCols.length).setFontWeight('bold').setBackground('#e2e8f0');
+      }
+      var extraFilas = reportData.tablaExtra.filas || [];
+      if (extraFilas.length > 0) {
+        sheet.getRange(extraStart + 2, 1, extraFilas.length, extraFilas[0].length).setValues(extraFilas);
+      }
+    }
+
+    // Auto-resize
+    for (var ci = 1; ci <= Math.max(cols.length, 1); ci++) {
+      sheet.autoResizeColumn(ci);
+    }
+
+    var url = ss.getUrl() + '#gid=' + sheet.getSheetId();
+    _auditLog('[CT-EXPORT] Sheet "' + sheetName + '" creada por ' + (usr.email || '') + ' — ' + filas.length + ' filas');
+
+    // Registrar en REGISTRO_OUTPUTS
+    _logOutput('SHEET', url, 'CONTROL_TOWER', 'Reporte CT: ' + (reportData.titulo || 'Sin titulo') + ' (' + filas.length + ' filas)', { nombreArchivo: sheetName, origen: 'IA' });
+
+    return { success: true, sheetName: sheetName, url: url, filas: filas.length };
+
+  } catch (e) {
+    _auditLog('[CT-EXPORT-ERROR] ' + e.message);
+    return { error: 'Error al exportar: ' + e.message };
+  }
+}
+
+/**
+ * Guarda log de consulta en hoja BOT_LOG (crea si no existe).
+ */
+function _ctLogQuery(email, pregunta, base, intent, elapsedMs) {
+  try {
+    var ss = getSpreadsheet('MAESTRO');
+    if (!ss) return;
+
+    var sheet = ss.getSheetByName('BOT_LOG');
+    if (!sheet) {
+      sheet = ss.insertSheet('BOT_LOG');
+      sheet.appendRow(['Fecha', 'Usuario', 'Base', 'Pregunta', 'Intent', 'Tiempo (ms)']);
+      sheet.getRange(1, 1, 1, 6).setFontWeight('bold');
+    }
+
+    var lastRow = sheet.getLastRow();
+    if (lastRow > 500) {
+      sheet.deleteRows(2, lastRow - 400);
+    }
+
+    sheet.appendRow([
+      new Date(),
+      email,
+      base || 'TODO',
+      pregunta.substring(0, 500),
+      intent || '',
+      elapsedMs
+    ]);
+  } catch (e) {
+    _auditLog('[CT-LOG-ERROR] ' + e.message);
+  }
+}

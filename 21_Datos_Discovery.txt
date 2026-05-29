@@ -1,0 +1,216 @@
+/**
+ * Descubrimiento DINÁMICO de columnas de cursos por encabezado.
+ * Busca en la fila 1 el texto: "HEADER SUFIJO" (ej: "MMPP VENC", "W&B VENCIMIENTO", "CRM NEXT")
+ * Matching FLEXIBLE: ignora acentos, trim, case-insensitive
+ */
+function descubrirColumnasCursos(headerRow, cursosConfig, baseKey) {
+  var resultado = [];
+  var headersNorm = headerRow.map(normKey);
+  
+  Logger.log('=== HEADERS ' + baseKey + ' (COMPLETOS: ' + headersNorm.length + ' columnas) ===');
+  for (var hi = 0; hi < headersNorm.length; hi++) {
+    if (headersNorm[hi]) _log('  Col ' + hi + ': "' + headersNorm[hi] + '"');
+  }
+  
+  var sufVenc = SUFIJOS_VENC[baseKey] || 'VENC';
+  var sufVencNorm = normKey(sufVenc);
+  
+  var habSufijos = ['HAB', 'HABILITACION'];
+  var daysSufijos = ['DAYS', '0YS', 'DAYS EXP', 'OYS'];
+  var statusSufijos = ['STATUS', 'ESTADO'];
+  var planSufijos = ['PLAN'];
+  
+  // Función de matching RELAJADO: tolera variaciones de letras, espacios, typos comunes
+  // Permite: LIVESTOK≈LIVESTOCK, RADIOLOGIA≈RADIOLOGICA, W&B≈W & B, etc.
+  // V30d-D: también normaliza dots (PLAN I. IMAGENES → PLAN I IMAGENES)
+  function normalizeForMatch(s) {
+    return s.replace(/[&\.\-\/\,\:]/g, ' ').replace(/\s+/g, ' ').trim();
+  }
+  function matchHeader(h, prefix, suffix) {
+    // Match exacto
+    if (h === prefix + ' ' + suffix) return true;
+    // Match relajado: header STARTS WITH prefix AND contains suffix
+    if (h.indexOf(prefix) === 0 && h.indexOf(suffix) >= 0) return true;
+    // Match normalizado (sin &, ., -, /)
+    var hNorm = normalizeForMatch(h);
+    var pNorm = normalizeForMatch(prefix);
+    var sNorm = normalizeForMatch(suffix);
+    if (hNorm.indexOf(pNorm) === 0 && hNorm.indexOf(sNorm) >= 0) return true;
+    // Match corto: prefix sin ultimos 1-2 chars
+    if (prefix.length > 3) {
+      var prefCorto = prefix.substring(0, prefix.length - 1);
+      if (h.indexOf(prefCorto) === 0 && h.indexOf(suffix) >= 0) return true;
+    }
+    // V40: CONTAINS match — header CONTAINS prefix AND suffix (for headers like "SUSTANCIAS PSICOACTIVAS VENC")
+    if (prefix.length >= 5 && h.indexOf(prefix) >= 0 && h.indexOf(suffix) >= 0) return true;
+    if (pNorm.length >= 5 && hNorm.indexOf(pNorm) >= 0 && hNorm.indexOf(sNorm) >= 0) return true;
+    return false;
+  }
+  
+  // Alias de headers para variantes conocidas entre bases
+  var headerAliases = {
+    'LIVESTOK': 'LIVESTOCK', 'LIVESTCK': 'LIVESTOCK',
+    'RADIOLOGIA': 'RADIOLOGICA', 'P. RADIOLOGIA': 'P. RADIOLOGICA', 'P RADIOLOGIA': 'P. RADIOLOGICA',
+    'AVSE': 'AVSEC', 'INTERFERENCIA ILICITA': 'AVSEC',
+    'GRUA': 'GRUA HORQUILLA', 'GRA HORQUILLA': 'GRUA HORQUILLA',
+    'BATERAS': 'BATERIAS', 'BATERIAS LITIO': 'BAT. LITIO', 'BAT LITIO': 'BAT. LITIO',
+    'MONTCARGA': 'MONTACARGA', 'MONTACARGA': 'MONTACARGA',
+    'SEGURIDAD LAB': 'SEGURIDAD LABORAL', 'SEG LABORAL': 'SEGURIDAD LABORAL',
+    'W & B': 'W&B', 'WEIGHT AND BALANCE': 'W&B',
+    'OP RX': 'OP. RX', 'RAYOS X': 'OP. RX',
+    'PSICOACTIVAS': 'PSICO', 'SUSTANCIAS PSICOACTIVAS': 'PSICOACTIVAS',
+    'SUST PSICOACTIVAS': 'PSICOACTIVAS', 'PSICOACTIVA': 'PSICOACTIVAS'
+  };
+  
+  for (var i = 0; i < cursosConfig.length; i++) {
+    var curso = cursosConfig[i];
+    var hdr = normKey(curso.header);
+    // Tambien intentar con alias del header
+    var hdrs = [hdr];
+    var hdrUpper = hdr.replace(/\./g, '').trim();
+    if (headerAliases[hdrUpper]) hdrs.push(normKey(headerAliases[hdrUpper]));
+    if (headerAliases[hdr] && headerAliases[hdr] !== headerAliases[hdrUpper]) hdrs.push(normKey(headerAliases[hdr]));
+    // V40: Also add reverse aliases — if any alias VALUE matches our header, add the alias KEY as a search prefix
+    var aliasKeys = Object.keys(headerAliases);
+    for (var ak = 0; ak < aliasKeys.length; ak++) {
+      var aliasVal = normKey(headerAliases[aliasKeys[ak]]);
+      if (aliasVal === hdr || aliasVal === hdrUpper) {
+        var aliasKeyNorm = normKey(aliasKeys[ak]);
+        if (hdrs.indexOf(aliasKeyNorm) < 0) hdrs.push(aliasKeyNorm);
+      }
+    }
+    // V40: Also add the course ID as a search prefix (e.g., "PSICO" for PSICOACTIVAS)
+    var idNorm = normKey(curso.id);
+    if (idNorm && hdrs.indexOf(idNorm) < 0) hdrs.push(idNorm);
+    
+    var habCol = -1, vencCol = -1, daysCol = -1, statusCol = -1, planCol = -1;
+    
+    for (var c = 0; c < headersNorm.length; c++) {
+      var h = headersNorm[c];
+      if (!h) continue;
+      
+      for (var hi = 0; hi < hdrs.length; hi++) {
+        var curHdr = hdrs[hi];
+        
+        // VENC
+        if (vencCol < 0) {
+          if (matchHeader(h, curHdr, sufVencNorm)) vencCol = c;
+          else if (matchHeader(h, curHdr, 'VENCIMIENTO')) vencCol = c;
+          else if (matchHeader(h, curHdr, 'VENC')) vencCol = c;
+          else if (matchHeader(h, curHdr, 'NEXT')) vencCol = c;
+          else if (matchHeader(h, curHdr, 'NEXT CURSO')) vencCol = c;
+        }
+        
+        // HAB
+        if (habCol < 0) {
+          for (var sh = 0; sh < habSufijos.length; sh++) {
+            if (matchHeader(h, curHdr, normKey(habSufijos[sh]))) { habCol = c; break; }
+          }
+          if (habCol < 0 && matchHeader(h, curHdr, 'FECHA')) habCol = c;
+          if (habCol < 0 && h === curHdr && vencCol !== c) habCol = c;
+        }
+        
+        // DAYS
+        if (daysCol < 0) {
+          for (var sd = 0; sd < daysSufijos.length; sd++) {
+            if (matchHeader(h, curHdr, normKey(daysSufijos[sd]))) { daysCol = c; break; }
+          }
+        }
+        
+        // STATUS
+        if (statusCol < 0) {
+          for (var ss = 0; ss < statusSufijos.length; ss++) {
+            if (matchHeader(h, curHdr, normKey(statusSufijos[ss]))) { statusCol = c; break; }
+          }
+        }
+        
+        // PLAN
+        if (planCol < 0) {
+          for (var sp = 0; sp < planSufijos.length; sp++) {
+            if (matchHeader(h, curHdr, normKey(planSufijos[sp])) || 
+                matchHeader(h, normKey(planSufijos[sp]), curHdr)) { planCol = c; break; }
+          }
+        }
+      }
+    }
+    
+    // ═══ FALLBACK: PREFIX MATCH ═══
+    // Si no se encontraron columnas con sufijos, intentar match por prefijo.
+    // Cubre casos como NAM donde "MMPP" no existe como header exacto
+    // pero sí existen "MMPP ACEPTACION HAB", "MMPP ACEPTACION NEXT", etc.
+    if (vencCol < 0 && habCol < 0) {
+      for (var hi2 = 0; hi2 < hdrs.length; hi2++) {
+        var pfx = hdrs[hi2];
+        for (var pc = 0; pc < headersNorm.length; pc++) {
+          var ph = headersNorm[pc];
+          if (!ph || ph.length <= pfx.length) continue;
+          if (ph.indexOf(pfx + ' ') !== 0) continue;
+          // Found a column starting with the prefix - check suffix
+          var sufPart = ph.substring(pfx.length).trim();
+          if (vencCol < 0 && (sufPart.indexOf(sufVencNorm) >= 0 || sufPart.indexOf('VENC') >= 0 || sufPart.indexOf('NEXT') >= 0)) {
+            vencCol = pc;
+          } else if (habCol < 0 && (sufPart.indexOf('HAB') >= 0 || sufPart.indexOf('FECHA') >= 0)) {
+            habCol = pc;
+          } else if (daysCol < 0 && (sufPart.indexOf('DAYS') >= 0 || sufPart.indexOf('0YS') >= 0)) {
+            daysCol = pc;
+          } else if (statusCol < 0 && (sufPart.indexOf('STATUS') >= 0 || sufPart.indexOf('ESTADO') >= 0)) {
+            statusCol = pc;
+          } else if (planCol < 0 && sufPart.indexOf('PLAN') >= 0) {
+            planCol = pc;
+          }
+          // If no specific suffix, use as HAB (standalone column)
+          if (habCol < 0 && vencCol !== pc && daysCol !== pc && statusCol !== pc && planCol !== pc) {
+            habCol = pc;
+          }
+        }
+        if (vencCol >= 0 || habCol >= 0) {
+          _log('  ✓ PREFIX MATCH: ' + curso.id + ' encontrado por prefijo "' + pfx + '"');
+          break;
+        }
+      }
+    }
+
+    if (vencCol >= 0 || habCol >= 0 || statusCol >= 0) {
+      resultado.push({
+        id: curso.id, sigla: curso.header, nombre: curso.nombre,
+        habCol: habCol >= 0 ? habCol : null,
+        vencCol: vencCol >= 0 ? vencCol : null,
+        daysCol: daysCol >= 0 ? daysCol : null,
+        statusCol: statusCol >= 0 ? statusCol : null,
+        planCol: planCol >= 0 ? planCol : null
+      });
+      // V40: Enhanced logging for PSICO* courses
+      if (curso.id === 'PSICO' || curso.header.indexOf('PSICO') >= 0) {
+        _log('  [V40-PSICO] ✓ ENCONTRADO ' + curso.id + ': habCol=' + habCol + ' vencCol=' + vencCol + ' statusCol=' + statusCol + ' daysCol=' + daysCol + ' planCol=' + planCol);
+        _log('  [V40-PSICO] Prefijos buscados: ' + hdrs.join(', '));
+      }
+    } else {
+      _log('  ⚠ NO ENCONTRADO: ' + curso.id + ' [' + curso.header + '] - prefijos buscados: [' + hdrs.join(', ') + ']');
+      if (curso.id === 'PSICO' || curso.header.indexOf('PSICO') >= 0) {
+        _log('  [V40-PSICO] ✗ PSICO NO ENCONTRADO en base ' + baseKey + '. Prefijos intentados: ' + hdrs.join(', '));
+        _log('  [V40-PSICO] Headers disponibles con "PSICO": ');
+        for (var psi = 0; psi < headersNorm.length; psi++) {
+          if (headersNorm[psi] && headersNorm[psi].indexOf('PSICO') >= 0) {
+            _log('    Col ' + psi + ': "' + headersNorm[psi] + '"');
+          }
+        }
+      }
+    }
+  }
+  
+  Logger.log('=== CURSOS DESCUBIERTOS ' + baseKey + ' ===');
+  resultado.forEach(function(r) {
+    _log('  ✓ ' + r.id + ' [' + r.sigla + ']: HAB=' + (r.habCol !== null ? r.habCol : '-') + ' VENC=' + (r.vencCol !== null ? r.vencCol : '-') + ' DAYS=' + (r.daysCol !== null ? r.daysCol : '-') + ' STATUS=' + (r.statusCol !== null ? r.statusCol : '-') + ' PLAN=' + (r.planCol !== null ? r.planCol : '-'));
+  });
+  _log('  TOTAL: ' + resultado.length + '/' + cursosConfig.length + ' cursos descubiertos');
+  // V46b: Resumen de columnas descubiertas (para diagnóstico RAMPA y otras bases)
+  var _colSummary = { conHab: 0, conVenc: 0, conDays: 0, conStatus: 0, sinHab: 0, sinVenc: 0 };
+  resultado.forEach(function(r) {
+    if (r.habCol !== null) _colSummary.conHab++; else _colSummary.sinHab++;
+    if (r.vencCol !== null) _colSummary.conVenc++; else _colSummary.sinVenc++;
+    if (r.daysCol !== null) _colSummary.conDays++;
+    if (r.statusCol !== null) _colSummary.conStatus++;
+  });
+  _log('  COLUMNAS: conHAB=' + _colSummary.conHab + ' sinHAB=' + _colSummary.sinHab + ' | conVENC=' + _colSummary.conVenc + ' sinVENC=' + _colSummary.sinVenc + ' | conDAYS=' + _colSummary.conDays + ' | conSTATUS=' + _colSummary.conStatus);
+  return resultado;
+}

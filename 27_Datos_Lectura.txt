@@ -1,0 +1,693 @@
+// ===================== LEER HOJA GENERICA =====================
+function leerHoja(baseKey, tipo) {
+  var _t0lh = new Date().getTime();
+  // BASE-ONLY V26: Ignorar cualquier llamada con tipo 'plan'
+  if (tipo === 'plan' || tipo === 'planMap') {
+    Logger.log('[BASE-ONLY] leerHoja: llamada a tipo=' + tipo + ' ignorada, retornando []');
+    return [];
+  }
+  // Intentar obtener datos del cache primero
+  var cached = getFromCache(baseKey, 'base');
+  if (cached && !cached._fallback) {
+    Logger.log('[BASE-ONLY] leerHoja ' + baseKey + ': CACHE (' + cached.length + ' empleados, ' + (new Date().getTime() - _t0lh) + 'ms)');
+    // V66-FIX: Re-poblar _wcBPsSession desde cache separada de wcBPs
+    // Sin esto, getEquipoRealBPs Paso 8 no puede excluir WC cuando datos vienen del cache
+    var cachedWC = getFromCache(baseKey, 'wcBPs');
+    if (cachedWC && cachedWC.length > 0) {
+      cachedWC.forEach(function(bp) { _wcBPsSession[bp] = true; });
+      _log('[V6-WC-FIX] leerHoja ' + baseKey + ': restaurados ' + cachedWC.length + ' WC BPs desde cache wcBPs');
+    }
+    return cached;
+  }
+  var cfg = CONFIG_BASE[baseKey];
+  var tabName = TABS[baseKey].base;
+  var ss = getSpreadsheet(baseKey);
+  var sh = ss.getSheetByName(tabName);
+  if (!sh) throw new Error('Pestana "' + tabName + '" no encontrada en ' + baseKey);
+  var data = sh.getDataRange().getDisplayValues();
+  if (data.length <= 1) return [];
+  Logger.log('[BASE-ONLY] leerHoja ' + baseKey + ': LEYENDO SHEETS (' + data.length + ' filas, ' + data[0].length + ' cols)');
+  var resultado = leerHojaBase(data, cfg, baseKey);
+  setToCache(baseKey, 'base', resultado);
+  Logger.log('[PERF] leerHoja ' + baseKey + ': ' + resultado.length + ' empleados (' + (new Date().getTime() - _t0lh) + 'ms)');
+  return resultado;
+}
+
+function leerHojaBase_raw(baseKey) {
+  // Intentar cache primero
+  var cached = getFromCache(baseKey, 'base');
+  if (cached && !cached._fallback && Array.isArray(cached)) {
+    // V65-FIX: Re-poblar _wcBPsSession desde datos cacheados
+    // Sin esto, el filtro WC en getEquipoRealBPs no tiene datos cuando se usa cache
+    if (cached._wcExcludedBPs && cached._wcExcludedBPs.length > 0) {
+      cached._wcExcludedBPs.forEach(function(bp) { _wcBPsSession[bp] = true; });
+      _log(2, '[V65-WC-CACHE] ' + baseKey + ': restaurados ' + cached._wcExcludedBPs.length + ' WC BPs desde cache a _wcBPsSession (total sesion=' + Object.keys(_wcBPsSession).length + ')');
+    }
+    return cached;
+  }
+  // Si no hay cache o es fallback, leer directamente
+  return leerHoja(baseKey, 'base');
+}
+
+function leerHojaBase(data, cfg, baseKey) {
+  var headerRow = data[0];
+
+  // V28b: DIAGNOSTICO — verificar que las columnas de jerarquía están cubiertas
+  var totalCols = headerRow ? headerRow.length : 0;
+  var maxHierCol = Math.max(cfg.director||0, cfg.gerenteSr||0, cfg.ejecutivo||0,
+    cfg.subgerente||0, cfg.jefeDepartamento||0, cfg.jefeArea||0, cfg.jefeDirecto||0);
+  if (maxHierCol >= totalCols) {
+    _log('[V0-HIER WARNING] leerHojaBase ' + baseKey + ': COLUMNAS JERARQUIA FUERA DE RANGO! maxCol=' + maxHierCol + ' pero solo hay ' + totalCols + ' cols. Jerarquia sera VACIA para todos.');
+  } else {
+    _log('[V0-HIER] leerHojaBase ' + baseKey + ': columnas OK (maxHierCol=' + maxHierCol + ', totalCols=' + totalCols + ')');
+  }
+  
+  // V100-CLEAN: Diagnóstico UNIVERSAL eliminado (antes era solo NAM hardcoded).
+  // El diagnóstico real se hace después de descubrirColumnasJerarquia (ver V100-HIER-DISCOVERY).
+
+  // DESCUBRIMIENTO DINÁMICO: usar BIBLIOTECA FINAL como fuente primaria, CURSOS_POR_BASE como fallback
+  var bibPorBase = getBibliotecaPorBase();
+  var cursosBib = bibPorBase[baseKey] || [];
+  var cursosFallback = CURSOS_POR_BASE[baseKey] || [];
+  
+  // Merge: biblioteca + fallback (sin duplicar)
+  // V39: CURSOS_POR_BASE headers are manually configured and more reliable.
+  // When both sources have the same course, use the fallback's header.
+  var cursosConfig = [];
+  var siglasYaVistas = {};
+  cursosBib.forEach(function(c) {
+    var key = normalizarSigla(c.id || c.header);
+    if (!siglasYaVistas[key]) {
+      siglasYaVistas[key] = true;
+      cursosConfig.push(c);
+    }
+  });
+  cursosFallback.forEach(function(c) {
+    var key = normalizarSigla(c.id || c.header);
+    if (!siglasYaVistas[key]) {
+      siglasYaVistas[key] = true;
+      cursosConfig.push(c);
+    } else {
+      // V39: Override header from Biblioteca with CURSOS_POR_BASE header (more reliable)
+      // V41: Also override nombre — CURSOS_POR_BASE has canonical names (e.g. "Seguridad de la Carga y el Correo Aéreo")
+      for (var cci = 0; cci < cursosConfig.length; cci++) {
+        var ccKey = normalizarSigla(cursosConfig[cci].id || cursosConfig[cci].header);
+        if (ccKey === key) {
+          if (c.header && cursosConfig[cci].header !== c.header) {
+            Logger.log('V41: Override header "' + cursosConfig[cci].header + '" → "' + c.header + '" for curso ' + key);
+            cursosConfig[cci].header = c.header;
+          }
+          if (c.nombre) {
+            Logger.log('V41: Override nombre "' + cursosConfig[cci].nombre + '" → "' + c.nombre + '" for curso ' + key);
+            cursosConfig[cci].nombre = c.nombre;
+          }
+          break;
+        }
+      }
+    }
+  });
+  
+  var cursosDescubiertos = descubrirColumnasCursos(headerRow, cursosConfig, baseKey);
+  
+  // V21 FIX: Filtrar cursos descubiertos contra whitelist COURSES_BY_BASE
+  // Esto evita que cursos fantasma (ej: "RM") o cursos de otra base (ej: "PSICOACTIVAS" para Chile)
+  // aparezcan en la tabla admin y contaminen los KPIs
+  var whitelist = COURSES_BY_BASE[baseKey] || [];
+  if (whitelist.length > 0) {
+    var antesFilter = cursosDescubiertos.length;
+    cursosDescubiertos = cursosDescubiertos.filter(function(cd) {
+      var sigNorm = normalizarSigla(cd.id);
+      return whitelist.indexOf(cd.id) >= 0 || whitelist.indexOf(sigNorm) >= 0;
+    });
+    if (cursosDescubiertos.length < antesFilter) {
+      _log('leerHojaBase ' + baseKey + ': WHITELIST FILTER: ' + antesFilter + ' -> ' + cursosDescubiertos.length + ' cursos (excluidos: ' + (antesFilter - cursosDescubiertos.length) + ')');
+    }
+  }
+  
+  _log('leerHojaBase ' + baseKey + ': ' + cursosDescubiertos.length + '/' + cursosConfig.length + ' cursos en encabezados (Biblioteca: ' + cursosBib.length + ', Fallback: ' + cursosFallback.length + ')');
+
+  // DESCUBRIMIENTO COLUMNA HABILITACION (Estatus Funcionario / Status Habilitacion)
+  var habColIdx = descubrirColumnaHabilitacion(headerRow, baseKey);
+  var usandoColumnaDirecta = (habColIdx >= 0);
+  _log('leerHojaBase ' + baseKey + ': HABILITACION_SOURCE=' + (usandoColumnaDirecta ? 'COLUMN (col ' + habColIdx + ' = "' + (headerRow[habColIdx] || '') + '")' : 'CALCULATED'));
+
+  // V35: Descubrir columna Posición/Función por encabezado (no índice fijo)
+  var posicionColDescubierta = descubrirColumnaPosicion(headerRow, baseKey);
+  var posicionCol = posicionColDescubierta;
+  // Fallback: usar cfg.posicion si la descubierta no fue encontrada
+  if (posicionCol < 0 && cfg.posicion >= 0) posicionCol = cfg.posicion;
+  _log('[V6-POSICION] ' + baseKey + ': posicionCol=' + posicionCol + ' (descubierta=' + posicionColDescubierta + ' fallback_cfg=' + (cfg.posicion >= 0 ? cfg.posicion : 'N/A') + ' header="' + (posicionCol >= 0 ? (headerRow[posicionCol] || '') : 'N/A') + '")');
+
+  // V49: Descubrir columna NEGOCIO por encabezado
+  var negocioCol = descubrirColumnaNegocio(headerRow, baseKey);
+  // V52: Fallback a cfg.negocio si descubrimiento dinámico falla
+  if (negocioCol < 0 && cfg.negocio >= 0) negocioCol = cfg.negocio;
+  _log('[V2-NEGOCIO] ' + baseKey + ': negocioCol=' + negocioCol + (negocioCol >= 0 ? ' header="' + (headerRow[negocioCol] || '') + '"' : ' (no encontrada — negocio quedará vacío para esta base)'));
+  // V51: Log diagnóstico para verificar que negocio ≠ posicion
+  if (negocioCol >= 0 && posicionCol >= 0) {
+    Logger.log('[FORECAST-DBG] ' + baseKey + ': negocioCol=' + negocioCol + '("' + (headerRow[negocioCol]||'') + '") vs posicionCol=' + posicionCol + '("' + (headerRow[posicionCol]||'') + '") → ' + (negocioCol === posicionCol ? 'COLISION!' : 'OK distintas'));
+  }
+  var _negDiagCount = 0;
+
+  // V80: DESCUBRIMIENTO COLUMNA ZONA (NAM)
+  var zonaCol = descubrirColumnaZona(headerRow, baseKey);
+  if (zonaCol < 0 && cfg.zona >= 0) zonaCol = cfg.zona;
+
+  // V92: DESCUBRIMIENTO DINAMICO COLUMNAS JERARQUIA
+  // Escanea encabezados para detectar columnas de SUPERVISOR, JEFE AREA, JEFE DEPARTAMENTO,
+  // SUBGERENTE, GERENTE, GERENTE SR, DIRECTOR. Trabaja sobre copia para no modificar CONFIG_BASE.
+  var cfgHier = {};
+  for (var _ck in cfg) cfgHier[_ck] = cfg[_ck];
+  cfgHier = descubrirColumnasJerarquia(headerRow, cfgHier, baseKey);
+
+  // V100-CLEAN: Diagnóstico UNIVERSAL de columnas de jerarquía descubiertas (TODAS las bases)
+  _auditLog('[V100-HIER-DISCOVERY] base=' + baseKey + ' totalCols=' + totalCols +
+    ' | JD=' + cfgHier.jefeDirecto + '("' + (cfgHier.jefeDirecto >= 0 ? (headerRow[cfgHier.jefeDirecto] || '') : '-') + '")' +
+    ' JA=' + cfgHier.jefeArea + '("' + (cfgHier.jefeArea >= 0 ? (headerRow[cfgHier.jefeArea] || '') : '-') + '")' +
+    ' JDPTO=' + cfgHier.jefeDepartamento + '("' + (cfgHier.jefeDepartamento >= 0 ? (headerRow[cfgHier.jefeDepartamento] || '') : '-') + '")' +
+    ' SG=' + cfgHier.subgerente + '("' + (cfgHier.subgerente >= 0 ? (headerRow[cfgHier.subgerente] || '') : '-') + '")' +
+    ' G=' + cfgHier.ejecutivo + '("' + (cfgHier.ejecutivo >= 0 ? (headerRow[cfgHier.ejecutivo] || '') : '-') + '")' +
+    ' GSR=' + cfgHier.gerenteSr + '("' + (cfgHier.gerenteSr >= 0 ? (headerRow[cfgHier.gerenteSr] || '') : '-') + '")' +
+    ' DIR=' + cfgHier.director + '("' + (cfgHier.director >= 0 ? (headerRow[cfgHier.director] || '') : '-') + '")' +
+    ' | BUILD=' + BUILD_GS);
+  // Usar cfgHier para jerarquia, cfg para todo lo demas
+  var _hierCfg = {
+    jefeDirecto: cfgHier.jefeDirecto, jefeArea: cfgHier.jefeArea,
+    jefeDepartamento: cfgHier.jefeDepartamento, subgerente: cfgHier.subgerente,
+    ejecutivo: cfgHier.ejecutivo, gerenteSr: cfgHier.gerenteSr, director: cfgHier.director
+  };
+  
+  // DESCUBRIMIENTO COLUMNA STATUS ACTIVO (RAMPA: DISCOVER_WHITELIST)
+  if (STATUS_COLUMNS[baseKey] && STATUS_COLUMNS[baseKey].logic === 'DISCOVER_WHITELIST') {
+    var discoveredActiveCol = descubrirColumnaEstadoActivo(headerRow, data, baseKey);
+    if (discoveredActiveCol >= 0) {
+      // Actualizar config en runtime para que esEmpleadoActivo use la columna descubierta
+      STATUS_COLUMNS[baseKey] = { col: discoveredActiveCol, logic: 'WHITELIST', whitelist: STATUS_COLUMNS[baseKey].whitelist || ['ACTIVO'] };
+      _log('leerHojaBase ' + baseKey + ': STATUS_COLUMNS actualizado -> col=' + discoveredActiveCol + ' logic=WHITELIST whitelist=ACTIVO');
+    } else {
+      _log('leerHojaBase ' + baseKey + ': WARNING - No se descubrio columna de status activo. Se aceptaran TODOS los empleados con BP valido.');
+      STATUS_COLUMNS[baseKey] = { col: -1, logic: 'ALL_ACTIVE' };
+    }
+  }
+
+  // Log de las primeras 3 filas para diagnóstico
+  if (data.length > 1) {
+    _log('  Primera fila de datos (fila 2):');
+    _log('    BP(idx' + cfg.bp + ')="' + (data[1][cfg.bp] || '') + '"');
+    _log('    Nombre(idx' + cfg.nombre + ')="' + (data[1][cfg.nombre] || '') + '"');
+    _log('    Status(idx' + cfg.status + ')="' + (cfg.status >= 0 ? (data[1][cfg.status] || '') : 'N/A') + '"');
+    _log('    Correo(idx' + cfg.correo + ')="' + (cfg.correo >= 0 ? (data[1][cfg.correo] || '') : 'N/A') + '"');
+  }
+
+  // ═══ REGLA MAESTRA: Cross-reference STATUS REALIZACION desde PLAN ═══
+  // Si PLAN dice OK/APROBADO para un curso, marcar como COMPLETADO aunque BASE diga VENCIDO/PROGRAMAR
+  var statusRealizMap = {};
+  var reglaMaestraExcluidos = 0;
+  try { statusRealizMap = leerStatusRealizacionPlan(baseKey); } catch(srErr) {
+    _log('leerHojaBase ' + baseKey + ': WARN no se pudo leer STATUS REALIZACION: ' + srErr.message);
+  }
+  var srMapSize = Object.keys(statusRealizMap).length;
+  _log('leerHojaBase ' + baseKey + ': STATUS_REALIZACION cross-ref map size=' + srMapSize);
+
+  var empleados = [];
+  var filasActivas = 0, filasInactivas = 0;
+  // V30d-I: Log extra para diagnóstico de RAMPA rowsActivos=0
+  var filasConBP = 0, filasSinBP = 0;
+  // V36: Track HCC employees BEFORE active filter for accurate count audit
+  var hccRawCount = 0;
+  var hccFilteredOut = [];
+  // V64: Track WC-excluded BPs for cross-base exclusion
+  var wcExcludedBPs = [];
+
+  mainLoop: for (var i = 1; i < data.length; i++) {
+    var row = data[i];
+    var bp = normBP(row[cfg.bp]);
+    if (!bp || bp === '0' || bp.length < 3) { filasSinBP++; continue; }
+    filasConBP++;
+
+    // V36: Check HCC BEFORE active filter — needed for accurate totalHCC audit
+    var areaPreCheck = cfg.area >= 0 ? normKey(row[cfg.area] || '') : '';
+    var isHCCPreCheck = areaPreCheck.indexOf('HCC') >= 0;
+    if (isHCCPreCheck) hccRawCount++;
+
+    // V88: NAM ahora lee STATUS de col P (idx 15) con WHITELIST ['ACTIVO','NUEVO INGRESO']
+    // Mantener tracking de WC BPs para exclusión cross-base
+    if (baseKey === 'NAM') {
+      var _wcTestVal = normKey(row[15] || '');
+      if (_wcTestVal.indexOf('WC') >= 0) {
+        filasInactivas++;
+        wcExcludedBPs.push(bp);
+        _wcBPsSession[bp] = true;
+        if (filasInactivas <= 3) {
+          _auditLog('[V88-NAM-WC] Excluido por col15(STATUS): BP=' + bp + ' nombre=' + (row[cfg.nombre] || '') + ' status="' + _wcTestVal + '"');
+        }
+        continue mainLoop;
+      }
+    }
+
+    // FILTRO ACTIVOS: usar esEmpleadoActivo centralizado (BLACKLIST)
+    if (!esEmpleadoActivo(row, baseKey)) {
+      filasInactivas++;
+      // V64-DEBUG: Para NAM, logear TODAS las columnas de status para encontrar dónde está WC
+      if (baseKey === 'NAM' && LOG_LEVEL >= 3) {
+        var _wcVal18 = normKey(row[18] || '');
+        var _wcVal21 = cfg.status >= 0 ? normKey(row[cfg.status] || '') : '';
+        var _wcVal14 = normKey(row[14] || '');
+        var _wcVal15 = normKey(row[15] || '');
+        var _wcVal16 = normKey(row[16] || '');
+        var _wcVal17 = normKey(row[17] || '');
+        var _wcVal20 = normKey(row[20] || '');
+        var _wcVal22 = normKey(row[22] || '');
+        if (filasInactivas <= 5) {
+          _log('[V4-NAM-WC-EXCL] BP=' + bp + ' nombre=' + (row[cfg.nombre] || '') +
+            ' col14="' + _wcVal14 + '" col15="' + _wcVal15 + '" col16="' + _wcVal16 +
+            '" col17="' + _wcVal17 + '" col18="' + _wcVal18 + '" col20="' + _wcVal20 +
+            '" col21="' + _wcVal21 + '" col22="' + _wcVal22 + '"');
+        }
+      }
+      // V36: Log HCC employees excluded by active filter
+      if (isHCCPreCheck) {
+        var statusPreCheck = cfg.status >= 0 ? (row[cfg.status] || '').toString().trim() : 'N/A';
+        var nombrePreCheck = (row[cfg.nombre] || '').toString().trim();
+        hccFilteredOut.push(bp + '|' + nombrePreCheck + '|status=' + statusPreCheck + '|area=' + (row[cfg.area] || ''));
+      }
+      continue;
+    }
+    filasActivas++;
+    
+    // V64-DEBUG: Log primeros 5 empleados NAM ACTIVOS con sus columnas status para auditoría
+    if (baseKey === 'NAM' && filasActivas <= 5 && LOG_LEVEL >= 3) {
+      _log('[V4-NAM-ACTIVO] BP=' + bp + ' nombre=' + (row[cfg.nombre] || '') +
+        ' col18="' + normKey(row[18] || '') + '" col21(status)="' + (cfg.status >= 0 ? normKey(row[cfg.status] || '') : 'N/A') + '"');
+    }
+    
+    // Flag: cuenta para KPI? (excluye NUEVO INGRESO)
+    var cuentaKPI = esEmpleadoKPI(row, baseKey);
+    // V37: Flag nuevo ingreso
+    var _esNuevoIngreso = esNuevoIngreso(row, baseKey);
+
+    // NOMBRE: siempre columna C (campo nombre), ya viene completo
+    var nombreC = (row[cfg.nombre] || '').toString().trim();
+    if (!nombreC) continue;
+
+    // DATOS DEL EMPLEADO (columnas fijas segun la base)
+    var correo = cfg.correo >= 0 ? (row[cfg.correo] || '').toString().trim() : '';
+    var pais = cfg.pais >= 0 ? (row[cfg.pais] || '').toString().trim() : '';
+    // CHILE: pais=-1 pero usa columna L (idx 11) = REGION (ej: SCL)
+    if (!pais && baseKey === 'CHILE') { pais = (row[11] || '').toString().trim(); }
+    // V63-FIX1: PHH/LATAM — usar SOLO columna País (col I, idx 8). Sin fallback a Región.
+    // Normalizar códigos conocidos y marcar vacíos como "Sin país".
+    if (baseKey === 'LATAM') {
+      var _paisUpper = pais.toUpperCase();
+      if (_paisUpper === 'CO') pais = 'Colombia';
+      else if (_paisUpper === 'BO') pais = 'Bogotá';
+      else if (_paisUpper === 'UIO') pais = 'Quito';
+      if (!pais) pais = 'Sin país';
+    }
+    var area = cfg.area >= 0 ? (row[cfg.area] || '').toString().trim() : '';
+    var posicion = posicionCol >= 0 ? (row[posicionCol] || '').toString().trim() : '';
+    var negocio = negocioCol >= 0 ? (row[negocioCol] || '').toString().trim() : '';
+    // V80: Zona (NAM)
+    var zona = zonaCol >= 0 ? (row[zonaCol] || '').toString().trim() : '';
+    // V52: areaCanon — campo canónico para filtro "Área" unificado entre bases
+    //   PHH (LATAM) / Training CL (CHILE): usa columna AREA
+    //   RAMPA: usa columna ZONA (mapeada como area en cfg)
+    //   CONTROL NORTE (NAM): usa columna NEGOCIO
+    var areaCanon = '';
+    if (baseKey === 'LATAM' || baseKey === 'CHILE') {
+      areaCanon = area;
+    } else if (baseKey === 'RAMPA') {
+      areaCanon = area;
+    } else if (baseKey === 'NAM') {
+      areaCanon = negocio;
+    }
+    // V51: Diagnóstico negocio vs posicion (primeros 3 registros por base)
+    if (_negDiagCount < 3 && (negocio || posicion)) {
+      _log(3, '[FORECAST-DBG] negocio_diag bp=' + bp + ' negocio="' + negocio + '" posicion="' + posicion + '" base=' + baseKey);
+      _negDiagCount++;
+    }
+    // JERARQUIA V92: 7 niveles con descubrimiento dinamico + limpieza de basura (#N/A, ERROR, etc.)
+    var jefeDirecto      = _hierCfg.jefeDirecto      >= 0 ? limpiarValorJerarquia(row[_hierCfg.jefeDirecto])      : '';
+    var jefeArea         = _hierCfg.jefeArea         >= 0 ? limpiarValorJerarquia(row[_hierCfg.jefeArea])         : '';
+    var jefeDepartamento = _hierCfg.jefeDepartamento >= 0 ? limpiarValorJerarquia(row[_hierCfg.jefeDepartamento]) : '';
+    var subgerente       = _hierCfg.subgerente       >= 0 ? limpiarValorJerarquia(row[_hierCfg.subgerente])       : '';
+    var gerente          = _hierCfg.ejecutivo        >= 0 ? limpiarValorJerarquia(row[_hierCfg.ejecutivo])        : '';
+    var gerenteSr        = _hierCfg.gerenteSr        >= 0 ? limpiarValorJerarquia(row[_hierCfg.gerenteSr])        : '';
+    var director         = _hierCfg.director         >= 0 ? limpiarValorJerarquia(row[_hierCfg.director])         : '';
+
+    // CURSOS: columnas descubiertas dinamicamente
+    var cursos = [];
+    var habilitados = 0, porVencer = 0, vencidos = 0, programar = 0;
+    // KPI: solo cursos en whitelist, excluir N/A del denominador
+    var whitelist = COURSES_BY_BASE[baseKey] || [];
+    var kpiOK = 0, kpiTotal = 0;
+    
+    for (var c = 0; c < cursosDescubiertos.length; c++) {
+      var cc = cursosDescubiertos[c];
+
+      var status = cc.statusCol !== null ? normKey(row[cc.statusCol]) : '';
+      // V40: Enhanced PSICO diagnostics (first 10 rows only to avoid log spam)
+      var _isPsicoCurso = (cc.id === 'PSICO' || (cc.sigla || '').indexOf('PSICO') >= 0);
+      if (_isPsicoCurso && i <= 10) {
+        var _rawStatus = cc.statusCol !== null ? (row[cc.statusCol] || '') : 'NO_COL';
+        var _rawVenc = cc.vencCol !== null ? (row[cc.vencCol] || '') : 'NO_COL';
+        var _rawHab = cc.habCol !== null ? (row[cc.habCol] || '') : 'NO_COL';
+        var _rawDays = cc.daysCol !== null ? (row[cc.daysCol] || '') : 'NO_COL';
+        _log(3, '[V40-PSICO-ROW] BP=' + bp + ' | status_raw="' + _rawStatus + '" | venc_raw="' + _rawVenc + '" | hab_raw="' + _rawHab + '" | days_raw="' + _rawDays + '"');
+      }
+      // V38 FIX: When statusCol is null but habCol is set (standalone column),
+      // check if habCol value is a status string instead of a date
+      if (!status && cc.statusCol === null && cc.habCol !== null) {
+        var _habRawForStatus = normKey(row[cc.habCol]);
+        if (_habRawForStatus) {
+          var _testVentana = VENTANA_POR_VENCER[baseKey] || 90;
+          var _testStatus = normalizarStatus(_habRawForStatus, null, _testVentana);
+          if (_testStatus !== 'SIN DATO') {
+            status = _habRawForStatus;
+          }
+        }
+      }
+      var vencimiento = '', diasCalculados = null;
+      if (cc.vencCol !== null) {
+        var fp = parseFechaLatina(row[cc.vencCol]);
+        vencimiento = fp.str;
+        if (fp.dias !== null) diasCalculados = fp.dias;
+      }
+      var dias = null;
+      if (cc.daysCol !== null) {
+        dias = parseDias(row[cc.daysCol]);
+      }
+      if (dias === null && diasCalculados !== null) dias = diasCalculados;
+      var _habRaw = cc.habCol !== null ? (row[cc.habCol] || '') : '';
+      var habilitacion = cc.habCol !== null ? parseFechaLatina(row[cc.habCol]).str : '';
+      // V45d: Debug habilitación — log when raw value exists but parsing fails
+      if (cc.habCol !== null && !habilitacion && _habRaw && String(_habRaw).trim()) {
+        _log(3, '[V45d-HAB-DEBUG] BP=' + bp + ' Curso=' + cc.id + ' | habCol=' + cc.habCol + ' | raw="' + _habRaw + '" | parsed="" | PARSE FAILURE');
+      }
+      var planDate = cc.planCol !== null ? parseFechaLatina(row[cc.planCol]).str : '';
+
+      var ventanaBase = VENTANA_POR_VENCER[baseKey] || 90;
+      var statusNorm = normalizarStatus(status, dias, ventanaBase);
+      
+      // ═══ REGLA MAESTRA: Si PLAN dice STATUS REALIZACION = OK → override a COMPLETADO ═══
+      var statusRealizacion = null;
+      var srKey = bp + '|' + normalizarSigla(cc.id);
+      if (statusRealizMap[srKey]) {
+        statusRealizacion = statusRealizMap[srKey];
+        if (statusNorm !== 'COMPLETADO' && statusNorm !== 'SIN DATO' && statusNorm !== 'NO_APLICA') {
+          // AUDIT LOG: Registrar override de VENCIDO a COMPLETADO para diagnóstico
+          if (statusNorm === 'VENCIDO') {
+            _log(3, 'AUDIT OVERRIDE: BP=' + bp + ' | Nombre=' + nombreC + ' | Curso=' + cc.id + ' | StatusOriginal=VENCIDO | StatusRealizacion=' + statusRealizacion + ' | Override→COMPLETADO | Base=' + baseKey);
+          }
+          statusNorm = 'COMPLETADO';
+          reglaMaestraExcluidos++;
+        }
+      }
+      
+      if (statusNorm === 'HABILITADO') habilitados++;
+      else if (statusNorm === 'POR VENCER') porVencer++;
+      else if (statusNorm === 'PROGRAMAR') programar++;
+      else if (statusNorm === 'VENCIDO') vencidos++;
+
+      cursos.push({
+        sigla: cc.id, nombre: cc.nombre,
+        status: statusNorm, vencimiento: vencimiento, dias: dias,
+        planDate: planDate, habilitacion: habilitacion,
+        statusRealizacion: statusRealizacion
+      });
+      // V40: Log final PSICO status for first rows
+      if (_isPsicoCurso && i <= 10) {
+        _log(3, '[V40-PSICO-ROW] BP=' + bp + ' | statusNorm="' + statusNorm + '" | venc="' + vencimiento + '" | dias=' + dias + ' | INCLUIDO=' + (statusNorm !== 'SIN DATO' && statusNorm !== 'NO_APLICA'));
+      }
+      
+      // KPI whitelist: solo contar si el curso esta en la whitelist
+      // Excluir SIN DATO, COMPLETADO, NO_APLICA y PROGRAMAR del denominador
+      // V40: PROGRAMAR NO cuenta para KPI (ni numerador ni denominador)
+      var enWhitelist = whitelist.indexOf(cc.id) >= 0;
+      if (enWhitelist && statusNorm !== 'SIN DATO' && statusNorm !== 'COMPLETADO' && statusNorm !== 'NO_APLICA' && statusNorm !== 'PROGRAMAR') {
+        kpiTotal++;
+        // V21: POR VENCER cuenta como cumplimiento (persona aun vigente/habilitada)
+        // normalizarStatus ya reclasifica POR VENCER con fecha pasada como VENCIDO
+        if (statusNorm === 'HABILITADO' || statusNorm === 'POR VENCER') kpiOK++;
+      }
+    }
+
+    // V30d-I: Agregar cursos de cursosConfig que NO fueron descubiertos en las columnas
+    // Esto asegura que cada persona tenga TODOS los cursos esperados (~13 para LATAM)
+    // Los cursos sin columna aparecen como "SIN DATO" en el forecast
+    for (var cnd = 0; cnd < cursosConfig.length; cnd++) {
+      var ccNd = cursosConfig[cnd];
+      var siglaNd = normalizarSigla(ccNd.id || ccNd.header);
+      var yaExiste = false;
+      for (var cex = 0; cex < cursos.length; cex++) {
+        if (normalizarSigla(cursos[cex].sigla) === siglaNd) { yaExiste = true; break; }
+      }
+      if (!yaExiste) {
+        cursos.push({
+          sigla: ccNd.id || ccNd.header, nombre: ccNd.nombre || ccNd.header,
+          status: 'SIN DATO', vencimiento: '', dias: null,
+          planDate: '', habilitacion: '',
+          statusRealizacion: null
+        });
+      }
+    }
+
+    // V37: Filtrar cursos ocultos (PRE, SIN) de TODAS las vistas
+    if (CURSOS_OCULTOS.length > 0) {
+      var cursosAntes = cursos.length;
+      cursos = cursos.filter(function(c) {
+        var siglaCheck = normalizarSigla(c.sigla);
+        for (var _co = 0; _co < CURSOS_OCULTOS.length; _co++) {
+          if (siglaCheck === normalizarSigla(CURSOS_OCULTOS[_co])) return false;
+        }
+        return true;
+      });
+      // Recalcular contadores si se filtraron cursos
+      if (cursos.length < cursosAntes) {
+        habilitados = 0; porVencer = 0; vencidos = 0; programar = 0; kpiTotal = 0; kpiOK = 0;
+        cursos.forEach(function(c) {
+          if (c.status === 'HABILITADO') habilitados++;
+          else if (c.status === 'POR VENCER') porVencer++;
+          else if (c.status === 'PROGRAMAR') programar++;
+          else if (c.status === 'VENCIDO') vencidos++;
+          var enWL = whitelist.indexOf(normalizarSigla(c.sigla)) >= 0 || whitelist.indexOf(c.sigla) >= 0;
+          // V40: PROGRAMAR excluido del KPI (ni numerador ni denominador)
+          if (enWL && c.status !== 'SIN DATO' && c.status !== 'COMPLETADO' && c.status !== 'NO_APLICA' && c.status !== 'PROGRAMAR') {
+            kpiTotal++;
+            if (c.status === 'HABILITADO' || c.status === 'POR VENCER') kpiOK++;
+          }
+        });
+      }
+    }
+
+    // V72: RAMPA — filtrar cursos no operativos (Amadeus por defecto)
+    if (baseKey === 'RAMPA' && !isAmadeusEnabledRAMPA()) {
+      var cursosAntesNoOp = cursos.length;
+      cursos = cursos.filter(function(c) {
+        var siglaCheck = normalizarSigla(c.sigla);
+        for (var _noi = 0; _noi < RAMPA_CURSOS_NO_OPERATIVOS.length; _noi++) {
+          if (siglaCheck === normalizarSigla(RAMPA_CURSOS_NO_OPERATIVOS[_noi])) return false;
+        }
+        return true;
+      });
+      if (cursos.length < cursosAntesNoOp) {
+        habilitados = 0; porVencer = 0; vencidos = 0; programar = 0; kpiTotal = 0; kpiOK = 0;
+        cursos.forEach(function(c) {
+          if (c.status === 'HABILITADO') habilitados++;
+          else if (c.status === 'POR VENCER') porVencer++;
+          else if (c.status === 'PROGRAMAR') programar++;
+          else if (c.status === 'VENCIDO') vencidos++;
+          var enWL = whitelist.indexOf(normalizarSigla(c.sigla)) >= 0 || whitelist.indexOf(c.sigla) >= 0;
+          if (enWL && c.status !== 'SIN DATO' && c.status !== 'COMPLETADO' && c.status !== 'NO_APLICA' && c.status !== 'PROGRAMAR') {
+            kpiTotal++;
+            if (c.status === 'HABILITADO' || c.status === 'POR VENCER') kpiOK++;
+          }
+        });
+        if (i <= 3) _log('[V2-RAMPA-NOOPS] BP=' + bp + ': filtrado ' + (cursosAntesNoOp - cursos.length) + ' cursos no operativos');
+      }
+    }
+
+    var totalCursos = cursos.length;
+    if (totalCursos === 0) {
+      // V36: Track HCC employees excluded by zero courses (active but no course columns found)
+      var isHCCZeroCursos = cfg.area >= 0 ? (normKey(row[cfg.area] || '').indexOf('HCC') >= 0) : false;
+      if (isHCCZeroCursos) {
+        hccFilteredOut.push(bp + '|' + nombreC + '|status=ACTIVO|motivo=totalCursos=0');
+      }
+      continue;
+    }
+
+    // DETECCION HCC
+    var esHCC = area ? (normKey(area).indexOf('HCC') >= 0) : false;
+    
+    // HABILITACION GENERAL: fuente de verdad por base (alineado con Looker)
+    // Prioridad: columna descubierta > calcular desde cursos
+    var habPer;
+    if (usandoColumnaDirecta) {
+      // Leer directamente de la columna descubierta (Estatus Funcionario / Status Habilitacion)
+      var colVal = normKey(row[habColIdx]);
+      // Matching robusto: primero chequear INHABILITADO, luego HABILITADO
+      var esInhab = (colVal.indexOf('INHABILITAD') >= 0 || colVal.indexOf('NO HABILITAD') >= 0 || colVal === 'NH');
+      var esHab = !esInhab && (colVal.indexOf('HABILITAD') >= 0 || colVal === 'H' || colVal === 'OK');
+      // tieneAlerta y cursos se calculan aparte para detalle del modal
+      var cursosAplic = calcularHabilitacionPersona(cursos);
+      habPer = {
+        habilitacionGeneral: esInhab ? 'INHABILITADO' : esHab ? 'HABILITADO' : 'SIN_KPI',
+        tieneAlerta: cursosAplic.pvAplicables > 0,
+        cursosAplicables: cursosAplic.cursosAplicables,
+        vencidosAplicables: cursosAplic.vencidosAplicables,
+        pvAplicables: cursosAplic.pvAplicables,
+        okAplicables: cursosAplic.okAplicables
+      };
+    } else {
+      // Fallback: Calcular desde cursos individuales
+      habPer = calcularHabilitacionPersona(cursos);
+    }
+    
+    // cumplimiento = KPI% (whitelist) si cuenta para KPI, sino 0
+    // V42: Fórmula unificada: (HAB + PV) / (HAB + PV + VENC). PROGRAMAR excluido.
+    var cumplimiento = 0;
+    if (cuentaKPI && kpiTotal > 0) {
+      cumplimiento = Math.round((kpiOK / kpiTotal) * 100);
+    } else if (!cuentaKPI) {
+      cumplimiento = 0;
+    } else if (totalCursos > 0) {
+      // V42: fallback usa fórmula unificada (excluye PROGRAMAR del denominador)
+      var denomFallback = habilitados + porVencer + vencidos;
+      cumplimiento = denomFallback > 0 ? Math.round(((habilitados + porVencer) / denomFallback) * 100) : 100;
+    }
+
+    // Determinar motivo de inhabilitacion si viene de la columna directa y no tiene cursos vencidos
+    var inhabilitacionMotivo = '';
+    if (usandoColumnaDirecta && habPer.habilitacionGeneral === 'INHABILITADO' && vencidos === 0) {
+      inhabilitacionMotivo = 'Estatus de Funcionario (columna de la hoja base)';
+    }
+
+    // V69: Status raw del empleado para debugging en frontend
+    var _statusConfig = STATUS_COLUMNS[baseKey] || {};
+    var _statusRawEmpl = (_statusConfig.col >= 0 && _statusConfig.col < row.length) ? (row[_statusConfig.col] || '').toString().trim() : '';
+    // V72e: Store BASE column value (col 18 for NAM) for WC safety check from cache
+    var _statusBase = (baseKey === 'NAM' && row.length > 18) ? (row[18] || '').toString().trim() : '';
+
+    empleados.push({
+      bp: bp, nombre: nombreC, correo: correo, pais: pais, area: area, posicion: posicion, negocio: negocio, areaCanon: areaCanon, zona: zona,
+      jefeDirecto: jefeDirecto, jefeArea: jefeArea,
+      jefeDepartamento: jefeDepartamento, subgerente: subgerente,
+      gerente: gerente, gerenteSr: gerenteSr, director: director,
+      baseRegion: baseKey, esHCC: esHCC,
+      cuentaKPI: cuentaKPI,
+      esNuevoIngreso: _esNuevoIngreso,
+      statusRaw: _statusRawEmpl,
+      statusBase: _statusBase,
+      cursos: cursos, totalCursos: totalCursos, habilitados: habilitados,
+      porVencer: porVencer, vencidos: vencidos, programar: programar,
+      pendientes: totalCursos - habilitados,
+      cumplimiento: cumplimiento,
+      semaforo: calcularSemaforo(vencidos, porVencer),
+      habilitacionGeneral: habPer.habilitacionGeneral,
+      tieneAlerta: habPer.tieneAlerta,
+      cursosAplicables: habPer.cursosAplicables,
+      vencidosAplicables: habPer.vencidosAplicables,
+      pvAplicables: habPer.pvAplicables,
+      programarAplicables: habPer.programarAplicables,
+      okAplicables: habPer.okAplicables,
+      inhabilitacionMotivo: inhabilitacionMotivo
+    });
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  // AUDIT LOG: Verificar cifras contra Looker/Sheets
+  // ═══════════════════════════════════════════════════════════════
+  var auditHab = 0, auditInhab = 0, auditSinKPI = 0, auditAlerta = 0;
+  var cursoAudit = {}; // { sigla: { OK:0, PV:0, VENC:0, SD:0, TOTAL:0 } }
+  empleados.forEach(function(e) {
+    if (e.habilitacionGeneral === 'HABILITADO') { auditHab++; if (e.tieneAlerta) auditAlerta++; }
+    else if (e.habilitacionGeneral === 'INHABILITADO') auditInhab++;
+    else auditSinKPI++;
+    // Audit cursos por tipo
+    (e.cursos || []).forEach(function(c) {
+      if (!cursoAudit[c.sigla]) cursoAudit[c.sigla] = { OK: 0, PV: 0, PROGRAMAR: 0, VENC: 0, SD: 0, COMP: 0, NA: 0, TOTAL: 0 };
+      var ca = cursoAudit[c.sigla];
+      ca.TOTAL++;
+      if (c.status === 'HABILITADO') ca.OK++;
+      else if (c.status === 'POR VENCER') ca.PV++;
+      else if (c.status === 'PROGRAMAR') ca.PROGRAMAR++;
+      else if (c.status === 'VENCIDO') ca.VENC++;
+      else if (c.status === 'COMPLETADO') ca.COMP++;
+      else if (c.status === 'NO_APLICA') ca.NA++;
+      else ca.SD++;
+    });
+  });
+  _log(2, '═══ AUDIT ' + baseKey + ' ═══');
+  _log(3, '  Fuente HAB: ' + (usandoColumnaDirecta ? 'COLUMNA "' + (headerRow[habColIdx] || '') + '" (idx=' + habColIdx + ')' : 'CALCULADO desde cursos'));
+  _log(3, '  Fuente ACTIVO: col=' + (STATUS_COLUMNS[baseKey] ? STATUS_COLUMNS[baseKey].col : 'N/A') + ' logic=' + (STATUS_COLUMNS[baseKey] ? STATUS_COLUMNS[baseKey].logic : 'N/A'));
+  _log(3, '  REGLA MAESTRA: ' + reglaMaestraExcluidos + ' cursos reclasificados como COMPLETADO (STATUS REALIZACION=OK en PLAN, overriding BASE status)');
+  _log(2, '  Activos=' + empleados.length + ' | Hab=' + auditHab + ' | Inhab=' + auditInhab + ' | SinKPI=' + auditSinKPI + ' | Alerta=' + auditAlerta);
+  _log(3, '  CHECK: activos(' + empleados.length + ') = hab(' + auditHab + ') + inhab(' + auditInhab + ') + sinKPI(' + auditSinKPI + ') = ' + (auditHab + auditInhab + auditSinKPI));
+  _log(2, '  Inactivos filtrados=' + filasInactivas);
+  _log('  FilasConBP=' + filasConBP + ' | FilasSinBP=' + filasSinBP + ' | Total=' + (filasConBP + filasSinBP));
+  // V36: Log HCC audit results
+  if (hccRawCount > 0) {
+    var hccActiveCount = 0;
+    empleados.forEach(function(e) { if (e.esHCC) hccActiveCount++; });
+    _log(3, '[V36-HCC-RAW-AUDIT] ' + baseKey + ': hccRawTotal=' + hccRawCount + ' | hccActive=' + hccActiveCount + ' | hccFilteredOut=' + hccFilteredOut.length);
+    if (hccFilteredOut.length > 0) {
+      _log('[V6-HCC-FILTERED-OUT] Employees EXCLUDED from HCC count:');
+      hccFilteredOut.forEach(function(f) { _log('  ' + f); });
+    }
+  }
+  _log('  --- AUDIT CURSOS (por tipo) ---');
+  for (var sigla in cursoAudit) {
+    var ca = cursoAudit[sigla];
+    _log('  ' + sigla + ': OK=' + ca.OK + ' PV=' + ca.PV + ' PROGRAMAR=' + ca.PROGRAMAR + ' VENC=' + ca.VENC + ' COMP=' + ca.COMP + ' NA=' + ca.NA + ' SD=' + ca.SD + ' TOTAL=' + ca.TOTAL + ' | CHECK: ' + (ca.OK + ca.PV + ca.PROGRAMAR + ca.VENC + ca.COMP + ca.NA + ca.SD) + '=' + ca.TOTAL);
+  }
+
+  // V36: Attach HCC raw metadata to array for upstream consumption
+  empleados._hccRawCount = hccRawCount;
+  empleados._hccFilteredOut = hccFilteredOut;
+  // V64: Attach WC-excluded BPs for cross-base exclusion
+  empleados._wcExcludedBPs = wcExcludedBPs;
+  if (wcExcludedBPs.length > 0) {
+    _log('[V4-WC-CROSS] ' + baseKey + ': ' + wcExcludedBPs.length + ' BPs excluidos por WC: ' + wcExcludedBPs.join(', '));
+    // Store in separate cache for cross-base use (survives main cache hit)
+    try { setToCache(baseKey, 'wcBPs', wcExcludedBPs); } catch(e) {}
+  }
+  
+  // V100-CLEAN: Resumen de jerarquía UNIVERSAL (todas las bases, no solo NAM)
+  var _v100ConJD = 0, _v100ConJA = 0, _v100ConGer = 0, _v100SinJerarquia = 0;
+  empleados.forEach(function(e) {
+    if (e.jefeDirecto) _v100ConJD++;
+    if (e.jefeArea) _v100ConJA++;
+    if (e.gerente) _v100ConGer++;
+    if (!e.jefeDirecto && !e.jefeArea && !e.gerente && !e.gerenteSr && !e.director) _v100SinJerarquia++;
+  });
+  _auditLog('[V100-HIER-RESUMEN] base=' + baseKey + ' | total=' + empleados.length +
+    ' | conJD=' + _v100ConJD + ' conJA=' + _v100ConJA + ' conGer=' + _v100ConGer +
+    ' sinJerarquia=' + _v100SinJerarquia +
+    ' | wcExcluidos=' + wcExcludedBPs.length +
+    ' | BUILD=' + BUILD_GS);
+
+  return empleados;
+}
+
+
+/**
+ * Lee hoja de PLANIFICACIÓN y retorna un HASH MAP indexado por BP.
+ * Cada BP contiene un array de cursos. NO incluye datos del empleado (esos vienen de BASE).
+ * OPTIMIZACIÓN: Lee la hoja UNA sola vez → O(n). Elimina bucles anidados O(n^2).
+ * @param {string} baseKey - Clave de la base (CHILE, RAMPA, LATAM, NAM)
+ * @returns {Object} { "BP123": [{sigla, nombre, status, vencimiento, dias, planDate, habilitacion}, ...], ... }
+ */
+/**
+ * BASE-ONLY V26: PLANIFICACIÓN ya no se usa. Esta función retorna vacío.
+ */
+function leerPlanComoMapa(baseKey) {
+  Logger.log('[BASE-ONLY] leerPlanComoMapa ignorado (' + baseKey + '): retorna {}');
+  return {};
+}
+
+function leerHojaPlan(data, cfg, baseKey, bpActivos) {
+  Logger.log('[BASE-ONLY] leerHojaPlan ignorado (' + baseKey + '): retorna []');
+  return [];
+}
+
